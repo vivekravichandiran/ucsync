@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+
+# Local secrets / credentials — never commit
+.databrickscfg
+*.pem
+*.key
+.env
+.env.*
+
+# Generated run artifacts — large, workspace-specific, regenerated on every run.
+# Keep only source, notebooks, configs, and hand-written docs in version control.
+docs/integration-reports/
+docs/local-mode-reports/
+inventory_azure_field_east.html
+docs/expanded-test-run-results.json
+docs/export-all-components-ddl-result.json
+docs/export-ddl-result.json
+docs/fixture-run-results.json
+docs/inventory-permissions-result.json
+docs/inventory-permissions-sheets-no-metadata.xlsx
+docs/inventory-permissions-sheets.xlsx
+docs/local-inventory-storage-sheets-result.json
+docs/local-inventory-storage-sheets.xlsx
+docs/local-mode-test-results.json
+docs/local-mode-verified-results.json
+docs/location-mapping-integration-result.json
+docs/location-mapping-inventory.xlsx
+docs/metric-view-export-result.json
+docs/metric-view-fixture-result.json
+docs/metric-view-import-result.json
+docs/metric-view-validate-result.json
+docs/test-run-results.json
+
+# Any other generated report/xlsx dropped in staging-style folders
+**/export_staging/
+**/export_migrated_staging/
+**/report_staging/

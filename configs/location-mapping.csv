@@ -1,0 +1,2 @@
+source_external_location,source_location,target_external_location,target_location,target_credential
+source_external_data,abfss://source@sourceaccount.dfs.core.windows.net/data,target_external_data,abfss://target@targetaccount.dfs.core.windows.net/data,target_storage_credential

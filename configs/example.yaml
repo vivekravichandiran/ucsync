@@ -1,0 +1,77 @@
+# Verified workspace pair (2026-08-15 probe)
+# Widgets override these values.
+
+source:
+  workspace_url: "https://adb-7405618912789045.5.azuredatabricks.net"
+  secret_scope: "uc-migration"
+  client_id_key: "source-client-id"
+  client_secret_key: "source-client-secret"
+  metastore_id: "008f5578-1fca-4f87-b4fb-ce0545efc00e"
+  workspace_id: "7405618912789045"
+
+target:
+  workspace_url: "https://adb-7405609958717235.15.azuredatabricks.net"
+  secret_scope: "uc-migration"
+  client_id_key: "target-client-id"
+  client_secret_key: "target-client-secret"
+  metastore_id: "5a7903e7-8a04-4b13-987d-bfa7f6b5e906"
+  workspace_id: "7405609958717235"
+
+export:
+  volume_path: "/Volumes/classic_stable_target_vk/uc_sync_ops/uc_exports"
+  audit_table: "classic_stable_target_vk.uc_sync_ops.uc_sync_audit"
+
+reporting:
+  volume_path: "/Volumes/classic_stable_target_vk/uc_sync_ops/uc_exports"
+
+# CSV columns: source_external_location (optional), source_location,
+# target_external_location, target_location, target_credential.
+location_mapping:
+  csv_path: "/Volumes/classic_stable_target_vk/uc_sync_ops/config/location-mapping.csv"
+
+selection:
+  catalogs:
+    - ril_sandbox
+  schemas: []
+  components: ALL
+  # examples:
+  # components: tables
+  # components: tables_views
+  # components: tables+views+functions
+  # include_object_types: [TABLE, VIEW, DYNAMIC_VIEW]
+  include_parents: true
+  exclude_object_types:
+    - MODEL
+  include_regex: []
+  exclude_regex:
+    - ".*_TEMP$"
+
+runtime:
+  execution_mode: "CROSS_WORKSPACE"
+  dry_run: true
+  import_mode: "CREATE_OR_SKIP"
+  allow_destructive_operations: false
+  max_api_workers: 8
+  preserve_refresh_schedule: true
+  initial_refresh: false
+
+# Region move: never reuse source ADLS URLs or credential secrets.
+storage_credentials:
+  classic_stable_westus3_vk:
+    target_credential: classic_stable_target_vk
+
+external_locations:
+  classic_stable_westus3_vk:
+    target_name: classic_stable_target_vk
+    target_url: "abfss://unity-catalog-storage@dbstorageisbf2ky3sgcdc.dfs.core.windows.net/7405609958717235"
+    target_storage_credential: classic_stable_target_vk
+
+managed_storage:
+  default_catalog_storage_root: "abfss://unity-catalog-storage@dbstorageisbf2ky3sgcdc.dfs.core.windows.net/7405609958717235/vkdemo"
+
+principals:
+  "vivek.ravichandiran@databricks.com": "vivek.ravichandiran@databricks.com"
+  "account users": "account users"
+
+workspaces:
+  "7405618912789045": "7405609958717235"
