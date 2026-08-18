@@ -100,6 +100,66 @@ def strip_managed_storage_clauses(text: str, object_type: str = "") -> str:
             rewritten,
             flags=re.IGNORECASE,
         )
+    # Newer runtimes emit a table-level `COLLATION '<name>'` clause in
+    # SHOW CREATE TABLE output (e.g. `USING delta\nCOLLATION 'UTF8_BINARY'`).
+    # Older SQL parsers reject that standalone clause, so replaying the captured
+    # DDL fails with PARSE_SYNTAX_ERROR at 'COLLATION'. Drop it and let the target
+    # use its default collation. Column-/function-level `COLLATE <name>` (no
+    # quotes) is valid and intentionally left untouched.
+    rewritten = re.sub(
+        r"\s+COLLATION\s+'[^']*'",
+        "",
+        rewritten,
+        flags=re.IGNORECASE,
+    )
+    rewritten = re.sub(
+        r'\s+COLLATION\s+"[^"]*"',
+        "",
+        rewritten,
+        flags=re.IGNORECASE,
+    )
+    rewritten = strip_reserved_table_properties(rewritten)
+    return rewritten
+
+
+def strip_reserved_table_properties(text: str) -> str:
+    """Remove reserved/auto-managed ``delta.*`` keys from a TBLPROPERTIES block.
+
+    ``SHOW CREATE TABLE`` emits the table's full property set, including
+    protocol/feature keys and auto-generated row-tracking column names
+    (``delta.rowTracking.materializedRowIdColumnName`` etc.). Replaying those on
+    ``CREATE TABLE`` fails with ``DELTA_UNKNOWN_CONFIGURATION``. These describe
+    source storage internals the target metastore manages itself, so drop every
+    ``delta.*`` property and let the target assign its own. User-defined
+    (non-``delta.``) properties are preserved; if none remain, the whole
+    ``TBLPROPERTIES (...)`` clause is removed.
+    """
+
+    rewritten = str(text or "")
+
+    def _filter_block(match: re.Match[str]) -> str:
+        body = match.group(1)
+        kept: list[str] = []
+        # Entries look like: 'key' = 'value'  (comma-separated, possibly multiline)
+        for key, value in re.findall(
+            r"'([^']*)'\s*=\s*'([^']*)'", body
+        ):
+            if key.lower().startswith("delta."):
+                continue
+            kept.append(f"'{key}' = '{value}'")
+        if not kept:
+            return ""
+        return "TBLPROPERTIES (\n  " + ",\n  ".join(kept) + ")"
+
+    rewritten = re.sub(
+        r"TBLPROPERTIES\s*\(([^)]*)\)",
+        _filter_block,
+        rewritten,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    # Tidy any dangling whitespace left where the clause was removed.
+    rewritten = re.sub(r"[ \t]+\n", "\n", rewritten)
+    rewritten = re.sub(r"\n{3,}", "\n\n", rewritten)
     return rewritten
 
 
