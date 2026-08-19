@@ -50,6 +50,56 @@ class SyncConfig:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+DEFAULT_OPS_VOLUME = "uc_exports"
+
+
+def derive_ops_paths(
+    *,
+    ops_catalog: str = "",
+    ops_schema: str = "",
+    ops_volume: str = DEFAULT_OPS_VOLUME,
+    export_volume_path: str = "",
+    report_volume_path: str = "",
+    audit_table: str = "",
+    state_table: str = "",
+) -> dict[str, str]:
+    """Resolve the four ops-artifact locations from a single ``catalog.schema`` base.
+
+    UCSync writes its operational artifacts to four places: the export volume, the
+    report volume, and the audit + state Delta tables. Historically each was a
+    separate full path with a hardcoded default pointing at one environment's
+    ``classic_stable_target_vk`` catalog, so every new environment had to override
+    all four (and a forgotten one failed only mid-run). Instead, take one
+    ``ops_catalog`` + ``ops_schema`` (+ optional ``ops_volume``, default
+    ``uc_exports``) and derive them:
+
+    - export/report volume -> ``/Volumes/{ops_catalog}/{ops_schema}/{ops_volume}``
+    - audit table          -> ``{ops_catalog}.{ops_schema}.uc_sync_audit``
+    - state table          -> ``{ops_catalog}.{ops_schema}.uc_sync_state``
+
+    An explicit per-artifact value always wins over the derived one, so callers can
+    still override any single location. When the base is incomplete and no explicit
+    value is given, the field is returned blank so downstream validation fails fast
+    with a clear message instead of writing to a stale default.
+    """
+
+    oc = str(ops_catalog or "").strip()
+    os_ = str(ops_schema or "").strip()
+    ov = str(ops_volume or "").strip() or DEFAULT_OPS_VOLUME
+    has_base = bool(oc and os_)
+    derived_volume = f"/Volumes/{oc}/{os_}/{ov}" if has_base else ""
+
+    def _table(name: str) -> str:
+        return f"{oc}.{os_}.{name}" if has_base else ""
+
+    return {
+        "export_volume_path": str(export_volume_path or "").strip() or derived_volume,
+        "report_volume_path": str(report_volume_path or "").strip() or derived_volume,
+        "audit_table": str(audit_table or "").strip() or _table("uc_sync_audit"),
+        "state_table": str(state_table or "").strip() or _table("uc_sync_state"),
+    }
+
+
 def _split_csv(value: str) -> list[str]:
     if not value or not str(value).strip():
         return []
@@ -227,6 +277,32 @@ def from_sources(
     if execution_mode == "LOCAL" and not catalogs:
         catalogs = list(catalog_mapping)
 
+    # Resolve the four ops-artifact locations from a single ops_catalog/ops_schema
+    # base (with per-artifact overrides winning). See derive_ops_paths().
+    ops_paths = derive_ops_paths(
+        ops_catalog=str(pick("ops_catalog", export.get("ops_catalog"))),
+        ops_schema=str(pick("ops_schema", export.get("ops_schema"))),
+        ops_volume=str(
+            pick("ops_volume", export.get("ops_volume"), DEFAULT_OPS_VOLUME)
+        ),
+        export_volume_path=str(pick("export_volume_path", export.get("volume_path"))),
+        report_volume_path=str(
+            pick(
+                "report_volume_path",
+                reporting.get("volume_path"),
+                export.get("volume_path"),
+            )
+        ),
+        audit_table=str(pick("audit_table", export.get("audit_table"))),
+        state_table=str(
+            pick(
+                "state_table",
+                export.get("state_table"),
+                file_config.get("state_table"),
+            )
+        ),
+    )
+
     return SyncConfig(
         execution_mode=execution_mode,
         mode=str(pick("mode", "INVENTORY")).upper(),
@@ -251,22 +327,10 @@ def from_sources(
         target_client_secret_key=str(
             pick("target_client_secret_key", target.get("client_secret_key"))
         ),
-        export_volume_path=str(pick("export_volume_path", export.get("volume_path"))),
-        report_volume_path=str(
-            pick(
-                "report_volume_path",
-                reporting.get("volume_path"),
-                export.get("volume_path"),
-            )
-        ),
-        audit_table=str(pick("audit_table", export.get("audit_table"))),
-        state_table=str(
-            pick(
-                "state_table",
-                export.get("state_table"),
-                file_config.get("state_table"),
-            )
-        ),
+        export_volume_path=ops_paths["export_volume_path"],
+        report_volume_path=ops_paths["report_volume_path"],
+        audit_table=ops_paths["audit_table"],
+        state_table=ops_paths["state_table"],
         import_package_path=str(
             pick(
                 "import_package_path",
