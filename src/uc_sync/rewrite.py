@@ -100,6 +100,94 @@ def strip_managed_storage_clauses(text: str, object_type: str = "") -> str:
             rewritten,
             flags=re.IGNORECASE,
         )
+    # Newer runtimes emit a table-level `COLLATION '<name>'` clause in
+    # SHOW CREATE TABLE output (e.g. `USING delta\nCOLLATION 'UTF8_BINARY'`).
+    # Older SQL parsers reject that standalone clause, so replaying the captured
+    # DDL fails with PARSE_SYNTAX_ERROR at 'COLLATION'. Drop it and let the target
+    # use its default collation. The per-type `COLLATE <name>` qualifier is handled
+    # separately by strip_inline_collate() below.
+    rewritten = re.sub(
+        r"\s+COLLATION\s+'[^']*'",
+        "",
+        rewritten,
+        flags=re.IGNORECASE,
+    )
+    rewritten = re.sub(
+        r'\s+COLLATION\s+"[^"]*"',
+        "",
+        rewritten,
+        flags=re.IGNORECASE,
+    )
+    rewritten = strip_inline_collate(rewritten)
+    rewritten = strip_reserved_table_properties(rewritten)
+    return rewritten
+
+
+def strip_inline_collate(text: str) -> str:
+    """Drop inline ``COLLATE <name>`` qualifiers from captured DDL.
+
+    Distinct from the table-level ``COLLATION '<name>'`` clause handled above,
+    this targets the per-type qualifier that rides on column and parameter type
+    declarations, e.g. ``v STRING COLLATE UTF8_BINARY``. It shows up most often in
+    synthesized *function* DDL: ``SHOW CREATE FUNCTION`` fails on some runtimes, so
+    the DDL is rebuilt from catalog metadata whose ``type_text`` embeds the source
+    collation, and table column definitions can carry the same qualifier.
+
+    A target metastore that hasn't enabled collation rejects any ``COLLATE`` with
+    ``[UNSUPPORTED_FEATURE.COLLATION] ... SQLSTATE: 0A000`` — a different error than
+    the table-level clause's ``PARSE_SYNTAX_ERROR`` but the same root cause. The
+    qualifier describes source string internals, so strip it and let the target use
+    its default collation. The collation name is an unquoted identifier
+    (``UTF8_BINARY``, ``UTF8_LCASE``, …) or a backtick-quoted one; ``COLLATION`` is
+    left alone because it is never followed by whitespace here.
+    """
+
+    return re.sub(
+        r"\s+COLLATE\s+(?:`[^`]+`|[A-Za-z_][A-Za-z0-9_]*)",
+        "",
+        str(text or ""),
+        flags=re.IGNORECASE,
+    )
+
+
+def strip_reserved_table_properties(text: str) -> str:
+    """Remove reserved/auto-managed ``delta.*`` keys from a TBLPROPERTIES block.
+
+    ``SHOW CREATE TABLE`` emits the table's full property set, including
+    protocol/feature keys and auto-generated row-tracking column names
+    (``delta.rowTracking.materializedRowIdColumnName`` etc.). Replaying those on
+    ``CREATE TABLE`` fails with ``DELTA_UNKNOWN_CONFIGURATION``. These describe
+    source storage internals the target metastore manages itself, so drop every
+    ``delta.*`` property and let the target assign its own. User-defined
+    (non-``delta.``) properties are preserved; if none remain, the whole
+    ``TBLPROPERTIES (...)`` clause is removed.
+    """
+
+    rewritten = str(text or "")
+
+    def _filter_block(match: re.Match[str]) -> str:
+        body = match.group(1)
+        kept: list[str] = []
+        # Entries look like: 'key' = 'value'  (comma-separated, possibly multiline)
+        for key, value in re.findall(
+            r"'([^']*)'\s*=\s*'([^']*)'", body
+        ):
+            if key.lower().startswith("delta."):
+                continue
+            kept.append(f"'{key}' = '{value}'")
+        if not kept:
+            return ""
+        return "TBLPROPERTIES (\n  " + ",\n  ".join(kept) + ")"
+
+    rewritten = re.sub(
+        r"TBLPROPERTIES\s*\(([^)]*)\)",
+        _filter_block,
+        rewritten,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    # Tidy any dangling whitespace left where the clause was removed.
+    rewritten = re.sub(r"[ \t]+\n", "\n", rewritten)
+    rewritten = re.sub(r"\n{3,}", "\n\n", rewritten)
     return rewritten
 
 
