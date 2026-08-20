@@ -8,7 +8,11 @@
 # MAGIC - `ALL` — three jobs (Inventory, Export, Import)
 # MAGIC - `SYNC` — one end-to-end job
 # MAGIC
-# MAGIC Required: catalog mapping. Everything else has defaults.
+# MAGIC Required: `catalog_mapping_json`, `ops_catalog`, `ops_schema`, and
+# MAGIC `output_volume_path`. The audit/state tables are derived as
+# MAGIC `{ops_catalog}.{ops_schema}.uc_sync_audit` / `.uc_sync_state`; exports and
+# MAGIC reports go to `output_volume_path`. The `UC_Sync_Main` notebook path is
+# MAGIC auto-resolved from this notebook's own folder (no widget needed).
 
 # COMMAND ----------
 
@@ -31,10 +35,13 @@ dbutils.widgets.dropdown("dry_run", "false", ["true", "false"])
 dbutils.widgets.dropdown("run_now", "false", ["true", "false"])
 dbutils.widgets.text("existing_cluster_id", "")
 dbutils.widgets.text("job_name_prefix", "UC-Sync-Local")
-dbutils.widgets.text(
-    "notebook_path",
-    "/Workspace/Users/vivek.ravichandiran@databricks.com/UCSync/notebooks/UC_Sync_Main",
-)
+# Where UCSync writes its own artifacts:
+#   ops_catalog + ops_schema  -> audit/state tables (standard names):
+#       {ops_catalog}.{ops_schema}.uc_sync_audit / .uc_sync_state
+#   output_volume_path        -> volume for exports + reports
+dbutils.widgets.text("ops_catalog", "")
+dbutils.widgets.text("ops_schema", "")
+dbutils.widgets.text("output_volume_path", "")
 dbutils.widgets.text("import_package_path", "")
 
 # COMMAND ----------
@@ -59,6 +66,24 @@ for module_name in [name for name in sys.modules if name.split(".")[0] == "uc_sy
 
 from uc_sync.job_wrapper import create_local_stage_jobs, resolve_local_stages
 
+
+def resolve_main_notebook_path() -> str:
+    """Absolute workspace path to the sibling ``UC_Sync_Main`` notebook.
+
+    Databricks Jobs require an absolute workspace path for the notebook task —
+    a relative ``./`` reference is not accepted. Since ``UC_Sync_Main`` lives in
+    the same folder as this creator notebook, derive its path from this
+    notebook's own context path instead of asking the user to type it.
+    """
+    from posixpath import dirname, join
+
+    ctx = (
+        dbutils.notebook.entry_point.getDbutils().notebook().getContext()
+    )
+    current = ctx.notebookPath().get()
+    return join(dirname(current), "UC_Sync_Main")
+
+
 # COMMAND ----------
 
 stages = dbutils.widgets.get("stages").strip()
@@ -70,14 +95,23 @@ dry_run = dbutils.widgets.get("dry_run").strip().lower()
 run_now = dbutils.widgets.get("run_now").strip().lower() == "true"
 existing_cluster_id = dbutils.widgets.get("existing_cluster_id").strip() or None
 job_name_prefix = dbutils.widgets.get("job_name_prefix").strip() or "UC-Sync-Local"
-notebook_path = dbutils.widgets.get("notebook_path").strip()
+ops_catalog = dbutils.widgets.get("ops_catalog").strip()
+ops_schema = dbutils.widgets.get("ops_schema").strip()
+output_volume_path = dbutils.widgets.get("output_volume_path").strip()
 import_package_path = dbutils.widgets.get("import_package_path").strip()
+
+notebook_path = resolve_main_notebook_path()
 
 if not catalog_mapping_json:
     raise ValueError("catalog_mapping_json is required for LOCAL mode")
+if not (ops_catalog and ops_schema and output_volume_path):
+    raise ValueError(
+        "ops_catalog, ops_schema and output_volume_path are all required."
+    )
 
 resolved = resolve_local_stages(stages)
 print(f"Creating LOCAL jobs for stages: {', '.join(resolved)}")
+print(f"UC_Sync_Main notebook (auto-resolved): {notebook_path}")
 if existing_cluster_id:
     print(f"Using existing cluster: {existing_cluster_id}")
 else:
@@ -91,6 +125,9 @@ results = create_local_stage_jobs(
     schemas=schemas,
     job_name_prefix=job_name_prefix,
     dry_run=dry_run,
+    ops_catalog=ops_catalog,
+    ops_schema=ops_schema,
+    output_volume_path=output_volume_path,
     import_package_path=import_package_path,
     notebook_path=notebook_path,
     run_now=run_now,

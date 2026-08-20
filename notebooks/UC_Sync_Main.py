@@ -23,20 +23,13 @@ dbutils.widgets.text("target_oauth_secret_scope", "")
 dbutils.widgets.text("target_client_id_secret_key", "")
 dbutils.widgets.text("target_client_secret_key", "")
 dbutils.widgets.text("target_token_secret_key", "target-token")
-dbutils.widgets.text(
-    "export_volume_path",
-    "/Volumes/classic_stable_target_vk/uc_sync_ops/uc_exports",
-)
-dbutils.widgets.text(
-    "report_volume_path",
-    "/Volumes/classic_stable_target_vk/uc_sync_ops/uc_exports",
-)
-dbutils.widgets.text(
-    "audit_table", "classic_stable_target_vk.uc_sync_ops.uc_sync_audit"
-)
-dbutils.widgets.text(
-    "state_table", "classic_stable_target_vk.uc_sync_ops.uc_sync_state"
-)
+# Where UCSync writes its own artifacts (see uc_sync.config.derive_ops_paths):
+#   ops_catalog + ops_schema -> audit/state tables (standard names):
+#       {ops_catalog}.{ops_schema}.uc_sync_audit / .uc_sync_state
+#   output_volume_path       -> volume for exports + reports
+dbutils.widgets.text("ops_catalog", "")
+dbutils.widgets.text("ops_schema", "")
+dbutils.widgets.text("output_volume_path", "")
 dbutils.widgets.text("import_package_path", "")
 dbutils.widgets.text("catalogs", "")
 dbutils.widgets.text(
@@ -118,10 +111,9 @@ widget_values = {
     "target_client_id_secret_key": dbutils.widgets.get("target_client_id_secret_key"),
     "target_client_secret_key": dbutils.widgets.get("target_client_secret_key"),
     "target_token_secret_key": dbutils.widgets.get("target_token_secret_key"),
-    "export_volume_path": dbutils.widgets.get("export_volume_path"),
-    "report_volume_path": dbutils.widgets.get("report_volume_path"),
-    "audit_table": dbutils.widgets.get("audit_table"),
-    "state_table": dbutils.widgets.get("state_table"),
+    "ops_catalog": dbutils.widgets.get("ops_catalog"),
+    "ops_schema": dbutils.widgets.get("ops_schema"),
+    "output_volume_path": dbutils.widgets.get("output_volume_path"),
     "import_package_path": dbutils.widgets.get("import_package_path"),
     "catalog_mapping_json": dbutils.widgets.get("catalog_mapping_json"),
     "catalog_mapping_path": dbutils.widgets.get("catalog_mapping_path"),
@@ -143,6 +135,28 @@ config_path = dbutils.widgets.get("config_path")
 file_cfg = load_yaml(config_path) if config_path else {}
 
 cfg = from_sources(widget_values, file_cfg)
+
+# Fail fast with a clear message if the ops artifact locations weren't provided
+# (set ops_catalog + ops_schema, or the four explicit paths). Otherwise the run
+# would fail later, deeper in reporting/audit, with a less obvious error.
+_missing_ops = [
+    name
+    for name, value in (
+        ("export_volume_path", cfg.export_volume_path),
+        ("report_volume_path", cfg.report_volume_path),
+        ("audit_table", cfg.audit_table),
+        ("state_table", cfg.state_table),
+    )
+    if not str(value).strip()
+]
+if _missing_ops:
+    raise ValueError(
+        "Missing ops location(s): "
+        + ", ".join(_missing_ops)
+        + ". Set ops_catalog + ops_schema (recommended) so these are derived, "
+        "or provide the explicit paths."
+    )
+
 run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 print("=" * 58)
