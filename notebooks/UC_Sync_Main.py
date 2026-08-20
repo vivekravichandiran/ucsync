@@ -23,18 +23,13 @@ dbutils.widgets.text("target_oauth_secret_scope", "")
 dbutils.widgets.text("target_client_id_secret_key", "")
 dbutils.widgets.text("target_client_secret_key", "")
 dbutils.widgets.text("target_token_secret_key", "target-token")
-# Ops artifact location. Set ops_catalog + ops_schema and the export/report
-# volumes and audit/state tables are derived (see uc_sync.config.derive_ops_paths):
-#   /Volumes/{ops_catalog}/{ops_schema}/{ops_volume}   (export + report)
-#   {ops_catalog}.{ops_schema}.uc_sync_audit / .uc_sync_state
-# The four explicit widgets below override the derived values when non-blank.
+# Where UCSync writes its own artifacts (see uc_sync.config.derive_ops_paths):
+#   ops_catalog + ops_schema -> audit/state tables (standard names):
+#       {ops_catalog}.{ops_schema}.uc_sync_audit / .uc_sync_state
+#   output_volume_path       -> volume for exports + reports
 dbutils.widgets.text("ops_catalog", "")
 dbutils.widgets.text("ops_schema", "")
-dbutils.widgets.text("ops_volume", "uc_exports")
-dbutils.widgets.text("export_volume_path", "")
-dbutils.widgets.text("report_volume_path", "")
-dbutils.widgets.text("audit_table", "")
-dbutils.widgets.text("state_table", "")
+dbutils.widgets.text("output_volume_path", "")
 dbutils.widgets.text("import_package_path", "")
 dbutils.widgets.text("catalogs", "")
 dbutils.widgets.text(
@@ -118,11 +113,7 @@ widget_values = {
     "target_token_secret_key": dbutils.widgets.get("target_token_secret_key"),
     "ops_catalog": dbutils.widgets.get("ops_catalog"),
     "ops_schema": dbutils.widgets.get("ops_schema"),
-    "ops_volume": dbutils.widgets.get("ops_volume"),
-    "export_volume_path": dbutils.widgets.get("export_volume_path"),
-    "report_volume_path": dbutils.widgets.get("report_volume_path"),
-    "audit_table": dbutils.widgets.get("audit_table"),
-    "state_table": dbutils.widgets.get("state_table"),
+    "output_volume_path": dbutils.widgets.get("output_volume_path"),
     "import_package_path": dbutils.widgets.get("import_package_path"),
     "catalog_mapping_json": dbutils.widgets.get("catalog_mapping_json"),
     "catalog_mapping_path": dbutils.widgets.get("catalog_mapping_path"),

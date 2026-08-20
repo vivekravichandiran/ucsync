@@ -8,7 +8,7 @@ from typing import Any, Mapping, Optional
 
 from uc_sync.security import redact
 from uc_sync.components import resolve_components
-from uc_sync.config import DEFAULT_OPS_VOLUME, derive_ops_paths
+from uc_sync.config import derive_ops_paths
 
 DEFAULT_NOTEBOOK_PATH = "/Repos/UCSync/notebooks/UC_Sync_Main"
 DEFAULT_TASK_KEY = "uc_sync"
@@ -48,11 +48,14 @@ class UCSyncJobParams:
     include_regex: str = ""
     exclude_regex: str = ".*_TEMP$"
     # Single ops base — the four artifact locations below are derived from it when
-    # left blank (see uc_sync.config.derive_ops_paths). Set ops_catalog/ops_schema
-    # (and optionally ops_volume), or set the four explicit paths directly.
+    # UCSync's operational-artifact locations. The user supplies three inputs:
+    # ops_catalog + ops_schema (audit/state tables) and output_volume_path
+    # (exports + reports). The four fields below are derived from them before
+    # validation (see uc_sync.config.derive_ops_paths) and emitted as concrete,
+    # visible values in the job's base_parameters.
     ops_catalog: str = ""
     ops_schema: str = ""
-    ops_volume: str = DEFAULT_OPS_VOLUME
+    output_volume_path: str = ""
     export_volume_path: str = ""
     report_volume_path: str = ""
     audit_table: str = ""
@@ -70,20 +73,17 @@ class UCSyncJobParams:
     target_client_secret_key: str = ""
 
     def resolve_ops_paths(self) -> None:
-        """Fill the four artifact locations from the ops_catalog/ops_schema base.
+        """Derive the four artifact locations from the three ops inputs.
 
-        Explicit values already set are preserved; blanks are derived. Runs before
-        validation so the emitted base_parameters carry concrete, visible paths.
+        Runs before validation so the emitted base_parameters carry concrete,
+        visible paths (export/report volume = output_volume_path; audit/state =
+        {ops_catalog}.{ops_schema}.uc_sync_audit/_state).
         """
 
         resolved = derive_ops_paths(
             ops_catalog=self.ops_catalog,
             ops_schema=self.ops_schema,
-            ops_volume=self.ops_volume,
-            export_volume_path=self.export_volume_path,
-            report_volume_path=self.report_volume_path,
-            audit_table=self.audit_table,
-            state_table=self.state_table,
+            output_volume_path=self.output_volume_path,
         )
         self.export_volume_path = resolved["export_volume_path"]
         self.report_volume_path = resolved["report_volume_path"]
@@ -135,25 +135,14 @@ class UCSyncJobParams:
                 raise ValueError(
                     "CROSS_WORKSPACE mode requires: " + ", ".join(missing)
                 )
-        if not self.export_volume_path.strip():
+        if not self.output_volume_path.strip():
             raise ValueError(
-                "export_volume_path is required — set ops_catalog/ops_schema "
-                "or export_volume_path directly"
+                "output_volume_path is required (the volume for exports + reports)"
             )
-        if not self.report_volume_path.strip():
+        if not (self.ops_catalog.strip() and self.ops_schema.strip()):
             raise ValueError(
-                "report_volume_path is required — set ops_catalog/ops_schema "
-                "or report_volume_path directly"
-            )
-        if not self.audit_table.strip():
-            raise ValueError(
-                "audit_table is required — set ops_catalog/ops_schema "
-                "or audit_table directly"
-            )
-        if not self.state_table.strip():
-            raise ValueError(
-                "state_table is required — set ops_catalog/ops_schema "
-                "or state_table directly"
+                "ops_catalog and ops_schema are required "
+                "(the audit/state tables are derived from them)"
             )
         # Validate component expression early so Job create fails fast.
         resolve_components(
@@ -450,19 +439,15 @@ def create_local_sync_job(
     dry_run: str = "true",
     ops_catalog: str = "",
     ops_schema: str = "",
-    ops_volume: str = DEFAULT_OPS_VOLUME,
-    export_volume_path: str = "",
-    report_volume_path: str = "",
-    audit_table: str = "",
-    state_table: str = "",
+    output_volume_path: str = "",
     notebook_path: str = DEFAULT_NOTEBOOK_PATH,
     run_now: bool = False,
     **kwargs: Any,
 ) -> JobCreateResult:
     """Convenience wrapper for same-workspace catalog-to-catalog sync jobs.
 
-    Provide ``ops_catalog`` + ``ops_schema`` to derive the export/report volumes and
-    the audit/state tables, or set the four explicit locations directly.
+    Provide ``ops_catalog`` + ``ops_schema`` (audit/state tables) and
+    ``output_volume_path`` (exports + reports).
     """
     return create_uc_sync_job(
         job_name=job_name,
@@ -476,11 +461,7 @@ def create_local_sync_job(
             location_mapping_csv_path=location_mapping_csv_path,
             ops_catalog=ops_catalog,
             ops_schema=ops_schema,
-            ops_volume=ops_volume,
-            export_volume_path=export_volume_path,
-            report_volume_path=report_volume_path,
-            audit_table=audit_table,
-            state_table=state_table,
+            output_volume_path=output_volume_path,
         ),
         run_now=run_now,
         **kwargs,
@@ -531,11 +512,7 @@ def create_local_stage_jobs(
     dry_run: str = "true",
     ops_catalog: str = "",
     ops_schema: str = "",
-    ops_volume: str = DEFAULT_OPS_VOLUME,
-    export_volume_path: str = "",
-    report_volume_path: str = "",
-    audit_table: str = "",
-    state_table: str = "",
+    output_volume_path: str = "",
     import_package_path: str = "",
     notebook_path: str = DEFAULT_NOTEBOOK_PATH,
     run_now: bool = False,
@@ -555,13 +532,14 @@ def create_local_stage_jobs(
             schemas="ril_sandbox.ucsync_local_01",
             ops_catalog="catalog_2_pih5aa",
             ops_schema="wsmig_operations",
+            output_volume_path="/Volumes/catalog_2_pih5aa/wsmig_operations/uc_exports",
             existing_cluster_id="0813-072811-phmehy1u",
             dry_run="false",
             run_now=False,
         )
 
-    ``ops_catalog`` + ``ops_schema`` derive the export/report volumes and the
-    audit/state tables; pass the four explicit locations instead to override.
+    ``ops_catalog`` + ``ops_schema`` set the audit/state tables; ``output_volume_path``
+    is the volume for exports + reports.
     """
 
     modes = resolve_local_stages(stages)
@@ -589,11 +567,7 @@ def create_local_stage_jobs(
                     components=components,
                     ops_catalog=ops_catalog,
                     ops_schema=ops_schema,
-                    ops_volume=ops_volume,
-                    export_volume_path=export_volume_path,
-                    report_volume_path=report_volume_path,
-                    audit_table=audit_table,
-                    state_table=state_table,
+                    output_volume_path=output_volume_path,
                     import_package_path=import_package_path,
                 ),
                 run_now=run_now,

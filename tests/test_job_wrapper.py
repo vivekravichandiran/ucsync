@@ -14,67 +14,56 @@ from uc_sync.job_wrapper import (
 )
 
 
-def test_derive_ops_paths_from_base():
-    out = derive_ops_paths(ops_catalog="c", ops_schema="s")
-    assert out["export_volume_path"] == "/Volumes/c/s/uc_exports"
-    assert out["report_volume_path"] == "/Volumes/c/s/uc_exports"
+def test_derive_ops_paths_from_three_inputs():
+    out = derive_ops_paths(
+        ops_catalog="c", ops_schema="s", output_volume_path="/Volumes/c/s/out"
+    )
+    # export + report volume are both the output volume; tables use standard names.
+    assert out["export_volume_path"] == "/Volumes/c/s/out"
+    assert out["report_volume_path"] == "/Volumes/c/s/out"
     assert out["audit_table"] == "c.s.uc_sync_audit"
     assert out["state_table"] == "c.s.uc_sync_state"
 
 
-def test_derive_ops_paths_custom_volume():
-    out = derive_ops_paths(ops_catalog="c", ops_schema="s", ops_volume="ops_vol")
-    assert out["export_volume_path"] == "/Volumes/c/s/ops_vol"
-
-
-def test_derive_ops_paths_explicit_override_wins():
-    out = derive_ops_paths(
-        ops_catalog="c",
-        ops_schema="s",
-        export_volume_path="/Volumes/override/here",
-        audit_table="other.cat.audit",
-    )
-    assert out["export_volume_path"] == "/Volumes/override/here"
-    assert out["audit_table"] == "other.cat.audit"
-    # Unspecified ones still derive from the base.
-    assert out["report_volume_path"] == "/Volumes/c/s/uc_exports"
-    assert out["state_table"] == "c.s.uc_sync_state"
-
-
-def test_derive_ops_paths_blank_when_no_base_and_no_explicit():
-    out = derive_ops_paths()
-    assert out == {
+def test_derive_ops_paths_blank_inputs_yield_blanks():
+    # Missing inputs -> blanks, so downstream validation fails fast.
+    assert derive_ops_paths() == {
         "export_volume_path": "",
         "report_volume_path": "",
         "audit_table": "",
         "state_table": "",
     }
+    # Volume without catalog/schema -> tables blank but volume still set.
+    partial = derive_ops_paths(output_volume_path="/Volumes/c/s/out")
+    assert partial["export_volume_path"] == "/Volumes/c/s/out"
+    assert partial["audit_table"] == ""
 
 
-def test_missing_ops_location_fails_fast():
-    # No ops base and no explicit locations -> validation trips at create time.
-    try:
-        UCSyncJobParams(
-            execution_mode="LOCAL", catalog_mapping_json='{"a":"b"}'
-        ).validate()
-        raise AssertionError("expected ValueError")
-    except ValueError as exc:
-        assert "is required" in str(exc)
-
-
-def test_state_table_alone_required_even_when_volumes_set():
-    # Explicit volumes + audit table, but a blank state_table must still fail.
+def test_missing_output_volume_fails_fast():
+    # ops base present but no output volume -> validation trips at create time.
     try:
         UCSyncJobParams(
             execution_mode="LOCAL",
             catalog_mapping_json='{"a":"b"}',
-            export_volume_path="/Volumes/c/s/uc_exports",
-            report_volume_path="/Volumes/c/s/uc_exports",
-            audit_table="c.s.uc_sync_audit",
+            ops_catalog="c",
+            ops_schema="s",
         ).validate()
         raise AssertionError("expected ValueError")
     except ValueError as exc:
-        assert "state_table" in str(exc)
+        assert "output_volume_path" in str(exc)
+
+
+def test_missing_ops_catalog_schema_fails_fast():
+    # output volume present but no ops catalog/schema -> validation trips.
+    try:
+        UCSyncJobParams(
+            execution_mode="LOCAL",
+            catalog_mapping_json='{"a":"b"}',
+            output_volume_path="/Volumes/c/s/out",
+        ).validate()
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert "ops_catalog" in str(exc)
 
 
 class _FakeJobs:
@@ -146,9 +135,11 @@ def test_build_job_settings_includes_notebook_parameters():
         catalog_mapping_json='{"a":"b"}',
         ops_catalog="ops_cat",
         ops_schema="ops_sch",
+        output_volume_path="/Volumes/ops_cat/ops_sch/out",
     ).to_notebook_parameters()
-    # Ops base derives the four artifact locations.
-    assert params["export_volume_path"] == "/Volumes/ops_cat/ops_sch/uc_exports"
+    # The three inputs derive the four artifact locations.
+    assert params["export_volume_path"] == "/Volumes/ops_cat/ops_sch/out"
+    assert params["report_volume_path"] == "/Volumes/ops_cat/ops_sch/out"
     assert params["audit_table"] == "ops_cat.ops_sch.uc_sync_audit"
     assert params["state_table"] == "ops_cat.ops_sch.uc_sync_state"
     settings = build_job_settings(
@@ -179,6 +170,7 @@ def test_create_uc_sync_job_creates_and_runs():
             ),
             ops_catalog="ops_cat",
             ops_schema="ops_sch",
+            output_volume_path="/Volumes/ops_cat/ops_sch/out",
         ),
         run_now=True,
         client=client,
@@ -229,6 +221,7 @@ def test_create_via_api_client_rest_path():
             catalog_mapping_json='{"a":"b"}',
             ops_catalog="ops_cat",
             ops_schema="ops_sch",
+            output_volume_path="/Volumes/ops_cat/ops_sch/out",
         ),
         run_now=True,
         client=client,
@@ -249,6 +242,7 @@ def test_create_uc_sync_job_updates_existing():
             catalog_mapping_json='{"a":"b"}',
             ops_catalog="ops_cat",
             ops_schema="ops_sch",
+            output_volume_path="/Volumes/ops_cat/ops_sch/out",
         ),
         client=client,
     )
@@ -260,6 +254,7 @@ def test_create_uc_sync_job_updates_existing():
             catalog_mapping_json='{"a":"b"}',
             ops_catalog="ops_cat",
             ops_schema="ops_sch",
+            output_volume_path="/Volumes/ops_cat/ops_sch/out",
         ),
         update_if_exists=True,
         client=client,
@@ -297,6 +292,7 @@ def test_create_local_stage_jobs_creates_three_for_all():
         schemas="ril_sandbox.ucsync_local_01",
         ops_catalog="ops_cat",
         ops_schema="ops_sch",
+        output_volume_path="/Volumes/ops_cat/ops_sch/out",
         dry_run="false",
         run_now=False,
         client=client,
@@ -304,10 +300,7 @@ def test_create_local_stage_jobs_creates_three_for_all():
     assert len(results) == 3
     # Every stage job carries the derived ops locations in its base_parameters.
     for item in results:
-        assert (
-            item.parameters["export_volume_path"]
-            == "/Volumes/ops_cat/ops_sch/uc_exports"
-        )
+        assert item.parameters["export_volume_path"] == "/Volumes/ops_cat/ops_sch/out"
         assert item.parameters["state_table"] == "ops_cat.ops_sch.uc_sync_state"
     assert [item.parameters["mode"] for item in results] == [
         "INVENTORY",
