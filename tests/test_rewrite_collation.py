@@ -9,6 +9,7 @@ standalone clause, so replaying the captured DDL fails with
 from __future__ import annotations
 
 from uc_sync.rewrite import (
+    strip_inline_collate,
     strip_managed_storage_clauses,
     strip_reserved_table_properties,
 )
@@ -46,17 +47,37 @@ def test_double_quoted_collation_clause_is_stripped():
     assert "USING delta" in out
 
 
-def test_column_and_function_collate_is_preserved():
-    # `COLLATE <name>` (no quotes) is valid syntax and must NOT be touched.
+def test_inline_collate_is_stripped_from_function_ddl():
+    # `SHOW CREATE FUNCTION` is unavailable on some runtimes, so function DDL is
+    # synthesized from catalog metadata whose type_text carries the source
+    # collation. A target that hasn't enabled collation rejects it with
+    # UNSUPPORTED_FEATURE.COLLATION (0A000), so the qualifier must be dropped
+    # from both the parameter type and the return type.
     fn = (
         "CREATE FUNCTION sec.mask_email(v string collate UTF8_BINARY) "
         "RETURNS STRING COLLATE UTF8_BINARY RETURN v"
     )
-    assert strip_managed_storage_clauses(fn, "FUNCTION") == fn
+    out = strip_managed_storage_clauses(fn, "FUNCTION")
+    assert "COLLATE" not in out.upper()
+    assert out == "CREATE FUNCTION sec.mask_email(v string) RETURNS STRING RETURN v"
 
+
+def test_inline_collate_is_stripped_from_table_columns():
     col = "CREATE TABLE c.s.t (name STRING COLLATE UTF8_BINARY)\nUSING delta"
     out = strip_managed_storage_clauses(col, "TABLE")
-    assert "COLLATE UTF8_BINARY" in out
+    assert "COLLATE" not in out.upper()
+    assert "name STRING" in out
+    assert "USING delta" in out
+
+
+def test_inline_collate_helper_handles_quoted_name_and_leaves_collation():
+    # Backtick-quoted collation names are stripped too.
+    assert strip_inline_collate("v STRING COLLATE `UTF8_LCASE`") == "v STRING"
+    # The table-level COLLATION '<name>' clause is NOT touched by this helper
+    # (COLLATE is only matched when followed by whitespace, COLLATION never is).
+    assert strip_inline_collate("USING delta COLLATION 'UTF8_BINARY'") == (
+        "USING delta COLLATION 'UTF8_BINARY'"
+    )
 
 
 def test_collation_strip_is_idempotent_and_noop_without_clause():

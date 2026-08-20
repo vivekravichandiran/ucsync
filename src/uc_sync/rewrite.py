@@ -104,8 +104,8 @@ def strip_managed_storage_clauses(text: str, object_type: str = "") -> str:
     # SHOW CREATE TABLE output (e.g. `USING delta\nCOLLATION 'UTF8_BINARY'`).
     # Older SQL parsers reject that standalone clause, so replaying the captured
     # DDL fails with PARSE_SYNTAX_ERROR at 'COLLATION'. Drop it and let the target
-    # use its default collation. Column-/function-level `COLLATE <name>` (no
-    # quotes) is valid and intentionally left untouched.
+    # use its default collation. The per-type `COLLATE <name>` qualifier is handled
+    # separately by strip_inline_collate() below.
     rewritten = re.sub(
         r"\s+COLLATION\s+'[^']*'",
         "",
@@ -118,8 +118,36 @@ def strip_managed_storage_clauses(text: str, object_type: str = "") -> str:
         rewritten,
         flags=re.IGNORECASE,
     )
+    rewritten = strip_inline_collate(rewritten)
     rewritten = strip_reserved_table_properties(rewritten)
     return rewritten
+
+
+def strip_inline_collate(text: str) -> str:
+    """Drop inline ``COLLATE <name>`` qualifiers from captured DDL.
+
+    Distinct from the table-level ``COLLATION '<name>'`` clause handled above,
+    this targets the per-type qualifier that rides on column and parameter type
+    declarations, e.g. ``v STRING COLLATE UTF8_BINARY``. It shows up most often in
+    synthesized *function* DDL: ``SHOW CREATE FUNCTION`` fails on some runtimes, so
+    the DDL is rebuilt from catalog metadata whose ``type_text`` embeds the source
+    collation, and table column definitions can carry the same qualifier.
+
+    A target metastore that hasn't enabled collation rejects any ``COLLATE`` with
+    ``[UNSUPPORTED_FEATURE.COLLATION] ... SQLSTATE: 0A000`` — a different error than
+    the table-level clause's ``PARSE_SYNTAX_ERROR`` but the same root cause. The
+    qualifier describes source string internals, so strip it and let the target use
+    its default collation. The collation name is an unquoted identifier
+    (``UTF8_BINARY``, ``UTF8_LCASE``, …) or a backtick-quoted one; ``COLLATION`` is
+    left alone because it is never followed by whitespace here.
+    """
+
+    return re.sub(
+        r"\s+COLLATE\s+(?:`[^`]+`|[A-Za-z_][A-Za-z0-9_]*)",
+        "",
+        str(text or ""),
+        flags=re.IGNORECASE,
+    )
 
 
 def strip_reserved_table_properties(text: str) -> str:
