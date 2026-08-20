@@ -119,6 +119,7 @@ def strip_managed_storage_clauses(text: str, object_type: str = "") -> str:
         flags=re.IGNORECASE,
     )
     rewritten = strip_inline_collate(rewritten)
+    rewritten = strip_inline_policy_clauses(rewritten)
     rewritten = strip_reserved_table_properties(rewritten)
     return rewritten
 
@@ -148,6 +149,46 @@ def strip_inline_collate(text: str) -> str:
         str(text or ""),
         flags=re.IGNORECASE,
     )
+
+
+# A fully-qualified name: backtick-quoted or bare identifiers joined by dots.
+_FQ_NAME = (
+    r"(?:`[^`]+`|[A-Za-z_][A-Za-z0-9_]*)"
+    r"(?:\s*\.\s*(?:`[^`]+`|[A-Za-z_][A-Za-z0-9_]*))*"
+)
+
+
+def strip_inline_policy_clauses(text: str) -> str:
+    """Drop inline column-mask and row-filter clauses from captured CREATE DDL.
+
+    ``SHOW CREATE TABLE`` emits column masks and the table row filter inline, e.g.::
+
+        ssn STRING COLLATE UTF8_BINARY MASK `cat`.`sec`.`mask_ssn`,
+        ...
+        WITH ROW FILTER `cat`.`sec`.`hr_dept_filter` ON (dept)
+
+    Replaying that fails when the referenced function does not yet exist in the
+    target (functions import after tables), so the clauses are stripped here and
+    re-applied from the ``policies/*.sql`` artifact in a dedicated phase once every
+    object exists. Mirrors :func:`strip_inline_collate`.
+    """
+
+    rewritten = str(text or "")
+    # Table-level row filter: ``WITH ROW FILTER <fqname> ON (cols)``.
+    rewritten = re.sub(
+        rf"\s+WITH\s+ROW\s+FILTER\s+{_FQ_NAME}\s+ON\s*\([^)]*\)",
+        "",
+        rewritten,
+        flags=re.IGNORECASE,
+    )
+    # Column mask: ``MASK <fqname> [USING COLUMNS (cols)]`` inside a column def.
+    rewritten = re.sub(
+        rf"\s+MASK\s+{_FQ_NAME}(?:\s+USING\s+COLUMNS\s*\([^)]*\))?",
+        "",
+        rewritten,
+        flags=re.IGNORECASE,
+    )
+    return rewritten
 
 
 def strip_reserved_table_properties(text: str) -> str:

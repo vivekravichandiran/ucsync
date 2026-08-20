@@ -12,6 +12,7 @@ from uc_sync.export import canonical_hash
 from uc_sync.mapping import MappingResolver
 from uc_sync.models import UCObject
 from uc_sync.sql_ddl import (
+    POLICY_TABLE_TYPES,
     create_ddl_for_object,
     quote_full_name,
     quote_identifier,
@@ -79,8 +80,9 @@ class ImportEngine:
         self.sql = sql_executor
 
     def run(self, objects: Iterable[UCObject]) -> List[ImportResult]:
+        objects_list = list(objects)
         results: list[ImportResult] = []
-        for level, order, obj in plan(objects):
+        for level, order, obj in plan(objects_list):
             try:
                 results.append(self._import_one(obj, level, order))
             except Exception as exc:  # noqa: BLE001 - per-object audit is required
@@ -99,7 +101,146 @@ class ImportEngine:
                         import_order=order,
                     )
                 )
+        # Column masks / row filters are applied last, once every table and the
+        # functions they reference exist in the target.
+        results.extend(self._apply_policies(objects_list, start_order=len(results)))
         return results
+
+    def _apply_policies(
+        self, objects: Iterable[UCObject], *, start_order: int
+    ) -> list[ImportResult]:
+        results: list[ImportResult] = []
+        order = start_order
+        for obj in objects:
+            if obj.object_type not in POLICY_TABLE_TYPES:
+                continue
+            if not obj.column_masks() and not obj.row_filter():
+                continue
+            order += 1
+            target_table = self.mapper.target_full_name(obj.full_name)
+            if not target_table and self.cfg.execution_mode == "CROSS_WORKSPACE":
+                target_table = obj.full_name
+            if not target_table:
+                results.append(
+                    self._result(
+                        obj,
+                        "",
+                        "SKIP",
+                        "ERROR",
+                        0,
+                        order,
+                        "Catalog mapping is missing for policy application",
+                        "CATALOG_MAPPING_MISSING",
+                    )
+                )
+                continue
+            statements = self._policy_statements(obj, target_table)
+            if self.cfg.dry_run:
+                results.append(
+                    self._result(
+                        obj,
+                        target_table,
+                        "DRY_RUN",
+                        "SKIPPED",
+                        0,
+                        order,
+                        f"policy statements={len(statements)}",
+                    )
+                )
+                continue
+            if not self.sql:
+                results.append(
+                    self._result(
+                        obj,
+                        target_table,
+                        "APPLY_POLICY",
+                        "ERROR",
+                        0,
+                        order,
+                        "SQL executor is required to apply policies",
+                        "SQL_EXECUTOR_REQUIRED",
+                    )
+                )
+                continue
+            try:
+                for statement in statements:
+                    self.sql.execute(statement)
+            except Exception as exc:  # noqa: BLE001 - per-object audit is required
+                results.append(
+                    self._result(
+                        obj,
+                        target_table,
+                        "APPLY_POLICY",
+                        "ERROR",
+                        0,
+                        order,
+                        str(exc),
+                        type(exc).__name__,
+                    )
+                )
+                continue
+            results.append(
+                self._result(
+                    obj,
+                    target_table,
+                    "APPLY_POLICY",
+                    "SUCCESS",
+                    0,
+                    order,
+                    statements[0][:1000] if statements else "",
+                )
+            )
+        return results
+
+    def _map_function_name(self, function_full_name: str) -> Optional[str]:
+        mapped = self.mapper.target_full_name(function_full_name)
+        if mapped:
+            return mapped
+        if self.cfg.execution_mode == "CROSS_WORKSPACE":
+            return function_full_name
+        return None
+
+    def _policy_statements(
+        self, obj: UCObject, target_table: str
+    ) -> list[str]:
+        """Build target-side mask / row-filter ALTER statements via the mapper."""
+
+        target = quote_full_name(target_table)
+        statements: list[str] = []
+        for mask in obj.column_masks():
+            column = mask.get("column_name")
+            function_name = mask.get("function_name")
+            if not column or not function_name:
+                continue
+            target_fn = self._map_function_name(str(function_name))
+            if not target_fn:
+                continue
+            using = mask.get("using_column_names") or []
+            using_clause = (
+                " USING COLUMNS ("
+                + ", ".join(quote_identifier(str(col)) for col in using)
+                + ")"
+                if using
+                else ""
+            )
+            statements.append(
+                f"ALTER TABLE {target} ALTER COLUMN "
+                f"{quote_identifier(str(column))} "
+                f"SET MASK {quote_full_name(target_fn)}{using_clause}"
+            )
+        row_filter = obj.row_filter()
+        if row_filter and row_filter.get("function_name"):
+            target_fn = self._map_function_name(str(row_filter["function_name"]))
+            if target_fn:
+                columns = ", ".join(
+                    quote_identifier(str(col))
+                    for col in row_filter.get("input_column_names") or []
+                )
+                statements.append(
+                    f"ALTER TABLE {target} SET ROW FILTER "
+                    f"{quote_full_name(target_fn)} ON ({columns})"
+                )
+        return statements
 
     def _import_one(self, obj: UCObject, level: int, order: int) -> ImportResult:
         digest = canonical_hash(obj)

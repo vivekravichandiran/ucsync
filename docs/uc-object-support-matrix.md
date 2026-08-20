@@ -36,7 +36,7 @@ Mechanisms: **REST** = UC 2.1 API, **SDK** = Databricks SDK wrappers, **SQL** = 
 | Share / Recipient / Provider | METADATA | METADATA | PARTIAL | PARTIAL | REST | TBD | APIs empty in probe |
 | Grants | FULL | FULL | FULL | FULL | REST | N/A | After object create; principal map |
 | Tags | PARTIAL | PARTIAL | PARTIAL | PARTIAL | SDK/SQL | N/A | List tags API 404 in probe |
-| Row filter / column mask | PARTIAL | PARTIAL | PARTIAL | PARTIAL | REST/SQL | N/A | `column_masks` field present |
+| Row filter / column mask | FULL | FULL | FULL | PARTIAL | REST + SQL | N/A | Captured from REST `row_filter` / `columns[].mask`; replayed as `ALTER TABLE ... SET MASK` / `SET ROW FILTER` in a late `policies/` phase after all objects + functions exist |
 | Workspace binding | FULL | FULL | FULL | FULL | REST | N/A | Remap workspace IDs |
 | Owner | FULL | FULL | PARTIAL | FULL | REST | N/A | May need ALTER OWNER + principal map |
 | Physical files / table data | OUT | OUT | OUT | OUT | — | — | Separate data migration |

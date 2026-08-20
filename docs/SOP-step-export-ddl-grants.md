@@ -51,13 +51,15 @@ Workspace mirror:
 - **Metric views:** YAML definition exported as `CREATE OR REPLACE VIEW … WITH METRICS LANGUAGE YAML AS $$…$$` (`SHOW CREATE TABLE` is not supported for metric views)
 - **Catalogs / schemas / volumes / external volumes / external locations / storage credentials:** synthesized `CREATE` DDL from inventory metadata
 - **Grants:** `GRANT … ON … TO …` (and `ALTER … OWNER TO …`) from inventory privilege assignments
+- **Column masks / row filters:** `ALTER TABLE … SET MASK` / `SET ROW FILTER` from the REST `row_filter` and `columns[].mask` metadata, written to `policies/` and applied in a late import phase (after tables and functions exist)
 
 Aggregates:
 
 ```text
-ddl/all_objects.sql   # every CREATE DDL
-ddl/all_tables.sql    # table/view/function subset
+ddl/all_objects.sql     # every CREATE DDL
+ddl/all_tables.sql      # table/view/function subset
 grants/all_grants.sql
+policies/all_policies.sql
 ```
 
-Exit JSON includes `export_path`, `export_workspace_path`, `ddl_files`, `grant_files`, and `ddl_by_source`.
+Exit JSON includes `export_path`, `export_workspace_path`, `ddl_files`, `grant_files`, `policy_files`, and `ddl_by_source`.
