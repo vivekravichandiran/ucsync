@@ -15,6 +15,7 @@ from uc_sync.sql_ddl import (
     create_ddl_for_object,
     format_ddl_file,
     grant_statements_for_object,
+    policy_statements_for_object,
     prefers_show_create,
     render_sql_file,
     show_create_command,
@@ -31,8 +32,10 @@ class ExportItemResult:
     metadata_path: str = ""
     ddl_path: str = ""
     grants_path: str = ""
+    policies_path: str = ""
     workspace_ddl_path: str = ""
     workspace_grants_path: str = ""
+    workspace_policies_path: str = ""
     error_code: str = ""
     error_message: str = ""
 
@@ -119,6 +122,7 @@ class ExportService:
             "ddl",
             "metadata",
             "grants",
+            "policies",
             "bindings",
             "validation",
             "checksums",
@@ -132,8 +136,10 @@ class ExportService:
         all_object_ddls: list[str] = []
         all_table_ddls: list[str] = []
         all_grant_ddls: list[str] = []
+        all_policy_ddls: list[str] = []
         ddl_files = 0
         grant_files = 0
+        policy_files = 0
         ddl_by_source: dict[str, int] = {}
 
         for obj in objects_list:
@@ -154,6 +160,8 @@ class ExportService:
                 workspace_ddl_path = ""
                 grants_path = ""
                 workspace_grants_path = ""
+                policies_path = ""
+                workspace_policies_path = ""
                 warnings: list[str] = []
 
                 ddl_sql, ddl_source = self._capture_object_ddl(obj, warnings)
@@ -194,6 +202,22 @@ class ExportService:
                     all_grant_ddls.append(grant_body.rstrip() + "\n")
                     grant_files += 1
 
+                policy_sql_statements = policy_statements_for_object(obj)
+                if policy_sql_statements:
+                    policy_body = render_sql_file(
+                        policy_sql_statements,
+                        header=(
+                            "Column masks / row filters for "
+                            f"{obj.object_type.value} {obj.full_name}"
+                        ),
+                    )
+                    policy_rel = f"policies/{stem}.sql"
+                    policy_paths = self._write_text(policy_rel, policy_body)
+                    policies_path = policy_paths.get("volume", "")
+                    workspace_policies_path = policy_paths.get("workspace", "")
+                    all_policy_ddls.append(policy_body.rstrip() + "\n")
+                    policy_files += 1
+
                 status = "SUCCESS"
                 error_code = ""
                 error_message = ""
@@ -212,8 +236,10 @@ class ExportService:
                         or meta_paths.get("workspace", ""),
                         ddl_path=ddl_path,
                         grants_path=grants_path,
+                        policies_path=policies_path,
                         workspace_ddl_path=workspace_ddl_path,
                         workspace_grants_path=workspace_grants_path,
+                        workspace_policies_path=workspace_policies_path,
                         error_code=error_code,
                         error_message=error_message,
                     )
@@ -263,8 +289,20 @@ class ExportService:
                     header=f"Grant DDLs for run {self.run_id}",
                 ),
             )
+        if all_policy_ddls:
+            self._write_text(
+                "policies/all_policies.sql",
+                render_sql_file(
+                    [block.rstrip() for block in all_policy_ddls],
+                    header=(
+                        "Column mask / row filter DDLs for run "
+                        f"{self.run_id}"
+                    ),
+                ),
+            )
         manifest["ddl_files"] = ddl_files
         manifest["grant_files"] = grant_files
+        manifest["policy_files"] = policy_files
         manifest["ddl_by_source"] = ddl_by_source
         self._write_text(
             "manifest.json",
@@ -286,6 +324,7 @@ class ExportService:
             ],
             "ddl_files": ddl_files,
             "grant_files": grant_files,
+            "policy_files": policy_files,
             "ddl_by_source": ddl_by_source,
         }
 

@@ -11,8 +11,22 @@ Edges represent "must exist before":
 5. Tables, managed volumes, functions, models (→ schema; external table/volume → external location)
 6. Views / dynamic views (→ referenced tables/views/functions)
 7. Materialized views (→ referenced objects + optional schedule config)
-8. Grants (→ securable)
-9. Workspace bindings (→ catalog)
+8. Column masks / row filters (→ table **and** the mask/filter function)
+9. Grants (→ securable)
+10. Workspace bindings (→ catalog)
+
+## Column masks & row filters
+
+A column mask or row filter binds a table to a SQL function, so both the table
+and the function must already exist before the binding is applied. Because
+functions import after tables, `SHOW CREATE TABLE`'s inline `MASK` / `WITH ROW
+FILTER` clauses are stripped from the captured CREATE DDL during migrate
+(`strip_inline_policy_clauses`) and re-applied as `ALTER TABLE ... SET MASK` /
+`SET ROW FILTER` statements in a dedicated **policy phase** that runs after every
+object (tables and functions) has been created and before/around grants. The
+statements are written to `policies/<TYPE>_<name>.sql` during export and
+catalog-rewritten by the standard migrate pass. Re-runs treat an already-bound
+policy as a skip.
 
 ## Topological sort
 

@@ -182,6 +182,72 @@ def grant_statements_for_object(obj: UCObject) -> list[str]:
     return statements
 
 
+# Object types that can carry column masks / row filters. UC uses ``ALTER TABLE``
+# to bind policies on all of these (materialized views and streaming tables
+# included).
+POLICY_TABLE_TYPES = {
+    ObjectType.TABLE,
+    ObjectType.EXTERNAL_TABLE,
+    ObjectType.MATERIALIZED_VIEW,
+    ObjectType.STREAMING_TABLE,
+}
+
+
+def _column_list(columns: Iterable[Any]) -> str:
+    return ", ".join(quote_identifier(str(col)) for col in columns if str(col))
+
+
+def mask_statements_for_object(obj: UCObject) -> list[str]:
+    """Build ``ALTER TABLE ... ALTER COLUMN ... SET MASK`` statements.
+
+    One statement per directly-defined column mask. ``USING COLUMNS`` is emitted
+    only when the mask declares extra input columns.
+    """
+
+    if obj.object_type not in POLICY_TABLE_TYPES:
+        return []
+    target = quote_full_name(obj.full_name)
+    statements: list[str] = []
+    for mask in obj.column_masks():
+        column = mask.get("column_name")
+        function_name = mask.get("function_name")
+        if not column or not function_name:
+            continue
+        using = mask.get("using_column_names") or []
+        using_clause = f" USING COLUMNS ({_column_list(using)})" if using else ""
+        statements.append(
+            f"ALTER TABLE {target} ALTER COLUMN {quote_identifier(str(column))} "
+            f"SET MASK {quote_full_name(str(function_name))}{using_clause};"
+        )
+    return statements
+
+
+def row_filter_statements_for_object(obj: UCObject) -> list[str]:
+    """Build the ``ALTER TABLE ... SET ROW FILTER ... ON (...)`` statement (0 or 1)."""
+
+    if obj.object_type not in POLICY_TABLE_TYPES:
+        return []
+    row_filter = obj.row_filter()
+    if not row_filter or not row_filter.get("function_name"):
+        return []
+    target = quote_full_name(obj.full_name)
+    columns = _column_list(row_filter.get("input_column_names") or [])
+    return [
+        f"ALTER TABLE {target} SET ROW FILTER "
+        f"{quote_full_name(str(row_filter['function_name']))} ON ({columns});"
+    ]
+
+
+def policy_statements_for_object(obj: UCObject) -> list[str]:
+    """All column-mask + row-filter binding statements for a table.
+
+    These are replayed in a dedicated phase after every object (tables *and*
+    the mask/filter functions they reference) has been created.
+    """
+
+    return mask_statements_for_object(obj) + row_filter_statements_for_object(obj)
+
+
 def render_sql_file(statements: list[str], *, header: str = "") -> str:
     lines = []
     if header:

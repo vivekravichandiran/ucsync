@@ -89,3 +89,49 @@ class UCObject:
         data["object_type"] = self.object_type.value
         data["last_modified_source"] = self.last_modified_source.value
         return data
+
+    def column_masks(self) -> list[dict[str, Any]]:
+        """Directly-defined column masks for this table.
+
+        Returns a list of ``{column_name, function_name, using_column_names}``.
+        Prefers the normalized ``definition['column_masks']`` populated by
+        inventory; falls back to the raw ``columns[i]['mask']`` shape returned by
+        the UC Tables REST API. Inherited (``effective_masks``) policies are
+        intentionally excluded.
+        """
+
+        normalized = self.definition.get("column_masks")
+        if normalized:
+            return [dict(item) for item in normalized if item]
+        derived: list[dict[str, Any]] = []
+        for column in self.definition.get("columns") or []:
+            if not isinstance(column, dict):
+                continue
+            mask = column.get("mask")
+            if isinstance(mask, dict) and mask.get("function_name"):
+                derived.append(
+                    {
+                        "column_name": column.get("name"),
+                        "function_name": mask.get("function_name"),
+                        "using_column_names": list(
+                            mask.get("using_column_names") or []
+                        ),
+                    }
+                )
+        return derived
+
+    def row_filter(self) -> Optional[dict[str, Any]]:
+        """Directly-defined row filter, or ``None``.
+
+        Returns ``{function_name, input_column_names}``. Reads the normalized
+        ``definition['row_filter']`` (top-level ``row_filter`` from the REST
+        payload); inherited (``effective_row_filters``) policies are excluded.
+        """
+
+        raw = self.definition.get("row_filter")
+        if isinstance(raw, dict) and raw.get("function_name"):
+            return {
+                "function_name": raw.get("function_name"),
+                "input_column_names": list(raw.get("input_column_names") or []),
+            }
+        return None

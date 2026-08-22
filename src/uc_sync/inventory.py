@@ -83,6 +83,51 @@ def _is_metric_view(table: dict) -> bool:
     )
 
 
+def _row_filter_from_payload(table: dict) -> dict | None:
+    """Extract the directly-defined row filter from a UC Tables REST payload.
+
+    The Tables API returns the directly-defined filter under the top-level
+    ``row_filter`` key as ``{function_name, input_column_names}``. Sibling keys
+    ``row_filters`` (a wrapper) and ``effective_row_filters`` (which include
+    inherited policies) are intentionally ignored so inventory records only what
+    is defined on this table.
+    """
+
+    raw = table.get("row_filter")
+    if isinstance(raw, dict) and raw.get("function_name"):
+        return {
+            "function_name": raw.get("function_name"),
+            "input_column_names": list(raw.get("input_column_names") or []),
+        }
+    return None
+
+
+def _column_masks_from_payload(table: dict) -> list[dict]:
+    """Extract directly-defined column masks from a UC Tables REST payload.
+
+    Each column carries its directly-defined mask under ``columns[i].mask`` as
+    ``{function_name[, using_column_names]}``. The per-column ``column_masks``
+    wrapper and ``effective_masks`` (inherited) keys are ignored.
+    """
+
+    masks: list[dict] = []
+    for column in table.get("columns") or []:
+        if not isinstance(column, dict):
+            continue
+        mask = column.get("mask")
+        if isinstance(mask, dict) and mask.get("function_name"):
+            masks.append(
+                {
+                    "column_name": column.get("name"),
+                    "function_name": mask.get("function_name"),
+                    "using_column_names": list(
+                        mask.get("using_column_names") or []
+                    ),
+                }
+            )
+    return masks
+
+
 SECURABLE_TYPE_FOR_OBJECT = {
     ObjectType.CATALOG: "catalog",
     ObjectType.SCHEMA: "schema",
@@ -376,6 +421,8 @@ class InventoryService:
                     "view_type": t.get("view_type"),
                     "view_subtype": t.get("view_subtype"),
                     "view_with_metrics": t.get("view_with_metrics"),
+                    "row_filter": _row_filter_from_payload(t),
+                    "column_masks": _column_masks_from_payload(t),
                 },
                 properties=t.get("properties") or {},
                 source_metadata=t,

@@ -158,6 +158,34 @@ def test_build_job_settings_includes_notebook_parameters():
     assert "job_clusters" in settings
 
 
+def test_default_job_cluster_uses_standard_access_mode():
+    # Standard (USER_ISOLATION) access mode is required to apply column masks /
+    # row filters, so it is the default. Single-node local[*] must NOT be set.
+    settings = build_job_settings(
+        job_name="UC-Sync-Test",
+        notebook_path="/Repos/UCSync/notebooks/UC_Sync_Main",
+        parameters={},
+    )
+    cluster = settings["job_clusters"][0]["new_cluster"]
+    assert cluster["data_security_mode"] == "USER_ISOLATION"
+    assert cluster["num_workers"] == 1  # shared mode needs >= 1 worker
+    assert "spark.master" not in cluster.get("spark_conf", {})
+
+
+def test_single_user_mode_keeps_single_node_config():
+    settings = build_job_settings(
+        job_name="UC-Sync-Test",
+        notebook_path="/Repos/UCSync/notebooks/UC_Sync_Main",
+        parameters={},
+        data_security_mode="SINGLE_USER",
+        num_workers=0,
+    )
+    cluster = settings["job_clusters"][0]["new_cluster"]
+    assert cluster["data_security_mode"] == "SINGLE_USER"
+    assert cluster["spark_conf"]["spark.master"] == "local[*]"
+    assert cluster["num_workers"] == 0
+
+
 def test_create_uc_sync_job_creates_and_runs():
     client = _FakeClient()
     result = create_uc_sync_job(

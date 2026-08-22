@@ -46,6 +46,9 @@ dbutils.widgets.text("existing_cluster_id", "")
 dbutils.widgets.text("spark_version", "15.4.x-scala2.12")
 dbutils.widgets.text("node_type_id", "Standard_DS3_v2")
 dbutils.widgets.text("num_workers", "0")
+# Standard (USER_ISOLATION) or serverless is required to apply column masks /
+# row filters. Single-user (SINGLE_USER / assigned) clusters cannot apply them.
+dbutils.widgets.text("data_security_mode", "USER_ISOLATION")
 
 # Cross-workspace only
 dbutils.widgets.text("source_workspace_url", "")
@@ -124,6 +127,8 @@ result = create_uc_sync_job(
     spark_version=dbutils.widgets.get("spark_version"),
     node_type_id=dbutils.widgets.get("node_type_id"),
     num_workers=int(dbutils.widgets.get("num_workers") or "0"),
+    data_security_mode=dbutils.widgets.get("data_security_mode").strip()
+    or "USER_ISOLATION",
 )
 
 print("=" * 58)

@@ -264,7 +264,7 @@ class MigrateExportService:
             "/objects.json"
         ):
             return self._rewrite_inventory(content)
-        _, object_type, encoded = _parse_artifact_name(relative)
+        artifact, object_type, encoded = _parse_artifact_name(relative)
         if lowered.endswith(".json"):
             rewritten = rewrite_json_text(
                 content,
@@ -277,11 +277,17 @@ class MigrateExportService:
                 self.catalog_mapping,
                 location_resolver=self.mapper,
             )
-            rewritten = strip_managed_storage_clauses(rewritten, object_type)
-            if object_type == "EXTERNAL_LOCATION":
-                rewritten = self._rewrite_external_location_sql(
-                    rewritten, encoded
-                )
+            # Managed-storage / collation / inline-policy stripping is only valid
+            # for CREATE DDL. Grants and policy files (``ALTER TABLE ... SET MASK
+            # / SET ROW FILTER``) must pass through untouched apart from catalog
+            # rewriting — otherwise strip_inline_policy_clauses would delete the
+            # SET MASK clause from the ALTER statement itself, corrupting it.
+            if artifact == "ddl":
+                rewritten = strip_managed_storage_clauses(rewritten, object_type)
+                if object_type == "EXTERNAL_LOCATION":
+                    rewritten = self._rewrite_external_location_sql(
+                        rewritten, encoded
+                    )
         return rewritten
 
     def _rewrite_external_location_sql(

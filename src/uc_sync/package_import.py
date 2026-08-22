@@ -24,6 +24,7 @@ class PackageImportResult:
     error_code: str = ""
     ddl_path: str = ""
     grants_path: str = ""
+    policies_path: str = ""
     dependency_level: int = 0
     import_order: int = 0
     source_definition_hash: str = ""
@@ -103,6 +104,43 @@ _NOT_FOUND_MARKERS = (
     "CANNOT BE FOUND",
     "NOSUCH",
 )
+
+# A column mask / row filter is already bound — re-runs treat this as a skip.
+_POLICY_EXISTS_MARKERS = (
+    "ALREADY HAS",
+    "ALREADY ASSIGNED",
+    "MASK_ALREADY",
+    "ROW_FILTER_ALREADY",
+    "ALREADY EXISTS",
+    "ALREADY_EXISTS",
+)
+
+# The compute cannot apply masks / row filters at all. Single-user (assigned)
+# access-mode clusters reject them; serverless or Standard (shared) access mode
+# is required. Surface this as MANUAL_ACTION_REQUIRED, never a bare failure.
+_POLICY_UNSUPPORTED_MARKERS = (
+    "ROW_COLUMN_ACCESS_POLICIES_NOT_SUPPORTED_ON_ASSIGNED_CLUSTERS",
+    "NOT SUPPORTED ON ASSIGNED CLUSTERS",
+)
+
+
+def _is_policy_exists_error(message: str) -> bool:
+    upper = str(message or "").upper()
+    return any(marker in upper for marker in _POLICY_EXISTS_MARKERS)
+
+
+def _is_policy_unsupported_error(message: str) -> bool:
+    upper = str(message or "").upper()
+    return any(marker in upper for marker in _POLICY_UNSUPPORTED_MARKERS)
+
+
+# Guidance emitted when the compute cannot apply policies.
+_POLICY_COMPUTE_HINT = (
+    "Column masks / row filters are not supported on single-user (assigned) "
+    "access-mode clusters. Re-run the import on serverless or a Standard "
+    "(shared) access-mode cluster to apply them."
+)
+
 
 _MANUAL_OBJECT_TYPES = {
     "STORAGE_CREDENTIAL",
@@ -343,6 +381,97 @@ class PackageImportEngine:
                             "securable; supply location_mapping_csv_path so the "
                             f"target uses a distinct path. {message[:1200]}"
                         )
+            results.append(result)
+        results.extend(self._apply_policy_files(inventory, by_target, len(results)))
+        return results
+
+    def _apply_policy_files(
+        self,
+        inventory: dict[str, dict[str, Any]],
+        by_target: dict[str, dict[str, Any]],
+        start_order: int,
+    ) -> list["PackageImportResult"]:
+        """Apply column masks / row filters after every object is created.
+
+        Runs as a dedicated late phase so the referenced mask/filter functions
+        (created after tables) and the tables themselves already exist. Each
+        ``policies/<name>.sql`` holds ``ALTER TABLE`` binding statements; re-runs
+        treat an already-bound policy as a skip.
+        """
+
+        policy_dir = self.root / "policies"
+        if not policy_dir.exists():
+            return []
+        policy_files = sorted(
+            path
+            for path in policy_dir.glob("*.sql")
+            if path.is_file() and not path.name.startswith("all_")
+        )
+        results: list[PackageImportResult] = []
+        for offset, path in enumerate(policy_files, start=1):
+            object_type, parsed_name = _parse_sql_filename(path.name)
+            target_full_name = self._map_name(parsed_name)
+            inventory_row = (
+                by_target.get(target_full_name)
+                or inventory.get(parsed_name)
+                or inventory.get(target_full_name)
+                or {}
+            )
+            source_full_name = str(
+                inventory_row.get("source_full_name")
+                or inventory_row.get("full_name")
+                or parsed_name
+            )
+            result = PackageImportResult(
+                object_type=object_type,
+                source_full_name=source_full_name,
+                target_full_name=target_full_name,
+                full_name=source_full_name,
+                action="DRY_RUN" if self.dry_run else "APPLY_POLICY",
+                status="PENDING",
+                policies_path=str(path),
+                dependency_level=_type_rank(object_type),
+                import_order=start_order + offset,
+            )
+            try:
+                statements = _split_statements(path.read_text(encoding="utf-8"))
+                if self.dry_run:
+                    result.status = "PENDING"
+                    result.message = f"dry_run policy statements={len(statements)}"
+                else:
+                    self._apply_context(object_type, target_full_name)
+                    skipped_existing = False
+                    unsupported = ""
+                    for statement in statements:
+                        try:
+                            self.sql.execute(statement)
+                        except Exception as exec_exc:  # noqa: BLE001
+                            message = str(exec_exc)
+                            if _is_policy_exists_error(message):
+                                skipped_existing = True
+                                continue
+                            if _is_policy_unsupported_error(message):
+                                unsupported = message
+                                break
+                            raise
+                    if unsupported:
+                        result.status = "MANUAL_ACTION_REQUIRED"
+                        result.action = "MANUAL"
+                        result.error_code = "POLICY_COMPUTE_UNSUPPORTED"
+                        result.message = f"{_POLICY_COMPUTE_HINT} {unsupported[:400]}"
+                    else:
+                        result.status = "SUCCESS"
+                        result.action = (
+                            "SKIP_EXISTING" if skipped_existing else "APPLY_POLICY"
+                        )
+                        prefix = "already applied; " if skipped_existing else ""
+                        result.message = prefix + (
+                            statements[0][:1000] if statements else ""
+                        )
+            except Exception as exc:  # noqa: BLE001
+                result.status = "FAILURE"
+                result.error_code = type(exc).__name__
+                result.message = str(exc)
             results.append(result)
         return results
 

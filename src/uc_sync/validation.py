@@ -7,8 +7,13 @@ from typing import Any, Iterable, List, Optional
 
 from uc_sync.config import SyncConfig
 from uc_sync.export import canonical_hash
+from uc_sync.inventory import (
+    _column_masks_from_payload,
+    _row_filter_from_payload,
+)
 from uc_sync.mapping import MappingResolver
 from uc_sync.models import UCObject, ValidationStatus
+from uc_sync.sql_ddl import POLICY_TABLE_TYPES
 from uc_sync.workspace_client import WorkspaceClient
 
 
@@ -93,6 +98,13 @@ class ValidationService:
                 comparison = self._location_comparison(
                     obj, target_details, location_mapping
                 )
+                policy_ok, policy_detail = self._policy_comparison(
+                    obj, target_details
+                )
+                matches = comparison["matches"] and policy_ok
+                detail = comparison["detail"]
+                if not policy_ok:
+                    detail = (f"{detail}; " if detail else "") + policy_detail
                 results.append(
                     ValidationResult(
                         object_type=obj.object_type.value,
@@ -100,10 +112,10 @@ class ValidationService:
                         target_full_name=target_name,
                         status=(
                             ValidationStatus.MATCH.value
-                            if comparison["matches"]
+                            if matches
                             else ValidationStatus.DIFFERENT.value
                         ),
-                        detail=comparison["detail"],
+                        detail=detail,
                         source_definition_hash=canonical_hash(obj),
                         source_location=comparison["source_location"],
                         expected_target_location=comparison[
@@ -170,6 +182,48 @@ class ValidationService:
         if obj.object_type.value == "EXTERNAL_TABLE":
             return self.mapper.location_mapping_for_url(source_location)
         return None
+
+    @staticmethod
+    def _policy_comparison(
+        obj: UCObject, target: dict[str, Any]
+    ) -> tuple[bool, str]:
+        """Diff directly-defined column masks / row filter, source vs target.
+
+        Function names are compared by their ``schema.object`` suffix because the
+        catalog differs between source and target.
+        """
+
+        if obj.object_type not in POLICY_TABLE_TYPES:
+            return True, ""
+
+        def _suffix(name: Any) -> str:
+            text = str(name or "")
+            return text.partition(".")[2] or text
+
+        src_masks = {
+            (m.get("column_name"), _suffix(m.get("function_name")))
+            for m in obj.column_masks()
+        }
+        tgt_masks = {
+            (m.get("column_name"), _suffix(m.get("function_name")))
+            for m in _column_masks_from_payload(target)
+        }
+        source_rf = obj.row_filter()
+        target_rf = _row_filter_from_payload(target)
+        src_rf = _suffix(source_rf["function_name"]) if source_rf else None
+        tgt_rf = _suffix(target_rf["function_name"]) if target_rf else None
+
+        problems: list[str] = []
+        if src_masks != tgt_masks:
+            problems.append(
+                f"column masks differ (source={sorted(src_masks)}, "
+                f"target={sorted(tgt_masks)})"
+            )
+        if src_rf != tgt_rf:
+            problems.append(
+                f"row filter differs (source={src_rf}, target={tgt_rf})"
+            )
+        return (not problems), "; ".join(problems)
 
     def _location_comparison(
         self,
