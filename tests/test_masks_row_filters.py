@@ -346,6 +346,42 @@ def test_package_import_policy_dry_run(tmp_path: Path):
     assert not any("SET MASK" in s for s in sql.statements)
 
 
+def test_package_import_policy_unsupported_cluster_is_manual(tmp_path: Path):
+    root = _policy_package(tmp_path)
+
+    class AssignedClusterSql:
+        def execute(self, sql: str):
+            if "SET MASK" in sql or "SET ROW FILTER" in sql:
+                raise RuntimeError(
+                    "[INVALID_PARAMETER_VALUE."
+                    "ROW_COLUMN_ACCESS_POLICIES_NOT_SUPPORTED_ON_ASSIGNED_CLUSTERS] "
+                    "Query on table t with row filter or column mask not supported "
+                    "on assigned clusters."
+                )
+
+    results = PackageImportEngine(str(root), AssignedClusterSql(), dry_run=False).run()
+    policy_rows = [r for r in results if r.policies_path]
+    assert policy_rows[0].status == "MANUAL_ACTION_REQUIRED"
+    assert policy_rows[0].error_code == "POLICY_COMPUTE_UNSUPPORTED"
+    assert "serverless or a Standard" in policy_rows[0].message
+
+
+def test_direct_import_policy_unsupported_cluster_is_manual():
+    cfg = SyncConfig(mappings={"catalogs": {"c": "tgt"}}, dry_run=False)
+
+    class AssignedClusterSql:
+        def execute(self, sql: str):
+            raise RuntimeError(
+                "ErrorClass=INVALID_PARAMETER_VALUE."
+                "ROW_COLUMN_ACCESS_POLICIES_NOT_SUPPORTED_ON_ASSIGNED_CLUSTERS"
+            )
+
+    engine = ImportEngine(target=None, cfg=cfg, sql_executor=AssignedClusterSql())
+    results = engine._apply_policies([_table_with_policies()], start_order=0)
+    assert results[0].status == "MANUAL_ACTION_REQUIRED"
+    assert results[0].error_code == "POLICY_COMPUTE_UNSUPPORTED"
+
+
 def test_package_import_policy_already_applied_is_skip(tmp_path: Path):
     root = _policy_package(tmp_path)
 

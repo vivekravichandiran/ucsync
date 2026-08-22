@@ -115,10 +115,31 @@ _POLICY_EXISTS_MARKERS = (
     "ALREADY_EXISTS",
 )
 
+# The compute cannot apply masks / row filters at all. Single-user (assigned)
+# access-mode clusters reject them; serverless or Standard (shared) access mode
+# is required. Surface this as MANUAL_ACTION_REQUIRED, never a bare failure.
+_POLICY_UNSUPPORTED_MARKERS = (
+    "ROW_COLUMN_ACCESS_POLICIES_NOT_SUPPORTED_ON_ASSIGNED_CLUSTERS",
+    "NOT SUPPORTED ON ASSIGNED CLUSTERS",
+)
+
 
 def _is_policy_exists_error(message: str) -> bool:
     upper = str(message or "").upper()
     return any(marker in upper for marker in _POLICY_EXISTS_MARKERS)
+
+
+def _is_policy_unsupported_error(message: str) -> bool:
+    upper = str(message or "").upper()
+    return any(marker in upper for marker in _POLICY_UNSUPPORTED_MARKERS)
+
+
+# Guidance emitted when the compute cannot apply policies.
+_POLICY_COMPUTE_HINT = (
+    "Column masks / row filters are not supported on single-user (assigned) "
+    "access-mode clusters. Re-run the import on serverless or a Standard "
+    "(shared) access-mode cluster to apply them."
+)
 
 
 _MANUAL_OBJECT_TYPES = {
@@ -420,22 +441,33 @@ class PackageImportEngine:
                 else:
                     self._apply_context(object_type, target_full_name)
                     skipped_existing = False
+                    unsupported = ""
                     for statement in statements:
                         try:
                             self.sql.execute(statement)
                         except Exception as exec_exc:  # noqa: BLE001
-                            if _is_policy_exists_error(str(exec_exc)):
+                            message = str(exec_exc)
+                            if _is_policy_exists_error(message):
                                 skipped_existing = True
                                 continue
+                            if _is_policy_unsupported_error(message):
+                                unsupported = message
+                                break
                             raise
-                    result.status = "SUCCESS"
-                    result.action = (
-                        "SKIP_EXISTING" if skipped_existing else "APPLY_POLICY"
-                    )
-                    prefix = "already applied; " if skipped_existing else ""
-                    result.message = prefix + (
-                        statements[0][:1000] if statements else ""
-                    )
+                    if unsupported:
+                        result.status = "MANUAL_ACTION_REQUIRED"
+                        result.action = "MANUAL"
+                        result.error_code = "POLICY_COMPUTE_UNSUPPORTED"
+                        result.message = f"{_POLICY_COMPUTE_HINT} {unsupported[:400]}"
+                    else:
+                        result.status = "SUCCESS"
+                        result.action = (
+                            "SKIP_EXISTING" if skipped_existing else "APPLY_POLICY"
+                        )
+                        prefix = "already applied; " if skipped_existing else ""
+                        result.message = prefix + (
+                            statements[0][:1000] if statements else ""
+                        )
             except Exception as exc:  # noqa: BLE001
                 result.status = "FAILURE"
                 result.error_code = type(exc).__name__

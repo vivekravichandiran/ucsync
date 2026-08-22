@@ -252,7 +252,7 @@ def _job_cluster_spec(
     spark_version: str,
     node_type_id: str,
     num_workers: int,
-    data_security_mode: str = "SINGLE_USER",
+    data_security_mode: str = "USER_ISOLATION",
 ) -> dict[str, Any]:
     return {
         "job_cluster_key": "uc_sync_cluster",
@@ -261,13 +261,7 @@ def _job_cluster_spec(
             "node_type_id": node_type_id,
             "num_workers": num_workers,
             "data_security_mode": data_security_mode,
-            "spark_conf": {
-                "spark.databricks.cluster.profile": "singleNode"
-                if num_workers == 0
-                else "serverless"
-            }
-            if num_workers == 0
-            else {},
+            "spark_conf": {},
             "custom_tags": {"uc_sync": "true"},
         },
     }
@@ -282,6 +276,7 @@ def build_job_settings(
     spark_version: str = "15.4.x-scala2.12",
     node_type_id: str = "Standard_DS3_v2",
     num_workers: int = 0,
+    data_security_mode: str = "USER_ISOLATION",
     libraries: Optional[list[dict[str, Any]]] = None,
     timeout_seconds: int = 0,
     max_concurrent_runs: int = 1,
@@ -313,13 +308,18 @@ def build_job_settings(
     if existing_cluster_id:
         task["existing_cluster_id"] = existing_cluster_id
     else:
+        mode = str(data_security_mode or "USER_ISOLATION").upper()
         cluster = _job_cluster_spec(
             spark_version=spark_version,
             node_type_id=node_type_id,
             num_workers=num_workers,
+            data_security_mode=mode,
         )
-        # Single-node job cluster needs spark.master local[*]
-        if num_workers == 0:
+        if mode == "SINGLE_USER" and num_workers == 0:
+            # Single-user single-node job cluster needs spark.master local[*].
+            # NOTE: single-user (assigned) access mode cannot apply column masks
+            # or row filters — use USER_ISOLATION (Standard) or serverless for
+            # workloads that migrate policies.
             cluster["new_cluster"]["spark_conf"] = {
                 "spark.master": "local[*]",
                 "spark.databricks.cluster.profile": "singleNode",
@@ -329,6 +329,10 @@ def build_job_settings(
                 "uc_sync": "true",
             }
             cluster["new_cluster"]["num_workers"] = 0
+        elif num_workers == 0:
+            # Standard (shared) access mode does not support the single-node
+            # local[*] profile; ensure at least one worker for a valid cluster.
+            cluster["new_cluster"]["num_workers"] = 1
         settings["job_clusters"] = [cluster]
         task["job_cluster_key"] = "uc_sync_cluster"
 
@@ -346,6 +350,7 @@ def create_uc_sync_job(
     spark_version: str = "15.4.x-scala2.12",
     node_type_id: str = "Standard_DS3_v2",
     num_workers: int = 0,
+    data_security_mode: str = "USER_ISOLATION",
     host: Optional[str] = None,
     token: Optional[str] = None,
     profile: Optional[str] = None,
@@ -378,6 +383,7 @@ def create_uc_sync_job(
         spark_version=spark_version,
         node_type_id=node_type_id,
         num_workers=num_workers,
+        data_security_mode=data_security_mode,
         tags=tags,
     )
 

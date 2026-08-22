@@ -11,6 +11,10 @@ from uc_sync.dependency import plan
 from uc_sync.export import canonical_hash
 from uc_sync.mapping import MappingResolver
 from uc_sync.models import UCObject
+from uc_sync.package_import import (
+    _POLICY_COMPUTE_HINT as POLICY_COMPUTE_HINT,
+    _is_policy_unsupported_error,
+)
 from uc_sync.sql_ddl import (
     POLICY_TABLE_TYPES,
     create_ddl_for_object,
@@ -166,6 +170,24 @@ class ImportEngine:
                 for statement in statements:
                     self.sql.execute(statement)
             except Exception as exc:  # noqa: BLE001 - per-object audit is required
+                message = str(exc)
+                # Single-user (assigned) clusters cannot apply masks / row
+                # filters; flag as MANUAL_ACTION_REQUIRED with actionable guidance
+                # rather than a bare error.
+                if _is_policy_unsupported_error(message):
+                    results.append(
+                        self._result(
+                            obj,
+                            target_table,
+                            "MANUAL",
+                            "MANUAL_ACTION_REQUIRED",
+                            0,
+                            order,
+                            f"{POLICY_COMPUTE_HINT} {message[:400]}",
+                            "POLICY_COMPUTE_UNSUPPORTED",
+                        )
+                    )
+                    continue
                 results.append(
                     self._result(
                         obj,
@@ -174,7 +196,7 @@ class ImportEngine:
                         "ERROR",
                         0,
                         order,
-                        str(exc),
+                        message,
                         type(exc).__name__,
                     )
                 )
