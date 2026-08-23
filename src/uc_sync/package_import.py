@@ -248,13 +248,42 @@ class PackageImportEngine:
         dry_run: bool = False,
         apply_grants: bool = True,
         catalog_mapping: Optional[dict[str, str]] = None,
+        toggles: Optional[dict[str, bool]] = None,
     ):
         self.root = Path(package_root)
         self.sql = sql_executor
         self.dry_run = dry_run
         self.apply_grants = apply_grants
         self.catalog_mapping = dict(catalog_mapping or {})
+        # create_*/apply_* gates (default all-on). create_* gate object creation;
+        # apply_* gate governance. apply_grants kw is kept for back-compat.
+        self.toggles = {**(toggles or {})}
+        if "apply_grants" not in self.toggles:
+            self.toggles["apply_grants"] = apply_grants
+        self.apply_grants = self.toggles["apply_grants"]
         self._context: tuple[str, str] = ("", "")
+
+    # Object type → the create_* toggle that gates its creation.
+    _CREATE_TOGGLE_FOR_TYPE = {
+        "STORAGE_CREDENTIAL": "create_storage_credentials",
+        "EXTERNAL_LOCATION": "create_external_locations",
+        "CATALOG": "create_catalogs",
+        "SCHEMA": "create_schemas",
+        "VOLUME": "create_volumes",
+        "EXTERNAL_VOLUME": "create_volumes",
+        "FUNCTION": "create_functions",
+        "TABLE": "create_tables",
+        "EXTERNAL_TABLE": "create_tables",
+        "MATERIALIZED_VIEW": "create_tables",
+        "STREAMING_TABLE": "create_tables",
+        "VIEW": "create_views",
+        "DYNAMIC_VIEW": "create_views",
+        "METRIC_VIEW": "create_views",
+    }
+
+    def _create_enabled(self, object_type: str) -> bool:
+        toggle = self._CREATE_TOGGLE_FOR_TYPE.get(object_type)
+        return self.toggles.get(toggle, True) if toggle else True
 
     def run(self) -> list[PackageImportResult]:
         if not self.root.exists():
@@ -321,6 +350,22 @@ class PackageImportEngine:
                     _normalize_create_statement(statement)
                     for statement in _split_statements(sql_text)
                 ]
+                if not self._create_enabled(object_type):
+                    # create_*=false: the object is assumed to already exist on
+                    # target; skip creation but still (later) govern it. Grants
+                    # are still applied so existing objects get their ACLs.
+                    result.status = "SUCCESS"
+                    result.action = "SKIP_CREATE_DISABLED"
+                    if not self.dry_run:
+                        grant_warning = self._apply_grants_file(grants_path)
+                        result.message = (
+                            "create disabled by toggle; assumed pre-existing"
+                            + (f"; grant warning: {grant_warning}" if grant_warning else "")
+                        )
+                    else:
+                        result.message = "create disabled by toggle (dry run)"
+                    results.append(result)
+                    continue
                 if object_type in _MANUAL_OBJECT_TYPES and not self.dry_run:
                     # Credential/share DDL is often not executable via Spark SQL.
                     result.status = "MANUAL_ACTION_REQUIRED"
@@ -402,12 +447,15 @@ class PackageImportEngine:
                         )
             results.append(result)
         # Governance phases (after every object exists): governed tags, then ABAC
-        # policies, then classic mask / row-filter bindings.
-        results.extend(self._apply_governance_dir(
-            "tags", "APPLY_TAGS", inventory, by_target, len(results)))
-        results.extend(self._apply_governance_dir(
-            "abac", "CREATE_POLICY", inventory, by_target, len(results)))
-        results.extend(self._apply_policy_files(inventory, by_target, len(results)))
+        # policies, then classic mask / row-filter bindings — each toggle-gated.
+        if self.toggles.get("apply_tags", True):
+            results.extend(self._apply_governance_dir(
+                "tags", "APPLY_TAGS", inventory, by_target, len(results)))
+        if self.toggles.get("create_abac_policies", True):
+            results.extend(self._apply_governance_dir(
+                "abac", "CREATE_POLICY", inventory, by_target, len(results)))
+        if self.toggles.get("apply_masks_row_filters", True):
+            results.extend(self._apply_policy_files(inventory, by_target, len(results)))
         return results
 
     def _apply_governance_dir(
