@@ -53,6 +53,19 @@ results = PackageImportEngine(
     migrated, SparkSqlExecutor(spark), dry_run=cfg.dry_run, toggles=toggles,
 ).run()
 
+# Clean migration report (spine + governance sheets) under reports/.
+try:
+    from uc_sync.report import build_report_from_file
+    inv = f"{migrated}/inventory/objects.json"
+    report_path = f"/dbfs{base}/reports/import.xlsx" if base.startswith("/Volumes") else f"{base}/reports/import.xlsx"
+    build_report_from_file(
+        inv, report_path, run_id=run_id,
+        import_results=[r.to_dict() for r in results],
+    )
+    print(f"report: {report_path}")
+except Exception as _exc:  # noqa: BLE001 - report is best-effort
+    print(f"report generation skipped: {_exc}")
+
 summary = {}
 for r in results:
     summary[r.status] = summary.get(r.status, 0) + 1
