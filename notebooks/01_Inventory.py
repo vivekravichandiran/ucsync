@@ -83,6 +83,17 @@ dst = f"{_local(run_dir)}/inventory.json"
 with open(dst, "w") as fh:
     fh.write(payload)
 
+# Operator-facing inventory report (spine + governance sheets) under reports/.
+try:
+    from uc_sync.report import build_report
+    report_path = f"{cfg.export_volume_path.rstrip('/')}/run_{run_id}/reports/inventory.xlsx"
+    build_report([o.to_dict() for o in objects], report_path, run_id=run_id)
+    print(f"report: {report_path}")
+except Exception as _exc:  # noqa: BLE001 - report is best-effort
+    import traceback
+    print(f"report generation skipped: {_exc!r}")
+    traceback.print_exc()
+
 by_type = {}
 for o in objects:
     by_type[o.object_type.value] = by_type.get(o.object_type.value, 0) + 1
