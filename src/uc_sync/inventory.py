@@ -208,6 +208,24 @@ class InventoryService:
             for obj in table_objects
             if obj.storage_location
         ]
+        # Catalog/schema managed-location roots also reference external locations
+        # that no table sits directly under (e.g. an EL backing only the catalog
+        # root). Feed them into discovery so those ELs are created on the target.
+        for obj in objects:
+            # Only in-scope catalogs/schemas — _iter_catalogs yields every catalog
+            # in the metastore, so an unguarded loop would pull in every catalog's
+            # external location.
+            if obj.object_type in {ObjectType.CATALOG, ObjectType.SCHEMA} and allowed(
+                obj, self.cfg
+            ):
+                root = (
+                    (obj.definition or {}).get("storage_root")
+                    or (obj.definition or {}).get("storage_location")
+                    or obj.storage_location
+                    or (obj.source_metadata or {}).get("storage_root")
+                )
+                if root:
+                    table_locations.append(str(root))
         locations = list(self._iter_external_locations(table_locations))
         for table in table_objects:
             path = str(table.storage_location or "").rstrip("/")
