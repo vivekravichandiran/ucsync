@@ -72,7 +72,9 @@ try:
     )
     print(f"report: {report_path}")
 except Exception as _exc:  # noqa: BLE001 - report is best-effort
-    print(f"report generation skipped: {_exc}")
+    import traceback
+    print(f"report generation skipped: {_exc!r}")
+    traceback.print_exc()
 
 summary = {}
 for r in results:

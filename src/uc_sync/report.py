@@ -7,6 +7,7 @@ which mask/policy/tag/grant is applied where (design §9). Kept deliberately sim
 
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -137,8 +138,16 @@ def build_report(
                 ", ".join(g.get("privileges") or []),
             ])
 
+    # UC Volumes are mounted via FUSE, which only supports sequential writes.
+    # openpyxl.save() writes a ZIP archive and needs a seekable target, so it
+    # fails when handed a /Volumes/... path directly. Build the workbook in an
+    # in-memory buffer, then flush the finished bytes in one sequential write —
+    # which the Volume FUSE mount does support (same pattern the export/bundle
+    # writers use to land files on the Volume).
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    wb.save(out_path)
+    buf = io.BytesIO()
+    wb.save(buf)
+    Path(out_path).write_bytes(buf.getvalue())
     return out_path
 
 

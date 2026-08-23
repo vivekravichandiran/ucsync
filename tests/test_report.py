@@ -39,3 +39,39 @@ def test_build_report_has_governance_sheets(tmp_path):
     # Tags sheet has the column tag.
     tag_rows = list(wb["Tags"].iter_rows(values_only=True))
     assert any("SSN" in str(r) for r in tag_rows)
+
+
+def test_build_report_saves_to_buffer_not_path(tmp_path, monkeypatch):
+    """UC Volumes FUSE mounts reject the seeks openpyxl needs to write a ZIP to a
+    path directly, so the workbook must be built in an in-memory buffer and then
+    flushed to the Volume with a single sequential write. Pin that contract:
+    Workbook.save must be handed a file-like buffer, never a str/Path target."""
+    import io
+    from pathlib import Path
+    from openpyxl import Workbook
+
+    save_targets = []
+    real_save = Workbook.save
+
+    def _spy_save(self, target):  # noqa: ANN001
+        save_targets.append(target)
+        return real_save(self, target)
+
+    monkeypatch.setattr(Workbook, "save", _spy_save, raising=True)
+
+    out = tmp_path / "reports" / "import.xlsx"
+    objects = [{"object_type": "CATALOG", "full_name": "c", "owner": "me",
+                "tags": {}, "grants": []}]
+    build_report(objects, str(out), run_id="r1")
+
+    assert save_targets, "Workbook.save was never called"
+    for target in save_targets:
+        assert not isinstance(target, (str, Path)), (
+            "workbook saved to a filesystem path (fails on Volume FUSE); "
+            "it must be saved to an in-memory buffer then written sequentially"
+        )
+        assert isinstance(target, io.BytesIO)
+
+    assert out.exists()
+    from openpyxl import load_workbook
+    assert "Objects" in load_workbook(out).sheetnames
