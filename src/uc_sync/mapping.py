@@ -108,6 +108,19 @@ class MappingResolver:
             "target_credential": str(target_credential),
         }
 
+    def target_access_connector_id(self) -> Optional[str]:
+        """Target-region access-connector id for creating storage credentials.
+
+        Taken from the mapping file (first row that specifies it). Storage
+        credentials are metastore-scoped, so a single target connector typically
+        backs them all.
+        """
+        for item in self.location_mappings():
+            value = str(item.get("target_access_connector_id") or "").strip()
+            if value:
+                return value
+        return None
+
     def managed_storage_root(self, catalog_name: str) -> Optional[str]:
         managed = self.mappings.get("managed_storage") or {}
         explicit = (managed.get("catalogs") or {}).get(catalog_name)

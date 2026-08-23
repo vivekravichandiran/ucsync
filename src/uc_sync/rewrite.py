@@ -44,6 +44,25 @@ def _rewrite_storage_urls(text: str, resolver: MappingResolver) -> str:
     return pattern.sub(replace, text)
 
 
+def rewrite_access_connector_id(text: str, target_connector_id: str) -> str:
+    """Point a storage-credential's ``ACCESS_CONNECTOR_ID`` at the target connector.
+
+    The source connector lives in the source region and is unusable on the target,
+    so a target-region access-connector id (from the mapping file) is substituted
+    when creating the credential. No-op when no target id is provided.
+    """
+
+    target = str(target_connector_id or "").strip()
+    if not target:
+        return text
+    return re.sub(
+        r"(ACCESS_CONNECTOR_ID\s*=\s*')[^']*(')",
+        rf"\g<1>{target}\g<2>",
+        str(text or ""),
+        flags=re.IGNORECASE,
+    )
+
+
 def strip_managed_storage_clauses(text: str, object_type: str = "") -> str:
     """Drop source managed LOCATION clauses so the target metastore assigns storage.
 

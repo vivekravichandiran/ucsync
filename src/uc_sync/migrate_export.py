@@ -11,6 +11,7 @@ from typing import Any, Optional
 from uc_sync.mapping import MappingResolver
 from uc_sync.models import ObjectType
 from uc_sync.rewrite import (
+    rewrite_access_connector_id,
     rewrite_json_text,
     rewrite_json_value,
     rewrite_text,
@@ -226,6 +227,11 @@ class MigrateExportService:
             # SET MASK clause from the ALTER statement itself, corrupting it.
             if artifact == "ddl":
                 rewritten = strip_managed_storage_clauses(rewritten, object_type)
+                if object_type == "STORAGE_CREDENTIAL":
+                    # Point the credential at the target-region access connector.
+                    rewritten = rewrite_access_connector_id(
+                        rewritten, self.mapper.target_access_connector_id() or ""
+                    )
         return rewritten
 
     def _rewrite_inventory(self, content: str) -> str:

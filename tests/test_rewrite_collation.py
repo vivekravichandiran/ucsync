@@ -173,3 +173,14 @@ def test_catalog_managed_location_is_kept_not_stripped():
     )
     stripped = strip_managed_storage_clauses(table_ddl, "TABLE")
     assert "LOCATION" not in stripped
+
+
+def test_rewrite_access_connector_id():
+    from uc_sync.rewrite import rewrite_access_connector_id
+    ddl = ("CREATE STORAGE CREDENTIAL IF NOT EXISTS `c` WITH AZURE_MANAGED_IDENTITY "
+           "(ACCESS_CONNECTOR_ID = '/subscriptions/SRC/.../connectors/src-ac');")
+    out = rewrite_access_connector_id(ddl, "/subscriptions/TGT/.../connectors/tgt-ac")
+    assert "/subscriptions/TGT/.../connectors/tgt-ac" in out
+    assert "src-ac" not in out
+    # No target id -> unchanged.
+    assert rewrite_access_connector_id(ddl, "") == ddl

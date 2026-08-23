@@ -366,7 +366,18 @@ class PackageImportEngine:
                         result.message = "create disabled by toggle (dry run)"
                     results.append(result)
                     continue
-                if object_type in _MANUAL_OBJECT_TYPES and not self.dry_run:
+                # MI-based storage credentials carry no secret and CAN be created
+                # from the access-connector id, so they are executed (not MANUAL).
+                mi_credential = object_type == "STORAGE_CREDENTIAL" and any(
+                    "AZURE_MANAGED_IDENTITY" in s.upper()
+                    and "ACCESS_CONNECTOR_ID" in s.upper()
+                    for s in statements
+                )
+                if (
+                    object_type in _MANUAL_OBJECT_TYPES
+                    and not mi_credential
+                    and not self.dry_run
+                ):
                     # Credential/share DDL is often not executable via Spark SQL.
                     result.status = "MANUAL_ACTION_REQUIRED"
                     result.action = "MANUAL"

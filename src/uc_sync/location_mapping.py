@@ -18,6 +18,7 @@ class LocationMapping:
     target_credential: str
     source_external_location: str = ""
     target_external_location_url: str = ""
+    target_access_connector_id: str = ""
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -29,6 +30,7 @@ class LocationMapping:
             "target_external_location_url": (
                 self.target_external_location_url or self.target_location
             ),
+            "target_access_connector_id": self.target_access_connector_id,
         }
 
 
@@ -40,6 +42,8 @@ _ALIASES = {
     "target_name": "target_external_location",
     "target_storage_credential": "target_credential",
     "credential": "target_credential",
+    "target_connector_id": "target_access_connector_id",
+    "access_connector_id": "target_access_connector_id",
 }
 
 
@@ -83,6 +87,9 @@ def parse_location_mappings(
                 or row.get("external_location_target_url")
                 or row.get("target_location")
             ),
+            target_access_connector_id=str(
+                row.get("target_access_connector_id") or ""
+            ).strip(),
         )
         missing = [
             field
