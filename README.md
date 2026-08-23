@@ -1,88 +1,43 @@
-# UCSync
+# UC Governance Migration Utility
 
-Databricks **notebook + job** Unity Catalog metadata synchronization utility.
-It supports cross-workspace migration and same-workspace catalog-to-catalog
-local mode. Not a CLI/VM app.
+Migrates **Unity Catalog structure + governance** (metadata + ACLs) from a source
+metastore (region 1) to a target metastore (region 2). It **never moves table
+data** — it creates empty, fully-governed table shells; a separate data-migration
+utility clones data via Delta Share + Deep Clone.
 
-## Status
+It is one of three utilities in a region move:
 
-Live feasibility against `uc-source` / `uc-target` profiles: **GO** for inventory/export/compare. Import mutations require mapping + secret scopes. See [docs/feasibility.md](docs/feasibility.md).
+| Utility | Owns |
+|---|---|
+| Workspace-migration | identities (users/groups/SPs) + **account-level governed-tag definitions** |
+| **This utility** | UC structure + full table definitions + governance (tags, ABAC, classic masks, grants) |
+| Data-migration | table data via Delta Share + Deep Clone (run as an ABAC-exempt principal) |
 
-| Workspace | Profile | Metastore |
-|-----------|---------|-----------|
-| Source | `uc-source` | `008f5578-1fca-4f87-b4fb-ce0545efc00e` (westus3) |
-| Target | `uc-target` | `5a7903e7-8a04-4b13-987d-bfa7f6b5e906` (eastus) |
+## What it reproduces (under the same names as source)
+Storage credentials, external locations, catalogs, schemas, volumes, functions,
+views; **full table definitions** (columns, comments, `TBLPROPERTIES`,
+partitioning, clustering, constraints, generated & identity columns — everything
+except data); **governed-tag assignments**; **ABAC policies** (verbatim, incl.
+each policy's `EXCEPT`); **classic column masks / row filters**; **grants**.
 
-## Layout
+## Quick start
+1. Prerequisites (once): target metastore + storage, and account-level governed-tag
+   definitions — see [`docs/manual-actions.md`](docs/manual-actions.md).
+2. Run **`notebooks/01_Inventory`** on the source (scope with `catalogs`/`schemas`).
+3. Run **`notebooks/02_Export`** (same `run_id`, provide `mapping_file_path`).
+4. (Airgap) move the `run_<id>/` folder to the target.
+5. Run **`notebooks/03_Import`** on the target (`create_*`/`apply_*` toggles).
 
-```
-notebooks/UC_Sync_Main.py        # process orchestrator
-notebooks/UC_Sync_Create_Job.py  # creates/runs the Databricks Job
-src/uc_sync/                     # implementation package
-configs/example.yaml             # mappings + selection
-docs/                            # architecture + feasibility
-resources/jobs/                  # job stub
-tests/
-```
+Follow [`docs/runbook.md`](docs/runbook.md) — a scenario-by-scenario guide with exact
+widget values. Reference: [`docs/configuration.md`](docs/configuration.md),
+[`docs/object-support-matrix.md`](docs/object-support-matrix.md),
+[`docs/architecture.md`](docs/architecture.md),
+[`docs/troubleshooting.md`](docs/troubleshooting.md).
 
-## Docs
-
-- [Technical feasibility](docs/feasibility.md)
-- [Architecture](docs/architecture.md)
-- [Object support matrix](docs/uc-object-support-matrix.md)
-- [Permissions](docs/permissions.md)
-- [API mapping](docs/api-mapping.md)
-- [Local mode and reports](docs/local-mode-and-reports.md)
-- [Job deployment / wrapper](docs/job-deployment.md)
-
-## Create the Job
-
-From a Databricks notebook (current workspace auth):
-
-```python
-from uc_sync.job_wrapper import create_local_sync_job
-
-result = create_local_sync_job(
-    job_name="UC-Sync-Local-Sandbox",
-    catalog_mapping_json='{"ril_sandbox":"ril_sandbox_copy"}',
-    dry_run="true",
-    run_now=True,
-)
-```
-
-Or open `notebooks/UC_Sync_Create_Job`, set widgets, and run.
-
-## Local mode
-
-No workspace credentials are required:
-
-```text
-execution_mode = LOCAL
-catalog_mapping_json = {"ril_sandbox":"ril_sandbox_copy"}
-components = tables_views
-dry_run = true
-```
-
-Scope a run with `components`, for example:
-
-- `tables`
-- `tables_views` or `tables+views`
-- `dynamic_views`
-- `tables+functions+volumes`
-- `ALL`
-
-Reports land under `<report_volume_path>/run_<run_id>/reports/`.
-
-## Before first Job run
-
-1. Create secret scope `uc-migration` with source/target SP (or PAT `token`) keys  
-2. Create export volume + audit schema  
-3. Fill `managed_storage` / `external_locations` / `principals` in YAML  
-4. Keep `dry_run=true` until COMPARE looks clean  
-
-## Local tests
-
-```bash
-pip install -e ".[dev]"  # or: pip install -e . pytest
-pytest -q
-```
+## Model
+- **Names are never mapped** — same catalog/schema/table names on target (a region
+  move uses two metastores, so no collision). Only **storage paths** are rewritten
+  (via the mapping file).
+- **Additive & idempotent** — re-runs pick up new grants/tags/policies and skip
+  unchanged objects; removals are reported, never applied.
+- **Compute:** Standard (USER_ISOLATION) or serverless (masks/row filters).
