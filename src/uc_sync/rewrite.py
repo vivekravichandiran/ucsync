@@ -48,11 +48,23 @@ def strip_managed_storage_clauses(text: str, object_type: str = "") -> str:
     """Drop source managed LOCATION clauses so the target metastore assigns storage.
 
     External tables/volumes/locations keep LOCATION/URL (rewritten separately).
+    Catalogs (and schemas) also keep their ``MANAGED LOCATION`` — it is
+    path-rewritten to the target ADLS root, because a target metastore without a
+    default storage root cannot create a catalog without one. Only *managed
+    table/volume* LOCATION clauses are stripped (the target metastore assigns
+    managed table storage under the catalog root).
     """
 
     upper = str(object_type or "").upper()
     if upper in {"EXTERNAL_TABLE", "EXTERNAL_VOLUME", "EXTERNAL_LOCATION"}:
         return text
+    if upper in {"CATALOG", "SCHEMA"}:
+        # Keep the (already path-rewritten) MANAGED LOCATION — a target metastore
+        # with no default storage root cannot create a catalog without one — but
+        # still strip collation / inline-policy / reserved-property noise.
+        rewritten = strip_inline_collate(str(text or ""))
+        rewritten = strip_inline_policy_clauses(rewritten)
+        return strip_reserved_table_properties(rewritten)
     rewritten = str(text or "")
     rewritten = re.sub(
         r"\s+MANAGED\s+LOCATION\s+'[^']*'",
@@ -189,19 +201,29 @@ def strip_reserved_table_properties(text: str) -> str:
     def _filter_block(match: re.Match[str]) -> str:
         body = match.group(1)
         kept: list[str] = []
-        # Entries look like: 'key' = 'value'  (comma-separated, possibly multiline)
+        # Entries look like: 'key' = 'value'  (comma-separated, possibly multiline).
+        # The quoted-pair regex tolerates ``)`` inside a value
+        # (e.g. 'upper(region),lower(region)') because it anchors on quotes.
         for key, value in re.findall(
             r"'([^']*)'\s*=\s*'([^']*)'", body
         ):
-            if key.lower().startswith("delta."):
+            lowered = key.lower()
+            # Drop reserved/auto-managed keys (delta.* and databricks.*); these
+            # describe source storage internals the target manages itself and
+            # throw DELTA_UNKNOWN_CONFIGURATION on replay.
+            if lowered.startswith("delta.") or lowered.startswith("databricks."):
                 continue
             kept.append(f"'{key}' = '{value}'")
         if not kept:
             return ""
         return "TBLPROPERTIES (\n  " + ",\n  ".join(kept) + ")"
 
+    # Greedy capture to the final ``)`` so a property VALUE containing ``)``
+    # (e.g. 'upper(region),lower(region)') does not truncate the block. Any
+    # trailing ``;`` stays outside the match. TBLPROPERTIES is the last clause in
+    # captured table DDL, so nothing legitimate follows it.
     rewritten = re.sub(
-        r"TBLPROPERTIES\s*\(([^)]*)\)",
+        r"TBLPROPERTIES\s*\((.*)\)",
         _filter_block,
         rewritten,
         flags=re.IGNORECASE | re.DOTALL,

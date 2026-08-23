@@ -132,3 +132,44 @@ def test_property_strip_leaves_view_collation_property_untouched():
     )
     out = strip_reserved_table_properties(view)
     assert "'collation' = 'UTF8_BINARY'" in out
+
+
+# ---- Phase 2 sanitizer hardening -------------------------------------------
+
+
+def test_tblproperties_value_with_parens_not_truncated():
+    """A property VALUE containing ``)`` (clustering expr stats) must not
+    truncate the TBLPROPERTIES block and corrupt the DDL."""
+    ddl = (
+        "CREATE TABLE c.s.t (id INT)\nUSING delta\nCLUSTER BY (region)\n"
+        "TBLPROPERTIES (\n"
+        "  'ai27_uc.fixture' = 'true',\n"
+        "  'databricks.delta.expressionStats.selectedColumns' = "
+        "'upper(region),lower(region)',\n"
+        "  'delta.enableRowTracking' = 'true');"
+    )
+    out = strip_reserved_table_properties(ddl)
+    # User property kept; delta.* and databricks.* dropped; no corruption.
+    assert "'ai27_uc.fixture' = 'true'" in out
+    assert "databricks." not in out
+    assert "delta.enableRowTracking" not in out
+    assert "lower(region)" not in out  # the reserved value is gone entirely
+    assert "CLUSTER BY (region)" in out
+
+
+def test_catalog_managed_location_is_kept_not_stripped():
+    """Catalog MANAGED LOCATION must survive (target has no default storage),
+    while managed table LOCATION is still stripped."""
+    catalog_ddl = (
+        "CREATE CATALOG IF NOT EXISTS `c` "
+        "MANAGED LOCATION 'abfss://uc-root@acct.dfs.core.windows.net/c';"
+    )
+    kept = strip_managed_storage_clauses(catalog_ddl, "CATALOG")
+    assert "MANAGED LOCATION 'abfss://uc-root@acct.dfs.core.windows.net/c'" in kept
+
+    table_ddl = (
+        "CREATE TABLE `c`.`s`.`t` (id INT) USING delta "
+        "LOCATION 'abfss://x@acct.dfs.core.windows.net/t';"
+    )
+    stripped = strip_managed_storage_clauses(table_ddl, "TABLE")
+    assert "LOCATION" not in stripped
