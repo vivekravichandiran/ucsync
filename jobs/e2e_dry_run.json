@@ -1,0 +1,96 @@
+{
+  "name": "${job_name_prefix} - End-to-end Dry Run",
+  "tags": {"utility": "uc-governance-migration", "job": "e2e-dry-run"},
+  "max_concurrent_runs": 1,
+  "job_clusters": [
+    {
+      "job_cluster_key": "uc_migration_cluster",
+      "new_cluster": {
+        "spark_version": "${spark_version}",
+        "node_type_id": "${node_type_id}",
+        "num_workers": 1,
+        "data_security_mode": "USER_ISOLATION",
+        "custom_tags": {"uc_migration": "true"}
+      }
+    }
+  ],
+  "tasks": [
+    {
+      "task_key": "inventory",
+      "job_cluster_key": "uc_migration_cluster",
+      "libraries": [
+        {"pypi": {"package": "databricks-sdk>=0.36.0"}},
+        {"pypi": {"package": "PyYAML>=6.0"}},
+        {"pypi": {"package": "openpyxl>=3.1"}}
+      ],
+      "notebook_task": {
+        "notebook_path": "${notebook_dir}/01_Inventory",
+        "base_parameters": {
+          "connectivity_mode": "${connectivity_mode}",
+          "catalogs": "${catalogs}",
+          "schemas": "${schemas}",
+          "output_volume_path": "${output_volume_path}",
+          "ops_catalog": "${ops_catalog}",
+          "ops_schema": "${ops_schema}",
+          "source_workspace_url": "${source_workspace_url}",
+          "source_oauth_secret_scope": "${source_oauth_secret_scope}",
+          "source_client_id_secret_key": "${source_client_id_secret_key}",
+          "source_client_secret_key": "${source_client_secret_key}",
+          "run_id": "{{job.run_id}}"
+        }
+      }
+    },
+    {
+      "task_key": "export",
+      "depends_on": [{"task_key": "inventory"}],
+      "job_cluster_key": "uc_migration_cluster",
+      "libraries": [
+        {"pypi": {"package": "databricks-sdk>=0.36.0"}},
+        {"pypi": {"package": "PyYAML>=6.0"}},
+        {"pypi": {"package": "openpyxl>=3.1"}}
+      ],
+      "notebook_task": {
+        "notebook_path": "${notebook_dir}/02_Export",
+        "base_parameters": {
+          "output_volume_path": "${output_volume_path}",
+          "ops_catalog": "${ops_catalog}",
+          "ops_schema": "${ops_schema}",
+          "mapping_file_path": "${mapping_file_path}",
+          "run_id": "{{job.run_id}}"
+        }
+      }
+    },
+    {
+      "task_key": "import_bundle",
+      "depends_on": [{"task_key": "export"}],
+      "job_cluster_key": "uc_migration_cluster",
+      "libraries": [
+        {"pypi": {"package": "databricks-sdk>=0.36.0"}},
+        {"pypi": {"package": "PyYAML>=6.0"}},
+        {"pypi": {"package": "openpyxl>=3.1"}}
+      ],
+      "notebook_task": {
+        "notebook_path": "${notebook_dir}/03_Import",
+        "base_parameters": {
+          "output_volume_path": "${output_volume_path}",
+          "ops_catalog": "${ops_catalog}",
+          "ops_schema": "${ops_schema}",
+          "run_id": "{{job.run_id}}",
+          "dry_run": "true",
+          "create_storage_credentials": "${create_storage_credentials}",
+          "create_external_locations": "${create_external_locations}",
+          "create_catalogs": "${create_catalogs}",
+          "create_schemas": "${create_schemas}",
+          "create_volumes": "${create_volumes}",
+          "create_functions": "${create_functions}",
+          "create_tables": "${create_tables}",
+          "create_views": "${create_views}",
+          "create_abac_policies": "${create_abac_policies}",
+          "apply_grants": "${apply_grants}",
+          "apply_tags": "${apply_tags}",
+          "apply_masks_row_filters": "${apply_masks_row_filters}"
+        }
+      }
+    }
+  ]
+}

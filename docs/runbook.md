@@ -37,6 +37,29 @@ not supported on single-user clusters).
 
 ---
 
+## 0. Install the jobs (one time)
+
+The utility is exactly four notebooks: **`00_Install_Jobs`** (the wrapper) plus the
+three stages **`01_Inventory` / `02_Export` / `03_Import`**. You don't wire tasks by
+hand — open `00_Install_Jobs`, fill the widgets once, pick the jobs to create in
+`jobs_to_create`, and run. It stamps your values into the declarative specs under
+`jobs/` and creates (or updates in place, by name) the selected Databricks Jobs:
+
+| Job | Tasks | Runs on |
+|---|---|---|
+| **Airgap Inventory+Export (source)** | 01 → 02 | source workspace |
+| **Airgap Import (target)** | 03 | target workspace |
+| **End-to-end Dry Run** | 01 → 02 → 03 (`dry_run=true`) | one workspace |
+| **End-to-end Live** | 01 → 02 → 03 (`dry_run=false`) | one workspace |
+
+`run_id` chains automatically inside a job run (`{{job.run_id}}`). For the standalone
+**Airgap Import** job it's a **job parameter** — set it at run time to the bundle-folder
+id printed by the source Inventory+Export run. New jobs get a USER_ISOLATION job
+cluster; set `existing_cluster_id` to reuse a cluster instead. The scenarios below
+give the widget values; you can also run the three stage notebooks directly.
+
+---
+
 ## 2. Scenarios (exact widget values)
 
 Common widgets: `output_volume_path` (bundle + reports), `ops_catalog` +

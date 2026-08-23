@@ -1,0 +1,105 @@
+# Databricks notebook source
+# MAGIC %md
+# MAGIC # UC Governance Migration — 00 Install Jobs
+# MAGIC The one wrapper notebook. Enter every widget once, pick which jobs to
+# MAGIC create, and run. It stamps your values into the declarative specs under
+# MAGIC `jobs/` and creates (or updates) the selected Databricks Jobs:
+# MAGIC
+# MAGIC | Job | Tasks | Runs on |
+# MAGIC |---|---|---|
+# MAGIC | **Airgap Inventory+Export (source)** | 01 → 02 | source workspace |
+# MAGIC | **Airgap Import (target)** | 03 | target workspace |
+# MAGIC | **End-to-end Dry Run** | 01 → 02 → 03 (`dry_run=true`) | one workspace |
+# MAGIC | **End-to-end Live** | 01 → 02 → 03 (`dry_run=false`) | one workspace |
+# MAGIC
+# MAGIC Re-running this notebook **updates** existing jobs of the same name in place.
+# MAGIC For **Airgap Import**, `run_id` is a job parameter — set it at run time to the
+# MAGIC bundle folder id produced by the source Inventory+Export run.
+
+# COMMAND ----------
+
+import json, os, sys
+from posixpath import dirname, join
+
+for _p in ("../src", "./src", os.path.abspath(os.path.join(os.getcwd(), "..", "src"))):
+    if os.path.isdir(_p) and _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from uc_sync.config import CREATE_TOGGLES, APPLY_TOGGLES
+from uc_sync.install_jobs import JOB_LABELS, install_jobs, resolve_job_keys
+
+# COMMAND ----------
+
+# --- which jobs to create ---
+dbutils.widgets.multiselect("jobs_to_create", "End-to-end Dry Run", list(JOB_LABELS))
+dbutils.widgets.text("job_name_prefix", "UC-Gov-Migration")
+
+# --- scope + ops locations (shared by every job) ---
+dbutils.widgets.dropdown("connectivity_mode", "direct", ["direct", "airgap"])  # end-to-end jobs
+dbutils.widgets.text("catalogs", "")            # csv; blank = whole metastore
+dbutils.widgets.text("schemas", "")             # csv catalog.schema; blank = all in scope
+dbutils.widgets.text("output_volume_path", "")  # /Volumes/<c>/<s>/<vol>
+dbutils.widgets.text("ops_catalog", "")
+dbutils.widgets.text("ops_schema", "")
+dbutils.widgets.text("mapping_file_path", "")   # storage-cred + location mapping CSV
+dbutils.widgets.text("run_id", "")              # Airgap Import: source bundle id (job param default)
+
+# --- remote source (direct remote / airgap read); blank = current workspace ---
+dbutils.widgets.text("source_workspace_url", "")
+dbutils.widgets.text("source_oauth_secret_scope", "")
+dbutils.widgets.text("source_client_id_secret_key", "")
+dbutils.widgets.text("source_client_secret_key", "")
+
+# --- cluster ---
+dbutils.widgets.text("existing_cluster_id", "")  # blank = new USER_ISOLATION job cluster
+dbutils.widgets.text("spark_version", "15.4.x-scala2.12")
+dbutils.widgets.text("node_type_id", "Standard_DS3_v2")
+
+# --- object-family create + governance apply toggles ---
+for _t in (*CREATE_TOGGLES, *APPLY_TOGGLES):
+    dbutils.widgets.dropdown(_t, "true", ["true", "false"])
+
+dbutils.widgets.dropdown("run_now", "false", ["true", "false"])
+
+# COMMAND ----------
+
+# This notebook's own folder -> absolute workspace paths for the sibling 01/02/03.
+ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
+notebook_dir = dirname(ctx.notebookPath().get())
+
+_simple = (
+    "connectivity_mode", "catalogs", "schemas", "output_volume_path",
+    "ops_catalog", "ops_schema", "mapping_file_path", "run_id",
+    "source_workspace_url", "source_oauth_secret_scope",
+    "source_client_id_secret_key", "source_client_secret_key",
+    "existing_cluster_id", "spark_version", "node_type_id", "job_name_prefix",
+)
+values = {k: dbutils.widgets.get(k).strip() for k in _simple}
+values["notebook_dir"] = notebook_dir
+for _t in (*CREATE_TOGGLES, *APPLY_TOGGLES):
+    values[_t] = dbutils.widgets.get(_t)
+
+job_keys = resolve_job_keys(dbutils.widgets.get("jobs_to_create"))
+run_now = dbutils.widgets.get("run_now").strip().lower() == "true"
+
+if not (values["output_volume_path"] and values["ops_catalog"] and values["ops_schema"]):
+    raise ValueError("output_volume_path, ops_catalog and ops_schema are required.")
+
+# COMMAND ----------
+
+results = install_jobs(job_keys=job_keys, values=values, run_now=run_now)
+
+summary = {
+    "notebook_dir": notebook_dir,
+    "jobs": [
+        {
+            "job_name": r.job_name,
+            "job_id": r.job_id,
+            "status": "updated" if r.updated else "created" if r.created else "unchanged",
+            "run_page_url": r.run_page_url,
+        }
+        for r in results
+    ],
+}
+print(json.dumps(summary, indent=2))
+dbutils.notebook.exit(json.dumps(summary))
