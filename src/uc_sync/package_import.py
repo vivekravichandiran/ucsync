@@ -249,9 +249,11 @@ class PackageImportEngine:
         apply_grants: bool = True,
         catalog_mapping: Optional[dict[str, str]] = None,
         toggles: Optional[dict[str, bool]] = None,
+        workspace_client: Any = None,
     ):
         self.root = Path(package_root)
         self.sql = sql_executor
+        self.workspace_client = workspace_client
         self.dry_run = dry_run
         self.apply_grants = apply_grants
         self.catalog_mapping = dict(catalog_mapping or {})
@@ -284,6 +286,39 @@ class PackageImportEngine:
     def _create_enabled(self, object_type: str) -> bool:
         toggle = self._CREATE_TOGGLE_FOR_TYPE.get(object_type)
         return self.toggles.get(toggle, True) if toggle else True
+
+    def _create_storage_credential_via_rest(
+        self, statements: list[str]
+    ) -> tuple[str, str]:
+        """Create an MI storage credential over REST (CREATE STORAGE CREDENTIAL
+        is not valid SQL). Idempotent: an existing credential is a skip."""
+
+        ddl = "\n".join(statements)
+        name_m = re.search(
+            r"STORAGE\s+CREDENTIAL\s+(?:IF\s+NOT\s+EXISTS\s+)?`?([^`\s]+)`?",
+            ddl, re.IGNORECASE,
+        )
+        conn_m = re.search(
+            r"ACCESS_CONNECTOR_ID\s*=\s*'([^']+)'", ddl, re.IGNORECASE
+        )
+        if not (name_m and conn_m):
+            return "MANUAL_ACTION_REQUIRED", "could not parse storage-credential DDL"
+        name = name_m.group(1)
+        body = {
+            "name": name,
+            "azure_managed_identity": {"access_connector_id": conn_m.group(1)},
+            "comment": "created by UC governance migration",
+        }
+        try:
+            self.workspace_client.post(
+                "/api/2.1/unity-catalog/storage-credentials", body
+            )
+            return "SUCCESS", f"created storage credential {name} (REST)"
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc)
+            if _is_already_exists_error(msg) or "already exists" in msg.lower():
+                return "SUCCESS", f"storage credential {name} already exists"
+            return "MANUAL_ACTION_REQUIRED", f"REST create failed: {msg[:300]}"
 
     def run(self) -> list[PackageImportResult]:
         if not self.root.exists():
@@ -366,19 +401,25 @@ class PackageImportEngine:
                         result.message = "create disabled by toggle (dry run)"
                     results.append(result)
                     continue
-                # MI-based storage credentials carry no secret and CAN be created
-                # from the access-connector id, so they are executed (not MANUAL).
+                # MI-based storage credentials carry no secret and can be created
+                # from the access-connector id — but CREATE STORAGE CREDENTIAL is
+                # not valid SQL, so they go through the UC REST API when a
+                # workspace client is available.
                 mi_credential = object_type == "STORAGE_CREDENTIAL" and any(
                     "AZURE_MANAGED_IDENTITY" in s.upper()
                     and "ACCESS_CONNECTOR_ID" in s.upper()
                     for s in statements
                 )
-                if (
-                    object_type in _MANUAL_OBJECT_TYPES
-                    and not mi_credential
-                    and not self.dry_run
-                ):
-                    # Credential/share DDL is often not executable via Spark SQL.
+                if mi_credential and not self.dry_run and self.workspace_client:
+                    status, msg = self._create_storage_credential_via_rest(statements)
+                    result.status = status
+                    result.action = "CREATE" if status == "SUCCESS" else "MANUAL"
+                    result.message = msg
+                    if status != "SUCCESS":
+                        result.error_code = "STORAGE_CREDENTIAL_REST"
+                elif object_type in _MANUAL_OBJECT_TYPES and not self.dry_run:
+                    # Credential/share DDL is not executable via Spark SQL; without
+                    # a REST client it is a manual step.
                     result.status = "MANUAL_ACTION_REQUIRED"
                     result.action = "MANUAL"
                     result.error_code = "MANUAL_SQL_OBJECT"

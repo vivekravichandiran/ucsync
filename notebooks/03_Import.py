@@ -18,6 +18,8 @@ for _p in ("../src", "./src", os.path.abspath(os.path.join(os.getcwd(), "..", "s
 from uc_sync.config import from_sources, CREATE_TOGGLES, APPLY_TOGGLES
 from uc_sync.package_import import PackageImportEngine
 from uc_sync.import_engine import SparkSqlExecutor
+from uc_sync.auth import local_workspace_auth
+from uc_sync.workspace_client import WorkspaceClient
 
 # COMMAND ----------
 
@@ -51,6 +53,7 @@ toggles = {t: getattr(cfg, t) for t in (*CREATE_TOGGLES, *APPLY_TOGGLES)}
 
 results = PackageImportEngine(
     migrated, SparkSqlExecutor(spark), dry_run=cfg.dry_run, toggles=toggles,
+    workspace_client=WorkspaceClient(local_workspace_auth(dbutils)),
 ).run()
 
 # Clean migration report (spine + governance sheets) under reports/.
