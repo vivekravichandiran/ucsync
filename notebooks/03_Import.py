@@ -44,8 +44,13 @@ cfg = from_sources({
 run_id = dbutils.widgets.get("run_id").strip()
 if not run_id:
     raise ValueError("run_id from the Export stage is required")
+def _local(path):
+    # UC Volumes are read/written directly at /Volumes/...; only dbfs:/ paths use
+    # the /dbfs FUSE mount. (Prefixing /dbfs onto a /Volumes path is wrong.)
+    return "/dbfs/" + path[len("dbfs:/"):] if path.startswith("dbfs:/") else path
+
 base = f"{cfg.export_volume_path.rstrip('/')}/run_{run_id}"
-migrated = f"/dbfs{base}/migrated" if base.startswith("/Volumes") else f"{base}/migrated"
+migrated = f"{_local(base)}/migrated"
 
 toggles = {t: getattr(cfg, t) for t in (*CREATE_TOGGLES, *APPLY_TOGGLES)}
 
@@ -60,7 +65,7 @@ results = PackageImportEngine(
 try:
     from uc_sync.report import build_report_from_file
     inv = f"{migrated}/inventory/objects.json"
-    report_path = f"/dbfs{base}/reports/import.xlsx" if base.startswith("/Volumes") else f"{base}/reports/import.xlsx"
+    report_path = f"{_local(base)}/reports/import.xlsx"
     build_report_from_file(
         inv, report_path, run_id=run_id,
         import_results=[r.to_dict() for r in results],

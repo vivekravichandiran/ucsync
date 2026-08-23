@@ -64,9 +64,13 @@ def parse_location_mappings(
 ) -> list[LocationMapping]:
     """Validate and normalize mapping records.
 
-    Required CSV columns are ``source_location``, ``target_location``,
-    ``target_external_location``, and ``target_credential``.
-    ``source_external_location`` is optional.
+    Required CSV columns are just ``source_location`` and ``target_location`` (the
+    path rewrite). ``target_access_connector_id`` is also required in practice when
+    the utility creates the target storage credential. Because securable **names
+    are never mapped**, the storage credential and external location are recreated
+    under their *source* names, so ``target_credential`` and
+    ``target_external_location`` are optional (kept for the direct-import path /
+    validation). ``source_external_location`` is optional too.
     """
 
     mappings: list[LocationMapping] = []
@@ -96,8 +100,6 @@ def parse_location_mappings(
             for field in (
                 "source_location",
                 "target_location",
-                "target_external_location",
-                "target_credential",
             )
             if not getattr(mapping, field)
         ]

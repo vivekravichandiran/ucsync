@@ -43,7 +43,9 @@ if not run_id:
 base = f"{cfg.export_volume_path.rstrip('/')}/run_{run_id}"
 
 def _local(path):
-    return f"/dbfs{path}" if path.startswith("/Volumes") else path
+    # UC Volumes are read/written directly at /Volumes/...; only dbfs:/ paths use
+    # the /dbfs FUSE mount. (Prefixing /dbfs onto a /Volumes path is wrong.)
+    return "/dbfs/" + path[len("dbfs:/"):] if path.startswith("dbfs:/") else path
 
 objects = []
 for d in json.load(open(_local(f"{base}/bundle/inventory.json"))):

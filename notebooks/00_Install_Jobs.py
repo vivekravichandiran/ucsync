@@ -45,17 +45,13 @@ dbutils.widgets.text("mapping_file_path", "")   # storage-cred + location mappin
 dbutils.widgets.text("run_id", "")              # Airgap Import: source bundle id (job param default)
 
 # --- remote source (direct remote / airgap read); blank = current workspace ---
-# Supply the source SP creds EITHER via a secret scope (recommended) OR directly:
-#   scope route : source_oauth_secret_scope + the two *_secret_key names
-#   direct route: source_client_id + source_client_secret (or source_token PAT)
-# Direct values are plaintext in job params — prefer the scope route for shared jobs.
+# client id is always plaintext; for the SECRET pick ONE: paste source_client_secret,
+# OR name source_secret_scope + source_secret_key. Plaintext wins if both given.
 dbutils.widgets.text("source_workspace_url", "")
-dbutils.widgets.text("source_oauth_secret_scope", "")
-dbutils.widgets.text("source_client_id_secret_key", "")
-dbutils.widgets.text("source_client_secret_key", "")
-dbutils.widgets.text("source_client_id", "")       # direct value
-dbutils.widgets.text("source_client_secret", "")   # direct value
-dbutils.widgets.text("source_token", "")           # direct PAT
+dbutils.widgets.text("source_client_id", "")       # plaintext (never a secret)
+dbutils.widgets.text("source_client_secret", "")   # plaintext secret (option 1)
+dbutils.widgets.text("source_secret_scope", "")    # secret scope (option 2)
+dbutils.widgets.text("source_secret_key", "")      # secret key   (option 2)
 
 # --- cluster ---
 dbutils.widgets.text("existing_cluster_id", "")  # blank = new USER_ISOLATION job cluster
@@ -77,9 +73,8 @@ notebook_dir = dirname(ctx.notebookPath().get())
 _simple = (
     "connectivity_mode", "catalogs", "schemas", "output_volume_path",
     "ops_catalog", "ops_schema", "mapping_file_path", "run_id",
-    "source_workspace_url", "source_oauth_secret_scope",
-    "source_client_id_secret_key", "source_client_secret_key",
-    "source_client_id", "source_client_secret", "source_token",
+    "source_workspace_url", "source_client_id", "source_client_secret",
+    "source_secret_scope", "source_secret_key",
     "existing_cluster_id", "spark_version", "node_type_id", "job_name_prefix",
 )
 values = {k: dbutils.widgets.get(k).strip() for k in _simple}

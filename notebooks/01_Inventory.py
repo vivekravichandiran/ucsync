@@ -22,10 +22,7 @@ for _p in ("../src", "./src", os.path.abspath(os.path.join(os.getcwd(), "..", "s
 from uc_sync.config import from_sources
 from uc_sync.inventory import InventoryService
 from uc_sync.import_engine import SparkSqlExecutor
-from uc_sync.auth import (
-    load_workspace_auth, local_workspace_auth, direct_workspace_auth,
-    dbutils_secrets_provider,
-)
+from uc_sync.auth import local_workspace_auth, direct_workspace_auth
 from uc_sync.workspace_client import WorkspaceClient
 
 # COMMAND ----------
@@ -36,18 +33,15 @@ dbutils.widgets.text("schemas", "")            # csv catalog.schema; blank = all
 dbutils.widgets.text("output_volume_path", "")  # /Volumes/<c>/<s>/<vol>
 dbutils.widgets.text("ops_catalog", "")
 dbutils.widgets.text("ops_schema", "")
-# Direct-mode remote source (leave ALL blank to read the current workspace).
-# Two ways to supply the source service-principal credentials:
-#   (a) secret scope — set *_secret_scope + the *_secret_key names (recommended)
-#   (b) direct values — paste source_client_id + source_client_secret (or a PAT
-#       in source_token); convenient but plaintext in job params.
+# Remote source (leave source_workspace_url blank to read the CURRENT workspace).
+# The service-principal client id is always plaintext (it is not a secret). For the
+# SECRET, pick ONE: paste source_client_secret (plaintext), OR name a secret
+# source_secret_scope + source_secret_key. If both are given, the plaintext wins.
 dbutils.widgets.text("source_workspace_url", "")
-dbutils.widgets.text("source_oauth_secret_scope", "")
-dbutils.widgets.text("source_client_id_secret_key", "")
-dbutils.widgets.text("source_client_secret_key", "")
-dbutils.widgets.text("source_client_id", "")       # direct value (option b)
-dbutils.widgets.text("source_client_secret", "")   # direct value (option b)
-dbutils.widgets.text("source_token", "")           # direct PAT (option b)
+dbutils.widgets.text("source_client_id", "")       # plaintext (never a secret)
+dbutils.widgets.text("source_client_secret", "")   # plaintext secret (option 1)
+dbutils.widgets.text("source_secret_scope", "")    # secret scope (option 2)
+dbutils.widgets.text("source_secret_key", "")      # secret key   (option 2)
 dbutils.widgets.text("run_id", "")
 
 # COMMAND ----------
@@ -55,12 +49,16 @@ dbutils.widgets.text("run_id", "")
 widgets = {k: dbutils.widgets.get(k) for k in (
     "connectivity_mode", "catalogs", "schemas", "output_volume_path",
     "ops_catalog", "ops_schema", "source_workspace_url",
-    "source_oauth_secret_scope", "source_client_id_secret_key",
-    "source_client_secret_key", "source_client_id", "source_client_secret",
-    "source_token",
+    "source_client_id", "source_client_secret", "source_secret_scope",
+    "source_secret_key",
 )}
 widgets["stage"] = "INVENTORY"
 cfg = from_sources(widgets)
+
+def _local(path):
+    # UC Volumes are read/written directly at /Volumes/...; only dbfs:/ paths use
+    # the /dbfs FUSE mount. (Prefixing /dbfs onto a /Volumes path is wrong.)
+    return "/dbfs/" + path[len("dbfs:/"):] if path.startswith("dbfs:/") else path
 
 run_id = dbutils.widgets.get("run_id").strip() or spark.sql("SELECT uuid()").collect()[0][0][:8]
 run_dir = f"{cfg.export_volume_path.rstrip('/')}/run_{run_id}/bundle"
@@ -68,19 +66,11 @@ dbutils.fs.mkdirs(run_dir)
 
 # Source client: current workspace unless a remote source SP is provided.
 if cfg.source_workspace_url:
-    if cfg.source_client_id or cfg.source_client_secret or cfg.source_token:
-        # (b) direct credential values pasted into the widgets
-        auth = direct_workspace_auth(
-            cfg.source_workspace_url, cfg.source_client_id,
-            cfg.source_client_secret, cfg.source_token,
-        )
-    else:
-        # (a) credentials read from a Databricks secret scope
-        auth = load_workspace_auth(
-            cfg.source_workspace_url, cfg.source_oauth_secret_scope,
-            cfg.source_client_id_secret_key, cfg.source_client_secret_key,
-            dbutils_secrets_provider(dbutils),
-        )
+    # Secret = plaintext value if given, else fetched from the named scope/key.
+    secret = cfg.source_client_secret
+    if not secret and cfg.source_secret_scope and cfg.source_secret_key:
+        secret = dbutils.secrets.get(scope=cfg.source_secret_scope, key=cfg.source_secret_key)
+    auth = direct_workspace_auth(cfg.source_workspace_url, cfg.source_client_id, secret)
 else:
     auth = local_workspace_auth(dbutils)
 source = WorkspaceClient(auth)
@@ -89,7 +79,7 @@ source = WorkspaceClient(auth)
 
 objects = InventoryService(source, cfg, SparkSqlExecutor(spark)).run()
 payload = json.dumps([o.to_dict() for o in objects], indent=2, default=str)
-dst = f"/dbfs{run_dir}/inventory.json" if run_dir.startswith("/Volumes") else run_dir + "/inventory.json"
+dst = f"{_local(run_dir)}/inventory.json"
 with open(dst, "w") as fh:
     fh.write(payload)
 

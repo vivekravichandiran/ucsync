@@ -50,12 +50,10 @@
           "ops_catalog": "${ops_catalog}",
           "ops_schema": "${ops_schema}",
           "source_workspace_url": "${source_workspace_url}",
-          "source_oauth_secret_scope": "${source_oauth_secret_scope}",
-          "source_client_id_secret_key": "${source_client_id_secret_key}",
-          "source_client_secret_key": "${source_client_secret_key}",
           "source_client_id": "${source_client_id}",
           "source_client_secret": "${source_client_secret}",
-          "source_token": "${source_token}",
+          "source_secret_scope": "${source_secret_scope}",
+          "source_secret_key": "${source_secret_key}",
           "run_id": "{{job.run_id}}"
         }
       }

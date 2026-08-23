@@ -15,3 +15,18 @@ def test_target_access_connector_id_flows_through():
     assert r.target_access_connector_id() == "/subscriptions/TGT/connectors/ac"
     assert r.rewrite_location("abfss://c@src.dfs.core.windows.net/x/t") == (
         "abfss://c@tgt.dfs.core.windows.net/x/t")
+
+
+def test_minimal_row_without_target_names_parses():
+    # Names are never mapped, so target_external_location / target_credential are
+    # optional; only the path rewrite (+ connector id) is required.
+    rows = [{
+        "source_location": "abfss://c@src.dfs.core.windows.net/x",
+        "target_location": "abfss://c@tgt.dfs.core.windows.net/x",
+        "target_access_connector_id": "/subscriptions/TGT/connectors/ac",
+    }]
+    mappings = [m.to_dict() for m in parse_location_mappings(rows)]
+    r = MappingResolver({"location_mappings": mappings})
+    assert r.target_access_connector_id() == "/subscriptions/TGT/connectors/ac"
+    assert r.rewrite_location("abfss://c@src.dfs.core.windows.net/x/t") == (
+        "abfss://c@tgt.dfs.core.windows.net/x/t")

@@ -36,20 +36,37 @@ Direct values win when both are supplied.
 
 ## Mapping file (single CSV)
 
-Header (columns; `source_external_location` optional):
+Because securable **names are never mapped**, you supply only the *path* rewrite and
+the *target access-connector id*. The storage credential and external location are
+recreated under their **source names** — you do not name them here.
 
 ```csv
-source_location,target_location,target_external_location,target_credential
-abfss://uc@src.dfs.core.windows.net,abfss://uc@tgt.dfs.core.windows.net,el-target,cred-target
+source_location,target_location,target_access_connector_id
+abfss://uc@src.dfs.core.windows.net,abfss://uc@tgt.dfs.core.windows.net,/subscriptions/…/accessConnectors/tgt-connector
 ```
 
-- Longest-prefix match on `source_location` rewrites every derived ADLS path
-  (catalog/schema managed roots, external-location URLs, external-table paths).
-- `target_credential` / `target_external_location` are used when the utility
-  creates the target storage credential + external location. If those already
-  exist on the target and cover the mapped path, set
-  `create_storage_credentials=false` + `create_external_locations=false` and the
-  mapping file is optional.
+- **`source_location` → `target_location`** — longest-prefix match rewrites every
+  derived ADLS path (catalog/schema managed roots, external-location URLs,
+  external-table + external-volume paths).
+- **`target_access_connector_id`** — the target-region Databricks access connector the
+  recreated storage credential is bound to (needed only when
+  `create_storage_credentials=true`; a single connector typically backs all creds).
+- Optional legacy columns `target_external_location` / `target_credential` are still
+  read for the direct-import path and validation, but are **not required** — leave them
+  out. If the target creds/ELs already exist and cover the path, set
+  `create_storage_credentials=false` + `create_external_locations=false`; the mapping
+  file is then only needed for the path rewrite.
+
+### What you create on the target (and what the utility creates)
+
+| You create by hand | The utility creates |
+|---|---|
+| ADLS storage account + container(s) at `target_location` | Storage credential (**source name**) → bound to your `target_access_connector_id` |
+| Databricks **access connector** (managed identity) + `Storage Blob Data Contributor` on that storage; give its id | External location (**source name**) → `target_location`, using that credential |
+| — | Catalogs/schemas/volumes/tables/… at the rewritten paths |
+
+So: **create target ADLS + access connector, hand over the connector id and the
+path mapping — that's it.** Names, credential, and EL are carried from source.
 
 ## Compute
 Masks and row filters require **Standard (USER_ISOLATION)** or **serverless**
