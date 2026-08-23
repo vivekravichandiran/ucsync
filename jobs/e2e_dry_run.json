@@ -1,6 +1,9 @@
 {
   "name": "${job_name_prefix} - End-to-end Dry Run",
-  "tags": {"utility": "uc-governance-migration", "job": "e2e-dry-run"},
+  "tags": {
+    "utility": "uc-governance-migration",
+    "job": "e2e-dry-run"
+  },
   "max_concurrent_runs": 1,
   "job_clusters": [
     {
@@ -10,7 +13,9 @@
         "node_type_id": "${node_type_id}",
         "num_workers": 1,
         "data_security_mode": "USER_ISOLATION",
-        "custom_tags": {"uc_migration": "true"}
+        "custom_tags": {
+          "uc_migration": "true"
+        }
       }
     }
   ],
@@ -19,9 +24,21 @@
       "task_key": "inventory",
       "job_cluster_key": "uc_migration_cluster",
       "libraries": [
-        {"pypi": {"package": "databricks-sdk>=0.36.0"}},
-        {"pypi": {"package": "PyYAML>=6.0"}},
-        {"pypi": {"package": "openpyxl>=3.1"}}
+        {
+          "pypi": {
+            "package": "databricks-sdk>=0.36.0"
+          }
+        },
+        {
+          "pypi": {
+            "package": "PyYAML>=6.0"
+          }
+        },
+        {
+          "pypi": {
+            "package": "openpyxl>=3.1"
+          }
+        }
       ],
       "notebook_task": {
         "notebook_path": "${notebook_dir}/01_Inventory",
@@ -36,18 +53,37 @@
           "source_oauth_secret_scope": "${source_oauth_secret_scope}",
           "source_client_id_secret_key": "${source_client_id_secret_key}",
           "source_client_secret_key": "${source_client_secret_key}",
+          "source_client_id": "${source_client_id}",
+          "source_client_secret": "${source_client_secret}",
+          "source_token": "${source_token}",
           "run_id": "{{job.run_id}}"
         }
       }
     },
     {
       "task_key": "export",
-      "depends_on": [{"task_key": "inventory"}],
+      "depends_on": [
+        {
+          "task_key": "inventory"
+        }
+      ],
       "job_cluster_key": "uc_migration_cluster",
       "libraries": [
-        {"pypi": {"package": "databricks-sdk>=0.36.0"}},
-        {"pypi": {"package": "PyYAML>=6.0"}},
-        {"pypi": {"package": "openpyxl>=3.1"}}
+        {
+          "pypi": {
+            "package": "databricks-sdk>=0.36.0"
+          }
+        },
+        {
+          "pypi": {
+            "package": "PyYAML>=6.0"
+          }
+        },
+        {
+          "pypi": {
+            "package": "openpyxl>=3.1"
+          }
+        }
       ],
       "notebook_task": {
         "notebook_path": "${notebook_dir}/02_Export",
@@ -62,12 +98,28 @@
     },
     {
       "task_key": "import_bundle",
-      "depends_on": [{"task_key": "export"}],
+      "depends_on": [
+        {
+          "task_key": "export"
+        }
+      ],
       "job_cluster_key": "uc_migration_cluster",
       "libraries": [
-        {"pypi": {"package": "databricks-sdk>=0.36.0"}},
-        {"pypi": {"package": "PyYAML>=6.0"}},
-        {"pypi": {"package": "openpyxl>=3.1"}}
+        {
+          "pypi": {
+            "package": "databricks-sdk>=0.36.0"
+          }
+        },
+        {
+          "pypi": {
+            "package": "PyYAML>=6.0"
+          }
+        },
+        {
+          "pypi": {
+            "package": "openpyxl>=3.1"
+          }
+        }
       ],
       "notebook_task": {
         "notebook_path": "${notebook_dir}/03_Import",

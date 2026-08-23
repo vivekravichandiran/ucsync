@@ -53,6 +53,9 @@
           "source_oauth_secret_scope": "${source_oauth_secret_scope}",
           "source_client_id_secret_key": "${source_client_id_secret_key}",
           "source_client_secret_key": "${source_client_secret_key}",
+          "source_client_id": "${source_client_id}",
+          "source_client_secret": "${source_client_secret}",
+          "source_token": "${source_token}",
           "run_id": "{{job.run_id}}"
         }
       }

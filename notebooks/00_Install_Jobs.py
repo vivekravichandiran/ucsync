@@ -45,10 +45,17 @@ dbutils.widgets.text("mapping_file_path", "")   # storage-cred + location mappin
 dbutils.widgets.text("run_id", "")              # Airgap Import: source bundle id (job param default)
 
 # --- remote source (direct remote / airgap read); blank = current workspace ---
+# Supply the source SP creds EITHER via a secret scope (recommended) OR directly:
+#   scope route : source_oauth_secret_scope + the two *_secret_key names
+#   direct route: source_client_id + source_client_secret (or source_token PAT)
+# Direct values are plaintext in job params — prefer the scope route for shared jobs.
 dbutils.widgets.text("source_workspace_url", "")
 dbutils.widgets.text("source_oauth_secret_scope", "")
 dbutils.widgets.text("source_client_id_secret_key", "")
 dbutils.widgets.text("source_client_secret_key", "")
+dbutils.widgets.text("source_client_id", "")       # direct value
+dbutils.widgets.text("source_client_secret", "")   # direct value
+dbutils.widgets.text("source_token", "")           # direct PAT
 
 # --- cluster ---
 dbutils.widgets.text("existing_cluster_id", "")  # blank = new USER_ISOLATION job cluster
@@ -72,6 +79,7 @@ _simple = (
     "ops_catalog", "ops_schema", "mapping_file_path", "run_id",
     "source_workspace_url", "source_oauth_secret_scope",
     "source_client_id_secret_key", "source_client_secret_key",
+    "source_client_id", "source_client_secret", "source_token",
     "existing_cluster_id", "spark_version", "node_type_id", "job_name_prefix",
 )
 values = {k: dbutils.widgets.get(k).strip() for k in _simple}

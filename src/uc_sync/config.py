@@ -62,6 +62,11 @@ class SyncConfig:
     source_oauth_secret_scope: str = ""
     source_client_id_secret_key: str = ""
     source_client_secret_key: str = ""
+    # Direct credential values (alternative to the secret-scope keys above). Carried
+    # in plaintext through widgets/job params — prefer the secret-scope path.
+    source_client_id: str = ""
+    source_client_secret: str = ""
+    source_token: str = ""
     target_workspace_url: str = ""
     target_oauth_secret_scope: str = ""
     target_client_id_secret_key: str = ""
@@ -368,6 +373,11 @@ def from_sources(
         source_client_secret_key=str(
             pick("source_client_secret_key", source.get("client_secret_key"))
         ),
+        source_client_id=str(pick("source_client_id", source.get("client_id"))),
+        source_client_secret=str(
+            pick("source_client_secret", source.get("client_secret"))
+        ),
+        source_token=str(pick("source_token", source.get("token"))),
         target_workspace_url=str(pick("target_workspace_url", target.get("workspace_url"))),
         target_oauth_secret_scope=str(
             pick("target_oauth_secret_scope", target.get("secret_scope"))

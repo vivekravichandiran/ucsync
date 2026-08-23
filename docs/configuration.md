@@ -12,13 +12,27 @@
 | `ops_catalog`, `ops_schema` | names | all | Audit/state tables (`uc_sync_audit`, `uc_sync_state`). |
 | `run_id` | string | 02, 03 | Ties Export/Import to the Inventory run. |
 | `mapping_file_path` | `/Volumes/…csv` | 02 | Storage-credential + location mapping (below). |
-| `source_workspace_url` + `source_oauth_secret_scope` + `source_client_id_secret_key` + `source_client_secret_key` | — | 01 | Direct-mode remote source SP (blank = current workspace). Redacted from artifacts. |
+| `source_workspace_url` + source SP credentials | — | 01 | Direct-mode remote source (blank = current workspace). Two credential routes below. Redacted from artifacts. |
 | `create_storage_credentials`, `create_external_locations`, `create_catalogs`, `create_schemas`, `create_volumes`, `create_functions`, `create_tables`, `create_views`, `create_abac_policies` | bool (default true) | 03 | Gate **creation** per object family. Off = assume pre-existing, skip create, still govern. |
 | `apply_grants`, `apply_tags`, `apply_masks_row_filters` | bool (default true) | 03 | Gate governance application. |
 | `dry_run` | bool | 03 | Plan only, no mutations. |
 
 **Catalog names are never mapped** — every securable is recreated under its source
 name. There is no catalog-mapping widget.
+
+### Source credentials (remote/direct only; blank = current workspace)
+
+Two routes — pick one:
+
+- **Secret scope (recommended):** `source_oauth_secret_scope` + `source_client_id_secret_key`
+  + `source_client_secret_key` name the scope and the *keys* holding the SP client id /
+  secret; values are read via `dbutils.secrets.get` and never leave the workspace.
+- **Direct values:** paste `source_client_id` + `source_client_secret` (or a PAT in
+  `source_token`) straight into the widgets. Convenient for one-off runs, but these are
+  **plaintext** in widget values and job `base_parameters` (not redacted like a
+  `{{secrets/…}}` reference) — avoid for shared/scheduled jobs.
+
+Direct values win when both are supplied.
 
 ## Mapping file (single CSV)
 
