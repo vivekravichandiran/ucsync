@@ -15,8 +15,46 @@ from uc_sync.location_mapping import (
 )
 
 
+# Canonical stage / connectivity vocabularies for the governance-migration model.
+STAGES = ("INVENTORY", "EXPORT", "IMPORT")
+CONNECTIVITY_MODES = ("direct", "airgap")
+
+# Object-family creation toggles (gate CREATE only) and governance toggles
+# (always applied to whatever exists on target). See design §4.2.
+CREATE_TOGGLES = (
+    "create_storage_credentials",
+    "create_external_locations",
+    "create_catalogs",
+    "create_schemas",
+    "create_volumes",
+    "create_functions",
+    "create_tables",
+    "create_views",
+    "create_abac_policies",
+)
+APPLY_TOGGLES = ("apply_grants", "apply_tags", "apply_masks_row_filters")
+
+
 @dataclass
 class SyncConfig:
+    # --- new governance-migration contract (canonical) ---
+    stage: str = "INVENTORY"
+    connectivity_mode: str = "direct"
+    mapping_file_path: str = ""
+    create_storage_credentials: bool = True
+    create_external_locations: bool = True
+    create_catalogs: bool = True
+    create_schemas: bool = True
+    create_volumes: bool = True
+    create_functions: bool = True
+    create_tables: bool = True
+    create_views: bool = True
+    create_abac_policies: bool = True
+    apply_grants: bool = True
+    apply_tags: bool = True
+    apply_masks_row_filters: bool = True
+    # --- legacy fields (still consumed by import_engine/package_import until the
+    #     Phase 2 import rework; derived from the new contract when not provided) ---
     execution_mode: str = "LOCAL"
     mode: str = "INVENTORY"
     dry_run: bool = True
@@ -260,13 +298,42 @@ def from_sources(
     ).upper()
     if execution_mode not in {"LOCAL", "CROSS_WORKSPACE"}:
         raise ValueError("execution_mode must be LOCAL or CROSS_WORKSPACE")
-    if execution_mode == "LOCAL" and not catalog_mapping:
-        raise ValueError(
-            "LOCAL mode requires catalog_mapping_json, catalog_mapping_path, "
-            "or catalog_mapping in the config file"
-        )
-    if execution_mode == "LOCAL" and not catalogs:
+    # Catalog names are never mapped in the governance-migration model, so a
+    # catalog mapping is no longer required for any connectivity mode. If a legacy
+    # mapping is still supplied it drives source catalog selection for back-compat.
+    if catalog_mapping and not catalogs:
         catalogs = list(catalog_mapping)
+
+    # --- new governance-migration contract -------------------------------------
+    # `stage` supersedes `mode`; `connectivity_mode` supersedes `execution_mode`.
+    stage = str(pick("stage", None) or pick("mode", "INVENTORY")).upper()
+    if stage == "SYNC":
+        # Legacy all-in-one mode maps onto the IMPORT stage for the new flow.
+        stage = "IMPORT"
+    if stage not in STAGES:
+        raise ValueError(f"stage must be one of {STAGES}")
+    connectivity_default = "airgap" if execution_mode == "CROSS_WORKSPACE" else "direct"
+    connectivity_mode = str(
+        pick("connectivity_mode", runtime.get("connectivity_mode"))
+        or connectivity_default
+    ).lower()
+    if connectivity_mode not in CONNECTIVITY_MODES:
+        raise ValueError(f"connectivity_mode must be one of {CONNECTIVITY_MODES}")
+    mapping_file_path = str(
+        pick("mapping_file_path", runtime.get("mapping_file_path"))
+    )
+    # A single mapping file supersedes the legacy location CSV; feed the existing
+    # loader until the Phase 2 mapping-file loader replaces it.
+    if mapping_file_path and not location_mapping_csv_path:
+        location_mapping_csv_path = mapping_file_path
+        location_mappings = [
+            item.to_dict()
+            for item in load_location_mapping_csv(mapping_file_path)
+        ]
+    toggles = {
+        name: _as_bool(pick(name, runtime.get(name)), True)
+        for name in (*CREATE_TOGGLES, *APPLY_TOGGLES)
+    }
 
     # Resolve UCSync's four operational-artifact locations from three inputs:
     # ops_catalog + ops_schema (audit/state tables) and output_volume_path
@@ -284,8 +351,12 @@ def from_sources(
     )
 
     return SyncConfig(
+        stage=stage,
+        connectivity_mode=connectivity_mode,
+        mapping_file_path=mapping_file_path,
+        **toggles,
         execution_mode=execution_mode,
-        mode=str(pick("mode", "INVENTORY")).upper(),
+        mode=str(pick("mode", stage)).upper(),
         dry_run=_as_bool(pick("dry_run", runtime.get("dry_run", True)), True),
         source_workspace_url=str(pick("source_workspace_url", source.get("workspace_url"))),
         source_oauth_secret_scope=str(

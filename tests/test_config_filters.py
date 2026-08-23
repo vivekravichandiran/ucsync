@@ -70,3 +70,38 @@ def test_mapping_path(tmp_path):
     path = tmp_path / "mapping.json"
     path.write_text('{"catalogs":{"one":"one_copy"}}', encoding="utf-8")
     assert parse_catalog_mapping(json_path=str(path)) == {"one": "one_copy"}
+
+
+def test_new_contract_stage_connectivity_and_toggles():
+    """Governance-migration contract: stage / connectivity_mode / create_* / apply_*."""
+    cfg = from_sources(
+        {
+            "stage": "IMPORT",
+            "connectivity_mode": "airgap",
+            "catalogs": "sales_prod",
+            "create_tables": "false",
+            "apply_grants": "false",
+            "dry_run": "false",
+        }
+    )
+    assert cfg.stage == "IMPORT"
+    assert cfg.connectivity_mode == "airgap"
+    # create_tables gated off, but everything else defaults on.
+    assert cfg.create_tables is False
+    assert cfg.create_catalogs is True
+    assert cfg.create_abac_policies is True
+    # apply toggles.
+    assert cfg.apply_grants is False
+    assert cfg.apply_tags is True
+    # legacy alias derived from stage for back-compat consumers.
+    assert cfg.mode == "IMPORT"
+
+
+def test_stage_defaults_from_legacy_mode_and_sync_maps_to_import():
+    assert from_sources({"mode": "EXPORT"}).stage == "EXPORT"
+    assert from_sources({"mode": "SYNC"}).stage == "IMPORT"
+    # connectivity default follows legacy execution_mode.
+    assert from_sources({"execution_mode": "CROSS_WORKSPACE"}).connectivity_mode == (
+        "airgap"
+    )
+    assert from_sources({"execution_mode": "LOCAL"}).connectivity_mode == "direct"
