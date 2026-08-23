@@ -7,7 +7,7 @@
 | Catalog | ✅ same name (`create_catalogs`) | grants, tags, ABAC | `MANAGED LOCATION` path-rewritten to target (kept, not stripped). |
 | Schema | ✅ same name (`create_schemas`) | grants, tags, ABAC | |
 | Volume (managed) | ✅ (`create_volumes`) | grants, tags | Files not copied. |
-| External volume | inventory-only | — | External storage registration not duplicated. |
+| External volume | ✅ (`create_volumes`) | grants, tags | `CREATE EXTERNAL VOLUME` at the path-rewritten target location; its covering external location is created too (from the mapping). Volume **files** are not copied. |
 | Function (incl. mask/filter UDFs) | ✅ (`create_functions`) | grants | Created before the masks/policies that reference them. |
 | **Managed table (full definition, no data)** | ✅ (`create_tables`) | tags, ABAC, classic masks/filters, grants | Full fidelity via `SHOW CREATE`: columns/types/nullability, comments, user `TBLPROPERTIES`, partitioning, clustering, constraints (PK/CHECK), generated & identity columns. Data is out of scope. |
 | External table | ✅ (`create_tables`) | grants | Path rewritten; requires a location mapping. |

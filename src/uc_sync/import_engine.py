@@ -462,8 +462,21 @@ class ImportEngine:
                 else None
             )
         if kind == "EXTERNAL_VOLUME":
-            # Duplicating the same external storage registration is unsafe.
-            return None
+            source_location = obj.storage_location or str(
+                obj.definition.get("storage_location") or ""
+            )
+            target_location = self.mapper.rewrite_location(source_location) or (
+                source_location
+                if self.cfg.execution_mode == "CROSS_WORKSPACE"
+                else ""
+            )
+            if not target_location:
+                return None
+            comment = self._comment_clause(obj.definition.get("comment"))
+            return (
+                f"CREATE EXTERNAL VOLUME IF NOT EXISTS {target} "
+                f"LOCATION '{self._escape_literal(target_location)}'{comment}"
+            )
         return None
 
     def _existing_external_result(

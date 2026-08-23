@@ -226,6 +226,9 @@ class InventoryService:
                 )
                 if root:
                     table_locations.append(str(root))
+            # External volumes reference an external location by path too.
+            if obj.object_type == ObjectType.EXTERNAL_VOLUME and obj.storage_location:
+                table_locations.append(str(obj.storage_location))
         locations = list(self._iter_external_locations(table_locations))
         for table in table_objects:
             path = str(table.storage_location or "").rstrip("/")
