@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from uc_sync import __version__
-from uc_sync.models import UCObject
+from uc_sync.governance import (
+    abac_policy_create_statement,
+    tag_statements_for_object,
+)
+from uc_sync.models import ObjectType, UCObject
 from uc_sync.sql_ddl import (
     create_ddl_for_object,
     format_ddl_file,
@@ -56,7 +60,10 @@ def canonical_hash(obj: UCObject) -> str:
 
 
 def _safe_filename(object_type: str, full_name: str) -> str:
-    return f"{object_type}_{full_name.replace('.', '__')}"
+    safe = full_name.replace(".", "__")
+    # ABAC policy full names carry '#policy:<name>' — sanitize for a filesystem.
+    safe = safe.replace("#policy:", "__policy__").replace("#", "_").replace(":", "_")
+    return f"{object_type}_{safe}"
 
 
 class ExportService:
@@ -123,6 +130,8 @@ class ExportService:
             "metadata",
             "grants",
             "policies",
+            "tags",
+            "abac",
             "bindings",
             "validation",
             "checksums",
@@ -137,9 +146,13 @@ class ExportService:
         all_table_ddls: list[str] = []
         all_grant_ddls: list[str] = []
         all_policy_ddls: list[str] = []
+        all_tag_ddls: list[str] = []
+        all_abac_ddls: list[str] = []
         ddl_files = 0
         grant_files = 0
         policy_files = 0
+        tag_files = 0
+        abac_files = 0
         ddl_by_source: dict[str, int] = {}
 
         for obj in objects_list:
@@ -217,6 +230,27 @@ class ExportService:
                     workspace_policies_path = policy_paths.get("workspace", "")
                     all_policy_ddls.append(policy_body.rstrip() + "\n")
                     policy_files += 1
+
+                tag_sql_statements = tag_statements_for_object(obj)
+                if tag_sql_statements:
+                    tag_body = render_sql_file(
+                        tag_sql_statements,
+                        header=f"Tags for {obj.object_type.value} {obj.full_name}",
+                    )
+                    self._write_text(f"tags/{stem}.sql", tag_body)
+                    all_tag_ddls.append(tag_body.rstrip() + "\n")
+                    tag_files += 1
+
+                if obj.object_type == ObjectType.ABAC_POLICY:
+                    abac_sql = abac_policy_create_statement(obj)
+                    if abac_sql:
+                        abac_body = render_sql_file(
+                            [abac_sql],
+                            header=f"ABAC policy {obj.name} ON {obj.definition.get('on_securable')}",
+                        )
+                        self._write_text(f"abac/{stem}.sql", abac_body)
+                        all_abac_ddls.append(abac_body.rstrip() + "\n")
+                        abac_files += 1
 
                 status = "SUCCESS"
                 error_code = ""
@@ -300,9 +334,27 @@ class ExportService:
                     ),
                 ),
             )
+        if all_tag_ddls:
+            self._write_text(
+                "tags/all_tags.sql",
+                render_sql_file(
+                    [block.rstrip() for block in all_tag_ddls],
+                    header=f"Governed-tag assignments for run {self.run_id}",
+                ),
+            )
+        if all_abac_ddls:
+            self._write_text(
+                "abac/all_abac.sql",
+                render_sql_file(
+                    [block.rstrip() for block in all_abac_ddls],
+                    header=f"ABAC policy CREATE statements for run {self.run_id}",
+                ),
+            )
         manifest["ddl_files"] = ddl_files
         manifest["grant_files"] = grant_files
         manifest["policy_files"] = policy_files
+        manifest["tag_files"] = tag_files
+        manifest["abac_files"] = abac_files
         manifest["ddl_by_source"] = ddl_by_source
         self._write_text(
             "manifest.json",
@@ -325,6 +377,8 @@ class ExportService:
             "ddl_files": ddl_files,
             "grant_files": grant_files,
             "policy_files": policy_files,
+            "tag_files": tag_files,
+            "abac_files": abac_files,
             "ddl_by_source": ddl_by_source,
         }
 

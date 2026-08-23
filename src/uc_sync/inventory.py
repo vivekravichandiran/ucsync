@@ -170,9 +170,12 @@ def classify_principal(principal: str) -> str:
 
 
 class InventoryService:
-    def __init__(self, source: WorkspaceClient, cfg: SyncConfig):
+    def __init__(
+        self, source: WorkspaceClient, cfg: SyncConfig, sql_executor: object = None
+    ):
         self.source = source
         self.cfg = cfg
+        self.sql = sql_executor
         self.mapper = MappingResolver(cfg.mappings)
 
     def run(self) -> List[UCObject]:
@@ -236,7 +239,42 @@ class InventoryService:
         filtered = [o for o in objects if allowed(o, self.cfg)]
         for obj in filtered:
             self._attach_grants(obj)
+        if self.sql is not None:
+            self._attach_governance(filtered)
         return filtered
+
+    def _attach_governance(self, objects: list[UCObject]) -> None:
+        """Attach governed-tag assignments and inventory ABAC policies via SQL."""
+
+        from uc_sync.governance import read_abac_policies, read_tags
+
+        catalogs = sorted(
+            {
+                obj.catalog or obj.name
+                for obj in objects
+                if obj.object_type == ObjectType.CATALOG
+            }
+        )
+        for catalog in catalogs:
+            try:
+                tags = read_tags(self.sql, catalog)
+            except Exception:  # noqa: BLE001 - keep inventory usable
+                tags = {"objects": {}, "columns": {}}
+            object_tags = tags.get("objects", {})
+            column_tags = tags.get("columns", {})
+            for obj in objects:
+                if obj.full_name in object_tags:
+                    obj.tags = {**(obj.tags or {}), **object_tags[obj.full_name]}
+                if obj.full_name in column_tags:
+                    obj.definition = {
+                        **(obj.definition or {}),
+                        "column_tags": column_tags[obj.full_name],
+                    }
+            try:
+                policies = read_abac_policies(self.sql, catalog)
+            except Exception:  # noqa: BLE001
+                policies = []
+            objects.extend(policies)
 
     def _attach_grants(self, obj: UCObject) -> None:
         if obj.grants:

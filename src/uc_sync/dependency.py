@@ -23,6 +23,9 @@ _TYPE_RANK = {
     ObjectType.METRIC_VIEW: 92,
     ObjectType.MATERIALIZED_VIEW: 100,
     ObjectType.STREAMING_TABLE: 101,
+    # ABAC policies are created once every table + mask/filter function they
+    # reference exists, and before grants (governed-before-granted).
+    ObjectType.ABAC_POLICY: 105,
     ObjectType.GRANT: 110,
     ObjectType.BINDING: 120,
 }

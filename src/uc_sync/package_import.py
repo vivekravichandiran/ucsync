@@ -218,6 +218,25 @@ def _is_not_found_error(message: str) -> bool:
     return any(marker in upper for marker in _NOT_FOUND_MARKERS)
 
 
+# Governance prerequisites owned outside this utility: the governed-tag
+# definition must exist at account level, its value must be allowed, and any
+# referenced mask/filter function must exist on the target.
+_GOVERNANCE_PREREQ_MARKERS = (
+    "UC_INVALID_POLICY_CONDITION",
+    "UNKNOWN TAG POLICY KEY",
+    "INVALID_PARAMETER_VALUE",
+    "TAG_POLICY",
+    "ROUTINE_NOT_FOUND",
+    "FUNCTION_NOT_FOUND",
+    "CANNOT BE RESOLVED",
+)
+
+
+def _is_governance_prereq_error(message: str) -> bool:
+    upper = str(message or "").upper()
+    return any(marker in upper for marker in _GOVERNANCE_PREREQ_MARKERS)
+
+
 class PackageImportEngine:
     """Execute CREATE/GRANT SQL from export_migrated_staging as source of truth."""
 
@@ -382,7 +401,103 @@ class PackageImportEngine:
                             f"target uses a distinct path. {message[:1200]}"
                         )
             results.append(result)
+        # Governance phases (after every object exists): governed tags, then ABAC
+        # policies, then classic mask / row-filter bindings.
+        results.extend(self._apply_governance_dir(
+            "tags", "APPLY_TAGS", inventory, by_target, len(results)))
+        results.extend(self._apply_governance_dir(
+            "abac", "CREATE_POLICY", inventory, by_target, len(results)))
         results.extend(self._apply_policy_files(inventory, by_target, len(results)))
+        return results
+
+    def _apply_governance_dir(
+        self,
+        dirname: str,
+        action_label: str,
+        inventory: dict[str, dict[str, Any]],
+        by_target: dict[str, dict[str, Any]],
+        start_order: int,
+    ) -> list["PackageImportResult"]:
+        """Apply governed-tag (``tags/``) or ABAC (``abac/``) SQL files.
+
+        Idempotent: an already-assigned tag or already-existing policy is a skip.
+        A missing governed-tag definition or referenced function surfaces as
+        MANUAL_ACTION_REQUIRED (the infosec prerequisite is owned elsewhere).
+        """
+
+        governance_dir = self.root / dirname
+        if not governance_dir.exists():
+            return []
+        files = sorted(
+            path for path in governance_dir.glob("*.sql")
+            if path.is_file() and not path.name.startswith("all_")
+        )
+        results: list[PackageImportResult] = []
+        for offset, path in enumerate(files, start=1):
+            object_type, parsed_name = _parse_sql_filename(path.name)
+            target_full_name = self._map_name(parsed_name)
+            inventory_row = (
+                by_target.get(target_full_name) or inventory.get(parsed_name) or {}
+            )
+            source_full_name = str(
+                inventory_row.get("source_full_name")
+                or inventory_row.get("full_name")
+                or parsed_name
+            )
+            result = PackageImportResult(
+                object_type=object_type,
+                source_full_name=source_full_name,
+                target_full_name=target_full_name,
+                full_name=source_full_name,
+                action="DRY_RUN" if self.dry_run else action_label,
+                status="PENDING",
+                policies_path=str(path),
+                dependency_level=_type_rank(object_type),
+                import_order=start_order + offset,
+            )
+            try:
+                statements = _split_statements(path.read_text(encoding="utf-8"))
+                if self.dry_run:
+                    result.status = "PENDING"
+                    result.message = f"dry_run statements={len(statements)}"
+                else:
+                    # tags/ALTER need session context; abac CREATE POLICY is fully
+                    # qualified but context is harmless.
+                    self._apply_context(object_type, target_full_name)
+                    skipped = False
+                    manual = ""
+                    for statement in statements:
+                        try:
+                            self.sql.execute(statement)
+                        except Exception as exec_exc:  # noqa: BLE001
+                            message = str(exec_exc)
+                            if _is_policy_exists_error(message) or _is_already_exists_error(message):
+                                skipped = True
+                                continue
+                            if _is_governance_prereq_error(message):
+                                manual = message
+                                break
+                            raise
+                    if manual:
+                        result.status = "MANUAL_ACTION_REQUIRED"
+                        result.action = "MANUAL"
+                        result.error_code = "GOVERNANCE_PREREQ_MISSING"
+                        result.message = (
+                            "Governed-tag definition or referenced function is "
+                            f"missing on the target: {manual[:400]}"
+                        )
+                    else:
+                        result.status = "SUCCESS"
+                        result.action = "SKIP_EXISTING" if skipped else action_label
+                        result.message = (
+                            ("already applied; " if skipped else "")
+                            + (statements[0][:500] if statements else "")
+                        )
+            except Exception as exc:  # noqa: BLE001
+                result.status = "FAILURE"
+                result.error_code = type(exc).__name__
+                result.message = str(exc)
+            results.append(result)
         return results
 
     def _apply_policy_files(

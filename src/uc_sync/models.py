@@ -29,6 +29,7 @@ class ObjectType(str, Enum):
     SHARE = "SHARE"
     RECIPIENT = "RECIPIENT"
     PROVIDER = "PROVIDER"
+    ABAC_POLICY = "ABAC_POLICY"
     GRANT = "GRANT"
     BINDING = "BINDING"
 
