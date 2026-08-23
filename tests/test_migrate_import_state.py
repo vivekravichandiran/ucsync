@@ -10,6 +10,7 @@ from uc_sync.audit import (
     add_missing_columns_sql,
     stage_audit_row,
 )
+from uc_sync.mapping import MappingResolver
 from uc_sync.migrate_export import MigrateExportService
 from uc_sync.package_import import PackageImportEngine, _split_statements
 from uc_sync.rewrite import rewrite_text
@@ -27,33 +28,51 @@ class FakeSql:
         self.statements.append(sql)
 
 
-def test_rewrite_text_catalog_and_quoted():
+def _resolver_mappings():
+    """Mappings dict with one longest-prefix ADLS path rewrite."""
+    return {
+        "location_mappings": [
+            {
+                "source_location": "abfss://src@acct.dfs.core.windows.net/root",
+                "target_location": "abfss://tgt@acct.dfs.core.windows.net/migrated",
+            }
+        ]
+    }
+
+
+def test_rewrite_text_paths_only_leaves_identifiers_untouched():
+    """Names are never rewritten; only storage URLs are mapped to target paths."""
+    resolver = MappingResolver(_resolver_mappings())
     text = (
-        "CREATE TABLE `ril_sandbox`.`ucsync_local_01`.`t1` AS "
-        "SELECT * FROM ril_sandbox.ucsync_local_01.t0;"
+        "CREATE TABLE `ril_sandbox`.`s`.`t1` "
+        "LOCATION 'abfss://src@acct.dfs.core.windows.net/root/t1';"
     )
-    out = rewrite_text(text, {"ril_sandbox": "ril_sandbox_ucsync_local"})
-    assert "`ril_sandbox_ucsync_local`.`ucsync_local_01`.`t1`" in out
-    assert "ril_sandbox_ucsync_local.ucsync_local_01.t0" in out
-    assert "ril_sandbox." not in out.replace("ril_sandbox_ucsync_local", "")
+    out = rewrite_text(text, location_resolver=resolver)
+    # Identifiers preserved verbatim (no catalog renaming).
+    assert "`ril_sandbox`.`s`.`t1`" in out
+    # Storage URL rewritten to the mapped target path.
+    assert "abfss://tgt@acct.dfs.core.windows.net/migrated/t1" in out
+    # With no resolver, text is returned unchanged.
+    assert rewrite_text(text) == text
 
 
-def test_migrate_rewrites_files_and_renames(tmp_path: Path):
+def test_migrate_rewrites_paths_and_preserves_names(tmp_path: Path):
     source = tmp_path / "export_staging" / "run1"
     (source / "ddl").mkdir(parents=True)
     (source / "inventory").mkdir()
-    (source / "ddl" / "TABLE_ril_sandbox__s__t.sql").write_text(
-        "CREATE TABLE IF NOT EXISTS `ril_sandbox`.`s`.`t` (id INT);\n",
+    (source / "ddl" / "EXTERNAL_TABLE_ril_sandbox__s__t.sql").write_text(
+        "CREATE TABLE IF NOT EXISTS `ril_sandbox`.`s`.`t` (id INT) "
+        "LOCATION 'abfss://src@acct.dfs.core.windows.net/root/t';\n",
         encoding="utf-8",
     )
     (source / "inventory" / "objects.json").write_text(
         json.dumps(
             [
                 {
-                    "object_type": "TABLE",
+                    "object_type": "EXTERNAL_TABLE",
                     "full_name": "ril_sandbox.s.t",
                     "catalog": "ril_sandbox",
-                    "definition": "CREATE TABLE `ril_sandbox`.`s`.`t` (id INT)",
+                    "storage_location": "abfss://src@acct.dfs.core.windows.net/root/t",
                     "definition_hash": "abc",
                     "object_id": "oid-1",
                 }
@@ -65,20 +84,26 @@ def test_migrate_rewrites_files_and_renames(tmp_path: Path):
     result = MigrateExportService(
         source_root=str(source),
         target_root=str(target),
-        catalog_mapping={"ril_sandbox": "ril_sandbox_ucsync_local"},
+        mappings=_resolver_mappings(),
         run_id="run1",
     ).run(dry_run=False)
 
     assert result["migrated"] >= 2
-    migrated_ddl = target / "ddl" / "TABLE_ril_sandbox_ucsync_local__s__t.sql"
+    # File name is NOT renamed — catalog names are never mapped.
+    migrated_ddl = target / "ddl" / "EXTERNAL_TABLE_ril_sandbox__s__t.sql"
     assert migrated_ddl.exists()
-    assert "ril_sandbox_ucsync_local" in migrated_ddl.read_text(encoding="utf-8")
+    ddl_text = migrated_ddl.read_text(encoding="utf-8")
+    assert "`ril_sandbox`.`s`.`t`" in ddl_text
+    # External-table storage path IS rewritten to the target ADLS location.
+    assert "abfss://tgt@acct.dfs.core.windows.net/migrated/t" in ddl_text
     inv = json.loads((target / "inventory" / "objects.json").read_text(encoding="utf-8"))
     assert inv[0]["full_name"] == "ril_sandbox.s.t"
     assert inv[0]["source_full_name"] == "ril_sandbox.s.t"
-    assert inv[0]["target_full_name"] == "ril_sandbox_ucsync_local.s.t"
-    assert inv[0]["catalog"] == "ril_sandbox_ucsync_local"
-    assert "`ril_sandbox_ucsync_local`.`s`.`t`" in inv[0]["definition"]
+    assert inv[0]["target_full_name"] == "ril_sandbox.s.t"
+    assert inv[0]["catalog"] == "ril_sandbox"
+    assert inv[0]["storage_location"] == (
+        "abfss://tgt@acct.dfs.core.windows.net/migrated/t"
+    )
 
 
 def test_package_import_executes_and_records_failure(tmp_path: Path):
@@ -345,14 +370,14 @@ def test_migrate_results_carry_object_identity(tmp_path: Path):
     result = MigrateExportService(
         source_root=str(source),
         target_root=str(tmp_path / "migrated"),
-        catalog_mapping={"ril_sandbox": "ril_sandbox_ucsync_local"},
         run_id="run1",
     ).run(dry_run=False)
 
     row = next(r for r in result["results"] if r["artifact"] == "ddl")
     assert row["object_type"] == "EXTERNAL_TABLE"
     assert row["source_full_name"] == "ril_sandbox.s.ext"
-    assert row["target_full_name"] == "ril_sandbox_ucsync_local.s.ext"
+    # Names are never mapped: target identity == source identity.
+    assert row["target_full_name"] == "ril_sandbox.s.ext"
     # Success rows must not put paths into the error column.
     assert row["error_message"] == ""
 

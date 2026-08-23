@@ -47,3 +47,4 @@ docs/test-run-results.json
 **/export_staging/
 **/export_migrated_staging/
 **/report_staging/
+testing/

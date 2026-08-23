@@ -1,50 +1,30 @@
-"""Catalog / location rewrite helpers for exported SQL, YAML, and JSON."""
+"""Path-only rewrite + DDL replay sanitizers for exported SQL, YAML, and JSON.
+
+Catalog / schema / table / external-location **names are never rewritten** — the
+governance-migration utility recreates every securable under its source name (see
+``plans/uc-governance-migration-design.md`` §2.4). The only value rewritten here is
+the **storage URL** (source ADLS path → mapped target ADLS path), driven by the
+single mapping file. The ``strip_*`` sanitizers make captured ``SHOW CREATE`` DDL
+replayable on a fresh target metastore.
+"""
 
 from __future__ import annotations
 
 import json
 import re
-from typing import Any, Mapping
+from typing import Any
 
 from uc_sync.mapping import MappingResolver
-from uc_sync.sql_ddl import quote_identifier
 
 
 def rewrite_text(
     text: str,
-    catalog_mapping: Mapping[str, str],
     *,
     location_resolver: MappingResolver | None = None,
 ) -> str:
-    """Rewrite source catalog names (and optional storage URLs) in free-form text."""
+    """Rewrite storage URLs in free-form text; leave every identifier untouched."""
 
     rewritten = str(text or "")
-    # Longest catalog names first so overlapping prefixes rewrite correctly.
-    for source_catalog, target_catalog in sorted(
-        catalog_mapping.items(), key=lambda item: len(item[0]), reverse=True
-    ):
-        if not source_catalog or not target_catalog:
-            continue
-        source_q = quote_identifier(source_catalog)
-        target_q = quote_identifier(target_catalog)
-        rewritten = rewritten.replace(f"{source_q}.", f"{target_q}.")
-        rewritten = re.sub(
-            rf"(?<![\w`]){re.escape(source_catalog)}\.",
-            f"{target_catalog}.",
-            rewritten,
-        )
-        # Bare single-segment catalog references (CREATE CATALOG `source`).
-        rewritten = re.sub(
-            rf"(?<![\w`]){re.escape(source_q)}(?![\w`.])",
-            target_q,
-            rewritten,
-        )
-        rewritten = re.sub(
-            rf"(?<![\w`.]){re.escape(source_catalog)}(?![\w`.])",
-            target_catalog,
-            rewritten,
-        )
-
     if location_resolver is not None:
         rewritten = _rewrite_storage_urls(rewritten, location_resolver)
     return rewritten
@@ -232,75 +212,34 @@ def strip_reserved_table_properties(text: str) -> str:
     return rewritten
 
 
-def rewrite_external_location_identifiers(
-    text: str,
-    *,
-    source_name: str,
-    target_name: str,
-    target_credential: str,
-) -> str:
-    """Rename external location + credential identifiers in CREATE SQL."""
-
-    rewritten = str(text or "")
-    if source_name and target_name and source_name != target_name:
-        rewritten = rewritten.replace(
-            f"`{source_name}`", f"`{target_name}`"
-        )
-        rewritten = re.sub(
-            rf"(?<![\w`]){re.escape(source_name)}(?![\w`])",
-            target_name,
-            rewritten,
-        )
-    if target_credential:
-        rewritten = re.sub(
-            r"(STORAGE\s+CREDENTIAL\s+)`[^`]+`",
-            rf"\1`{target_credential}`",
-            rewritten,
-            flags=re.IGNORECASE,
-        )
-    return rewritten
-
-
 def rewrite_json_value(
     value: Any,
-    catalog_mapping: Mapping[str, str],
     *,
     location_resolver: MappingResolver | None = None,
 ) -> Any:
     if isinstance(value, dict):
         return {
-            key: rewrite_json_value(
-                item, catalog_mapping, location_resolver=location_resolver
-            )
+            key: rewrite_json_value(item, location_resolver=location_resolver)
             for key, item in value.items()
         }
     if isinstance(value, list):
         return [
-            rewrite_json_value(
-                item, catalog_mapping, location_resolver=location_resolver
-            )
+            rewrite_json_value(item, location_resolver=location_resolver)
             for item in value
         ]
     if isinstance(value, str):
-        return rewrite_text(
-            value, catalog_mapping, location_resolver=location_resolver
-        )
+        return rewrite_text(value, location_resolver=location_resolver)
     return value
 
 
 def rewrite_json_text(
     text: str,
-    catalog_mapping: Mapping[str, str],
     *,
     location_resolver: MappingResolver | None = None,
 ) -> str:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
-        return rewrite_text(
-            text, catalog_mapping, location_resolver=location_resolver
-        )
-    rewritten = rewrite_json_value(
-        payload, catalog_mapping, location_resolver=location_resolver
-    )
+        return rewrite_text(text, location_resolver=location_resolver)
+    rewritten = rewrite_json_value(payload, location_resolver=location_resolver)
     return json.dumps(rewritten, indent=2, default=str) + "\n"

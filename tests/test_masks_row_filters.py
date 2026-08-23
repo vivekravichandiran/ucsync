@@ -227,8 +227,8 @@ def test_migrate_strip_pipeline_drops_inline_policies():
 
 
 def test_migrate_preserves_policy_alter_statements(tmp_path: Path):
-    """Regression: migrate must catalog-rewrite policies/*.sql but NOT strip the
-    ``SET MASK`` / ``SET ROW FILTER`` clause out of the ALTER statement.
+    """Regression: migrate must NOT strip the ``SET MASK`` / ``SET ROW FILTER``
+    clause out of the ALTER statement, and must preserve names verbatim.
 
     strip_inline_policy_clauses is only for CREATE DDL; running it on a policy
     file corrupts ``... SET MASK f`` into ``... SET`` → PARSE_SYNTAX_ERROR.
@@ -252,18 +252,17 @@ def test_migrate_preserves_policy_alter_statements(tmp_path: Path):
     MigrateExportService(
         source_root=str(source),
         target_root=str(target),
-        catalog_mapping={"c": "tgt"},
         run_id="run1",
     ).run(dry_run=False)
 
-    out = (target / "policies" / "TABLE_tgt__hr__employees.sql").read_text(
+    # Names are never mapped → file name and identifiers are preserved.
+    out = (target / "policies" / "TABLE_c__hr__employees.sql").read_text(
         encoding="utf-8"
     )
-    # Catalog rewritten on both the table and the function references ...
-    assert "`tgt`.`hr`.`employees`" in out
-    assert "SET MASK `tgt`.`sec`.`mask_ssn`" in out
-    # ... and the binding clauses are intact (not stripped).
-    assert "SET ROW FILTER `tgt`.`sec`.`hr_dept_filter` ON (`dept`)" in out
+    assert "`c`.`hr`.`employees`" in out
+    # The binding clauses are intact (not stripped).
+    assert "SET MASK `c`.`sec`.`mask_ssn`" in out
+    assert "SET ROW FILTER `c`.`sec`.`hr_dept_filter` ON (`dept`)" in out
 
 
 # ---- export writes the policies artifact ------------------------------------
