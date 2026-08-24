@@ -6,7 +6,7 @@ import json
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from uc_sync.dependency import _TYPE_RANK
 from uc_sync.models import ObjectType
@@ -237,6 +237,44 @@ def _is_governance_prereq_error(message: str) -> bool:
     return any(marker in upper for marker in _GOVERNANCE_PREREQ_MARKERS)
 
 
+def rewrite_catalog_references(sql: str, mapping: dict[str, str]) -> str:
+    """Rewrite catalog references source->target in a SQL statement.
+
+    Handles the three ways a catalog name appears: backticked (```src```),
+    as a qualifier (``src.schema.table``), and standalone (``CREATE CATALOG src``,
+    ``ON CATALOG src``, ``USE CATALOG src``). Catalog names are long/unique, so a
+    word-boundary replace is safe for the bundle's DDL/GRANT/ALTER/POLICY text
+    (which carries no table data — this is a governance/structure migration).
+    """
+    for src, tgt in (mapping or {}).items():
+        if not src or not tgt or src == tgt:
+            continue
+        sql = sql.replace(f"`{src}`", f"`{tgt}`")
+        sql = re.sub(rf"(?<![\w`.]){re.escape(src)}(?=\.)", tgt, sql)      # src.<rest>
+        sql = re.sub(rf"(?<![\w`.]){re.escape(src)}(?![\w`.])", tgt, sql)  # bare
+    return sql
+
+
+class _CatalogRewritingExecutor:
+    """Wraps a SQL executor so every executed statement is catalog-rewritten.
+
+    Applied only when a catalog mapping is supplied, so all import phases (DDL,
+    grants, tags, ABAC, policies, and USE-CATALOG context) replay the bundle under
+    the target catalog name. Non-``execute`` attributes delegate to the inner
+    executor.
+    """
+
+    def __init__(self, inner: Any, mapping: dict[str, str]):
+        self._inner = inner
+        self._mapping = mapping
+
+    def execute(self, sql: str) -> Any:
+        return self._inner.execute(rewrite_catalog_references(sql, self._mapping))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 class PackageImportEngine:
     """Execute CREATE/GRANT SQL from export_migrated_staging as source of truth."""
 
@@ -250,22 +288,26 @@ class PackageImportEngine:
         catalog_mapping: Optional[dict[str, str]] = None,
         toggles: Optional[dict[str, bool]] = None,
         workspace_client: Any = None,
-        select_catalogs: Optional[Iterable[str]] = None,
-        select_schemas: Optional[Iterable[str]] = None,
         select_tables: Optional[Iterable[str]] = None,
     ):
         self.root = Path(package_root)
-        self.sql = sql_executor
         self.workspace_client = workspace_client
         self.dry_run = dry_run
         self.apply_grants = apply_grants
         self.catalog_mapping = dict(catalog_mapping or {})
-        # Optional import-time scope filter: restrict which catalogs / schemas /
-        # tables are created + governed from the bundle (a subset import). Empty =
-        # everything. Catalogs/schemas/functions/volumes are still created for an
-        # in-scope schema; the tables filter narrows only table-like securables.
-        self._sel_catalogs = {s for s in (select_catalogs or []) if s}
-        self._sel_schemas = {s for s in (select_schemas or []) if s}
+        # When a catalog mapping is supplied, every executed statement has its
+        # catalog references rewritten source->target (so the bundle — captured
+        # under source names — is replayed under the target catalog name). Wrap
+        # the executor once so all phases (DDL, grants, tags, ABAC, policies, USE
+        # CATALOG context) are covered uniformly.
+        self.sql = (
+            _CatalogRewritingExecutor(sql_executor, self.catalog_mapping)
+            if self.catalog_mapping else sql_executor
+        )
+        # Optional import-time TABLE scope filter (catalog/schema scoping is done
+        # upstream at inventory via the `catalogs`/`schemas` selection). Empty =
+        # import every table. Only table-like securables are narrowed; the
+        # catalogs/schemas/functions/volumes a selected table needs still flow.
         self._sel_tables = {s for s in (select_tables or []) if s}
         # create_*/apply_* gates (default all-on). create_* gate object creation;
         # apply_* gate governance. apply_grants kw is kept for back-compat.
@@ -305,34 +347,22 @@ class PackageImportEngine:
     }
 
     def _in_scope(self, object_type: str, full_name: str) -> bool:
-        """Is this object within the optional import scope filter?
+        """Is this object within the optional import TABLE filter?
 
-        Filters compose (AND). Semantics mirror the inventory filter:
-        - Storage credentials / external locations are never filtered out — they
-          are shared prerequisites for external tables/volumes.
-        - The catalogs filter applies to every catalog-bearing object; the schemas
-          filter to every schema-bearing object (catalogs excepted, so parents are
-          created); the tables filter only to table-like securables (so the
-          catalogs/schemas/functions that a selected table needs still flow).
-        - Schema/table names accept either the fully-qualified or the bare name.
+        Catalog/schema scoping is done upstream at inventory (the ``catalogs`` /
+        ``schemas`` selection), so this narrows only table-like securables. A
+        blank filter imports everything; when set, the catalogs, schemas,
+        functions, and volumes a selected table depends on still flow through
+        (only other tables/views are excluded). Names accept the fully-qualified
+        or the bare table name.
         """
-        if not (self._sel_catalogs or self._sel_schemas or self._sel_tables):
+        if not self._sel_tables:
             return True
-        if object_type in {"STORAGE_CREDENTIAL", "EXTERNAL_LOCATION"}:
+        if object_type not in self._TABLE_LIKE_TYPES:
             return True
         parts = str(full_name or "").split(".")
-        catalog = parts[0] if parts else ""
-        schema = parts[1] if len(parts) > 1 else ""
-        if self._sel_catalogs and catalog and catalog not in self._sel_catalogs:
-            return False
-        if self._sel_schemas and schema and object_type != "CATALOG":
-            if schema not in self._sel_schemas and f"{catalog}.{schema}" not in self._sel_schemas:
-                return False
-        if self._sel_tables and object_type in self._TABLE_LIKE_TYPES:
-            table = parts[-1] if parts else ""
-            if full_name not in self._sel_tables and table not in self._sel_tables:
-                return False
-        return True
+        table = parts[-1] if parts else ""
+        return full_name in self._sel_tables or table in self._sel_tables
 
     def _create_storage_credential_via_rest(
         self, statements: list[str]

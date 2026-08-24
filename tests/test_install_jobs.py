@@ -79,15 +79,18 @@ def test_run_as_omitted_when_blank():
         assert "run_as" not in load_job_spec(key, _values(run_as_spn=""))
 
 
-def test_import_filter_placeholders_substituted():
+def test_import_table_filter_and_catalog_mapping_substituted():
     spec = load_job_spec(
         "e2e_live",
-        _values(filter_catalogs="ai27_uc_gov_src", filter_tables="ai27_uc_gov_src.hr.employees"),
+        _values(filter_tables="ai27_uc_gov_src.hr.employees",
+                catalog_mapping_json='{"ai27_uc_gov_src":"ai27_uc_gov_copy"}'),
     )
     params = spec["tasks"][-1]["notebook_task"]["base_parameters"]
-    assert params["filter_catalogs"] == "ai27_uc_gov_src"
     assert params["filter_tables"] == "ai27_uc_gov_src.hr.employees"
-    assert params["filter_schemas"] == ""
+    assert params["catalog_mapping_json"] == '{"ai27_uc_gov_src":"ai27_uc_gov_copy"}'
+    # The duplicate catalog/schema import filters were removed.
+    assert "filter_catalogs" not in params
+    assert "filter_schemas" not in params
 
 
 def test_airgap_source_two_tasks_chained_by_job_run_id():

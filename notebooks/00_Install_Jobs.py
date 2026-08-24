@@ -64,10 +64,12 @@ dbutils.widgets.text("source_warehouse_id", "")
 # the needed UC privileges. (The source-only Inventory+Export job is unaffected.)
 dbutils.widgets.text("run_as_spn", "")
 
-# --- import scope filter (import/e2e jobs; blank = import everything) ---
-dbutils.widgets.text("filter_catalogs", "")   # csv catalog names
-dbutils.widgets.text("filter_schemas", "")    # csv catalog.schema (or bare schema)
+# --- import table filter (import/e2e jobs; blank = import every table).
+#     Catalog/schema scoping is set above via `catalogs`/`schemas`. ---
 dbutils.widgets.text("filter_tables", "")     # csv catalog.schema.table (or bare table)
+# --- catalog rename (import/e2e jobs): replicate a source catalog under a
+#     different target name. JSON {"source_catalog":"target_catalog"}; blank = keep. ---
+dbutils.widgets.text("catalog_mapping_json", "")
 
 # --- cluster ---
 dbutils.widgets.text("existing_cluster_id", "")  # blank = new USER_ISOLATION job cluster
@@ -91,7 +93,7 @@ _simple = (
     "ops_catalog", "ops_schema", "mapping_file_path", "run_id",
     "source_workspace_url", "source_client_id", "source_client_secret",
     "source_secret_scope", "source_secret_key", "source_warehouse_id",
-    "run_as_spn", "filter_catalogs", "filter_schemas", "filter_tables",
+    "run_as_spn", "filter_tables", "catalog_mapping_json",
     "existing_cluster_id", "spark_version", "node_type_id", "job_name_prefix",
 )
 values = {k: dbutils.widgets.get(k).strip() for k in _simple}

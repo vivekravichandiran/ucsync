@@ -180,6 +180,46 @@ def test_import_scope_filter_selects_subset(tmp_path: Path):
     assert not any("`drop`" in s for s in sql.statements)
 
 
+def test_rewrite_catalog_references():
+    from uc_sync.package_import import rewrite_catalog_references
+    m = {"src_cat": "tgt_cat"}
+    assert rewrite_catalog_references("CREATE CATALOG src_cat", m) == "CREATE CATALOG tgt_cat"
+    assert rewrite_catalog_references(
+        "CREATE TABLE src_cat.s.t (id INT)", m) == "CREATE TABLE tgt_cat.s.t (id INT)"
+    assert rewrite_catalog_references(
+        "CREATE TABLE `src_cat`.`s`.`t`", m) == "CREATE TABLE `tgt_cat`.`s`.`t`"
+    assert rewrite_catalog_references("USE CATALOG src_cat", m) == "USE CATALOG tgt_cat"
+    # unmapped catalog and substring look-alikes are untouched (word boundary)
+    assert rewrite_catalog_references("CREATE TABLE other.s.t", m) == "CREATE TABLE other.s.t"
+    assert rewrite_catalog_references("src_cat_extra.s.t", m) == "src_cat_extra.s.t"
+
+
+def test_import_applies_catalog_mapping(tmp_path: Path):
+    """A catalog mapping replays the (source-named) bundle under the target
+    catalog: every executed statement is rewritten, and result tracking shows
+    the target name."""
+    root = tmp_path / "migrated"
+    (root / "ddl").mkdir(parents=True)
+    (root / "inventory").mkdir()
+    (root / "ddl" / "CATALOG_src_cat.sql").write_text(
+        "CREATE CATALOG src_cat;\n", encoding="utf-8")
+    (root / "ddl" / "TABLE_src_cat__s__t.sql").write_text(
+        "CREATE TABLE src_cat.s.t (id INT);\n", encoding="utf-8")
+    (root / "inventory" / "objects.json").write_text("[]", encoding="utf-8")
+
+    sql = FakeSql()
+    results = PackageImportEngine(
+        str(root), sql, dry_run=False, catalog_mapping={"src_cat": "tgt_cat"},
+    ).run()
+
+    assert any("CATALOG" in s.upper() and "tgt_cat" in s for s in sql.statements)
+    assert any("tgt_cat.s.t" in s for s in sql.statements)
+    # source catalog name never reaches the executor
+    assert not any("src_cat" in s for s in sql.statements)
+    by = {r.object_type: r for r in results}
+    assert by["TABLE"].target_full_name == "tgt_cat.s.t"
+
+
 def test_split_statements_preserves_dollar_blocks():
     sql = """
 CREATE VIEW v AS $$

@@ -27,13 +27,16 @@ dbutils.widgets.text("output_volume_path", "")
 dbutils.widgets.text("ops_catalog", "")
 dbutils.widgets.text("ops_schema", "")
 dbutils.widgets.text("run_id", "")
-# Optional import scope filter: import only a subset of the bundle. Blank = import
-# everything. Composed with AND. Catalogs/schemas/functions/volumes needed by a
-# selected table still come along; the tables filter narrows only table-like
-# securables. Names accept fully-qualified (catalog.schema[.table]) or bare.
-dbutils.widgets.text("filter_catalogs", "")   # csv catalog names
-dbutils.widgets.text("filter_schemas", "")    # csv catalog.schema (or bare schema)
-dbutils.widgets.text("filter_tables", "")     # csv catalog.schema.table (or bare table)
+# Optional import TABLE filter: import only a subset of tables from the bundle
+# (catalog/schema scoping is done upstream at inventory via catalogs/schemas).
+# Blank = import every table. The catalogs/schemas/functions/volumes a selected
+# table needs still come along. Names accept fully-qualified (catalog.schema.table)
+# or the bare table name.
+dbutils.widgets.text("filter_tables", "")
+# Optional catalog rename: replicate a source catalog under a different target
+# name. JSON object {"source_catalog":"target_catalog"} (blank = keep source
+# names). Every replayed statement is rewritten source->target catalog.
+dbutils.widgets.text("catalog_mapping_json", "")
 for _t in (*CREATE_TOGGLES, *APPLY_TOGGLES):
     dbutils.widgets.dropdown(_t, "true", ["true", "false"])
 dbutils.widgets.dropdown("dry_run", "false", ["true", "false"])
@@ -46,6 +49,7 @@ cfg = from_sources({
     "ops_catalog": dbutils.widgets.get("ops_catalog"),
     "ops_schema": dbutils.widgets.get("ops_schema"),
     "dry_run": dbutils.widgets.get("dry_run"),
+    "catalog_mapping_json": dbutils.widgets.get("catalog_mapping_json"),
     **{t: dbutils.widgets.get(t) for t in (*CREATE_TOGGLES, *APPLY_TOGGLES)},
 })
 run_id = dbutils.widgets.get("run_id").strip()
@@ -66,8 +70,7 @@ toggles = {t: getattr(cfg, t) for t in (*CREATE_TOGGLES, *APPLY_TOGGLES)}
 results = PackageImportEngine(
     migrated, SparkSqlExecutor(spark), dry_run=cfg.dry_run, toggles=toggles,
     workspace_client=WorkspaceClient(local_workspace_auth(dbutils)),
-    select_catalogs=_split_csv(dbutils.widgets.get("filter_catalogs")),
-    select_schemas=_split_csv(dbutils.widgets.get("filter_schemas")),
+    catalog_mapping=cfg.catalog_mapping,
     select_tables=_split_csv(dbutils.widgets.get("filter_tables")),
 ).run()
 
