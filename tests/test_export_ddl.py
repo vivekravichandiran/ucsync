@@ -153,6 +153,45 @@ def test_synthesize_metric_view_from_yaml_definition():
     assert ddl.endswith("$$;")
 
 
+class _FailingShowCreate:
+    """A source SQL executor that cannot reach the objects (mirrors direct-mode
+    export running on the target, where source objects do not exist yet)."""
+
+    def show_create(self, object_type: str, full_name: str) -> str:
+        raise RuntimeError(
+            f"[TABLE_OR_VIEW_NOT_FOUND] {full_name} cannot be found"
+        )
+
+    def execute(self, sql: str):
+        raise RuntimeError("[TABLE_OR_VIEW_NOT_FOUND] cannot be found")
+
+
+def test_show_create_failure_falls_back_to_synthesis_without_warning(tmp_path):
+    """When SHOW CREATE is unavailable but the DDL can be synthesized from
+    inventory, that is a clean success — not a SUCCESS_WITH_WARNINGS row. The
+    scary TABLE_OR_VIEW_NOT_FOUND must never surface as an export warning."""
+    objects = [
+        UCObject(
+            object_type=ObjectType.TABLE,
+            name="orders",
+            full_name="c.s.orders",
+            definition={"table_type": "MANAGED",
+                        "columns": [{"name": "id", "type_text": "int"}]},
+        ),
+    ]
+    result = ExportService(
+        str(tmp_path / "v"), "run1",
+        sql_executor=_FailingShowCreate(),
+        workspace_root=str(tmp_path / "w"),
+    ).run(objects, dry_run=False)
+
+    row = result["results"][0]
+    assert row["status"] == "SUCCESS"
+    assert not row["error_message"]
+    assert result["ddl_by_source"].get("SYNTHESIZED") == 1
+    assert "SHOW_CREATE" not in result["ddl_by_source"]
+
+
 def test_export_writes_ddl_for_all_components(tmp_path):
     volume = tmp_path / "volume"
     workspace = tmp_path / "workspace"

@@ -17,25 +17,46 @@ for _p in ("../src", "./src", os.path.abspath(os.path.join(os.getcwd(), "..", "s
 from uc_sync.config import from_sources
 from uc_sync.export import ExportService
 from uc_sync.migrate_export import MigrateExportService
-from uc_sync.import_engine import SparkSqlExecutor
+from uc_sync.import_engine import SparkSqlExecutor, RestSqlExecutor
+from uc_sync.auth import local_workspace_auth, direct_workspace_auth
+from uc_sync.workspace_client import WorkspaceClient
 from uc_sync.models import UCObject, ObjectType, LastModifiedSource
 
 # COMMAND ----------
 
+dbutils.widgets.dropdown("connectivity_mode", "direct", ["direct", "airgap"])
 dbutils.widgets.text("output_volume_path", "")
 dbutils.widgets.text("ops_catalog", "")
 dbutils.widgets.text("ops_schema", "")
 dbutils.widgets.text("run_id", "")
 dbutils.widgets.text("mapping_file_path", "")   # storage-cred + location mapping CSV
+# Remote source (direct mode): the export stage captures full-fidelity SHOW CREATE
+# DDL from the SOURCE. In direct mode this job runs on the TARGET, where the source
+# objects do not exist yet, so — exactly like 01_Inventory — SHOW CREATE must run
+# over the source workspace's SQL warehouse. Leave source_workspace_url blank for
+# airgap (this notebook then runs on the source and uses local Spark).
+dbutils.widgets.text("source_workspace_url", "")
+dbutils.widgets.text("source_client_id", "")       # plaintext (never a secret)
+dbutils.widgets.text("source_client_secret", "")   # plaintext secret (option 1)
+dbutils.widgets.text("source_secret_scope", "")    # secret scope (option 2)
+dbutils.widgets.text("source_secret_key", "")      # secret key   (option 2)
+dbutils.widgets.text("source_warehouse_id", "")    # source SQL warehouse (direct)
 
 # COMMAND ----------
 
 cfg = from_sources({
     "stage": "EXPORT",
+    "connectivity_mode": dbutils.widgets.get("connectivity_mode"),
     "output_volume_path": dbutils.widgets.get("output_volume_path"),
     "ops_catalog": dbutils.widgets.get("ops_catalog"),
     "ops_schema": dbutils.widgets.get("ops_schema"),
     "mapping_file_path": dbutils.widgets.get("mapping_file_path"),
+    "source_workspace_url": dbutils.widgets.get("source_workspace_url"),
+    "source_client_id": dbutils.widgets.get("source_client_id"),
+    "source_client_secret": dbutils.widgets.get("source_client_secret"),
+    "source_secret_scope": dbutils.widgets.get("source_secret_scope"),
+    "source_secret_key": dbutils.widgets.get("source_secret_key"),
+    "source_warehouse_id": dbutils.widgets.get("source_warehouse_id"),
 })
 run_id = dbutils.widgets.get("run_id").strip()
 if not run_id:
@@ -56,10 +77,30 @@ for d in json.load(open(_local(f"{base}/bundle/inventory.json"))):
 
 # COMMAND ----------
 
+# SHOW CREATE reads run against the workspace that owns the objects. In direct mode
+# this job runs on the target, so — like 01_Inventory — capture DDL over the source
+# workspace's SQL warehouse. In airgap mode this notebook runs on the source, so the
+# local Spark session already sees the objects.
+if cfg.source_workspace_url:
+    secret = cfg.source_client_secret
+    if not secret and cfg.source_secret_scope and cfg.source_secret_key:
+        secret = dbutils.secrets.get(scope=cfg.source_secret_scope, key=cfg.source_secret_key)
+    source = WorkspaceClient(direct_workspace_auth(cfg.source_workspace_url, cfg.source_client_id, secret))
+    if not cfg.source_warehouse_id:
+        raise ValueError(
+            "source_warehouse_id is required to export a remote source: full-fidelity "
+            "SHOW CREATE DDL is captured via the source workspace's SQL warehouse "
+            "(Spark on this job runs against the target). Falls back to synthesized "
+            "DDL from inventory if omitted."
+        )
+    ddl_sql = RestSqlExecutor(source, cfg.source_warehouse_id)
+else:
+    ddl_sql = SparkSqlExecutor(spark)
+
 # Capture full-fidelity DDL + governance artifacts, then path-rewrite to target.
 export_root = f"{base}/export"
 result = ExportService(export_root, run_id, workspace_root=_local(export_root),
-                       sql_executor=SparkSqlExecutor(spark)).run(objects, dry_run=False)
+                       sql_executor=ddl_sql).run(objects, dry_run=False)
 MigrateExportService(
     source_root=_local(f"{export_root}/run_{run_id}"),
     target_root=_local(f"{base}/migrated"),

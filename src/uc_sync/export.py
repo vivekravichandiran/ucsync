@@ -388,15 +388,20 @@ class ExportService:
         """Return (ddl_text, source) using SHOW CREATE when possible."""
 
         tried_show = False
+        show_error: Exception | None = None
         if self.sql is not None and supports_show_create(obj.object_type):
             tried_show = True
             try:
                 ddl = self._capture_show_create(obj)
                 return ddl, "SHOW_CREATE"
             except Exception as exc:  # noqa: BLE001
-                if prefers_show_create(obj.object_type):
-                    warnings.append(f"SHOW_CREATE_FAILED: {exc}")
-                # Optional SHOW CREATE types fall through to synthesis quietly.
+                # SHOW CREATE may be unavailable for benign reasons — the object
+                # is not reachable on this compute (direct-mode export runs on
+                # the target, where the source objects do not yet exist), or the
+                # type has no SHOW CREATE (functions). This is NOT a warning on
+                # its own: we fall back to synthesizing the DDL from the stage-01
+                # inventory below and only surface a problem if that also fails.
+                show_error = exc
 
         synthesized = create_ddl_for_object(obj)
         if synthesized:
@@ -416,8 +421,14 @@ class ExportService:
                 source,
             )
 
+        # No DDL at all (e.g. materialized view / streaming table, which cannot be
+        # synthesized and need SHOW CREATE). Now the SHOW CREATE failure is a real
+        # problem worth flagging on the object's row.
         if tried_show and prefers_show_create(obj.object_type):
-            warnings.append("DDL_UNAVAILABLE: SHOW CREATE failed and no synthesis")
+            detail = f": {show_error}" if show_error else ""
+            warnings.append(
+                f"DDL_UNAVAILABLE: SHOW CREATE failed and no synthesis available{detail}"
+            )
         return None, None
 
     def _capture_show_create(self, obj: UCObject) -> str:

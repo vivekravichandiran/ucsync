@@ -221,9 +221,24 @@ class RestSqlExecutor:
         return rows
 
     def show_create(self, object_type: str, full_name: str) -> str:
-        raise NotImplementedError(
-            "RestSqlExecutor is used for governance reads only, not SHOW CREATE"
-        )
+        """Capture full-fidelity DDL from the (remote) source via SHOW CREATE.
+
+        Used by the export stage in direct mode, where the job runs on the target
+        but the source objects only exist on the source workspace — so the DDL
+        must be read over the source warehouse, not the local Spark session.
+        Functions have no ``SHOW CREATE FUNCTION`` in Databricks SQL, so the
+        caller synthesizes them from inventory instead.
+        """
+        if str(object_type).upper() == "FUNCTION":
+            raise RuntimeError(
+                "SHOW CREATE FUNCTION is not supported in Databricks SQL; "
+                "functions are synthesized from inventory"
+            )
+        rows = self.execute(f"SHOW CREATE TABLE {quote_full_name(full_name)}")
+        if not rows:
+            raise RuntimeError(f"SHOW CREATE returned no rows for {full_name}")
+        first = rows[0]
+        return str(first[0] if not isinstance(first, str) else first)
 
 
 class ImportEngine:

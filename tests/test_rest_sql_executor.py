@@ -155,10 +155,25 @@ def test_execute_follows_chunk_links():
     assert client.gets == ["/api/2.0/sql/statements/s4/result/chunks/1"]
 
 
-def test_show_create_not_supported():
-    ex = RestSqlExecutor(_FakeClient({}), "wh")
-    with pytest.raises(NotImplementedError):
-        ex.show_create("TABLE", "c.s.t")
+def test_show_create_table_runs_over_rest():
+    """Direct-mode export captures SHOW CREATE from the remote source over the
+    Statement Execution API (the objects do not exist on the local/target Spark)."""
+    client = _FakeClient(_ok([["CREATE TABLE c.s.t (id BIGINT) USING delta"]]))
+    ex = RestSqlExecutor(client, "wh", poll_seconds=0)
+    ddl = ex.show_create("TABLE", "c.s.t")
+    assert ddl == "CREATE TABLE c.s.t (id BIGINT) USING delta"
+    _, body = client.posts[0]
+    assert body["statement"] == "SHOW CREATE TABLE `c`.`s`.`t`"
+
+
+def test_show_create_function_not_supported():
+    # Databricks SQL has no SHOW CREATE FUNCTION — functions are synthesized, so
+    # this must fail fast without issuing a statement.
+    client = _FakeClient({})
+    ex = RestSqlExecutor(client, "wh")
+    with pytest.raises(RuntimeError, match="FUNCTION"):
+        ex.show_create("FUNCTION", "c.s.f")
+    assert client.posts == []
 
 
 def test_read_abac_policies_over_rest_parses_json_array_strings():
