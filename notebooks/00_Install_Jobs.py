@@ -52,6 +52,10 @@ dbutils.widgets.text("source_client_id", "")       # plaintext (never a secret)
 dbutils.widgets.text("source_client_secret", "")   # plaintext secret (option 1)
 dbutils.widgets.text("source_secret_scope", "")    # secret scope (option 2)
 dbutils.widgets.text("source_secret_key", "")      # secret key   (option 2)
+# SQL warehouse on the SOURCE workspace — REQUIRED for a remote source: tags +
+# ABAC policies are read via the source's Statement Execution API. Blank when the
+# source is the current workspace (local/airgap-on-source).
+dbutils.widgets.text("source_warehouse_id", "")
 
 # --- cluster ---
 dbutils.widgets.text("existing_cluster_id", "")  # blank = new USER_ISOLATION job cluster
@@ -74,7 +78,7 @@ _simple = (
     "connectivity_mode", "catalogs", "schemas", "output_volume_path",
     "ops_catalog", "ops_schema", "mapping_file_path", "run_id",
     "source_workspace_url", "source_client_id", "source_client_secret",
-    "source_secret_scope", "source_secret_key",
+    "source_secret_scope", "source_secret_key", "source_warehouse_id",
     "existing_cluster_id", "spark_version", "node_type_id", "job_name_prefix",
 )
 values = {k: dbutils.widgets.get(k).strip() for k in _simple}

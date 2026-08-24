@@ -31,7 +31,7 @@ def test_build_report_has_governance_sheets(tmp_path):
     wb = load_workbook(out)
     assert set(wb.sheetnames) == {
         "Summary", "Objects", "Tags", "Column Masks & Row Filters",
-        "ABAC Policies", "Grants",
+        "ABAC Policies", "Policy Matched Columns", "Grants",
     }
     # ABAC sheet carries the policy with its EXCEPT.
     abac_rows = list(wb["ABAC Policies"].iter_rows(values_only=True))
@@ -39,6 +39,39 @@ def test_build_report_has_governance_sheets(tmp_path):
     # Tags sheet has the column tag.
     tag_rows = list(wb["Tags"].iter_rows(values_only=True))
     assert any("SSN" in str(r) for r in tag_rows)
+
+
+def test_policy_matched_columns_derives_from_tags_within_scope(tmp_path):
+    """The derived sheet resolves each policy's tag rule against captured column
+    tags, scoped to the securable the policy is attached ON."""
+    objects = [
+        # Schema-scoped column-mask policy matching pii=SSN.
+        {"object_type": "ABAC_POLICY", "full_name": "c.hr#policy:mask_ssn",
+         "definition": {"policy_name": "mask_ssn", "policy_type": "COLUMN_MASK",
+                        "on_securable_type": "SCHEMA", "on_securable": "c.hr",
+                        "function_name": "c.sec.mask", "to_principals": [],
+                        "except_principals": [],
+                        "match_columns": ["has_tag_value('pii', 'SSN') AS x"]}},
+        # In-scope table with a matching column tag and a non-matching one.
+        {"object_type": "TABLE", "full_name": "c.hr.employees", "owner": "me",
+         "tags": {}, "grants": [],
+         "definition": {"column_tags": {"ssn": {"pii": "SSN"},
+                                        "email": {"pii": "EMAIL"}}}},
+        # Out-of-scope table (different schema) — must NOT match.
+        {"object_type": "TABLE", "full_name": "c.finance.ledger", "owner": "me",
+         "tags": {}, "grants": [],
+         "definition": {"column_tags": {"acct": {"pii": "SSN"}}}},
+    ]
+    out = tmp_path / "r.xlsx"
+    build_report(objects, str(out), run_id="r1")
+    from openpyxl import load_workbook
+    ws = load_workbook(out)["Policy Matched Columns"]
+    rows = list(ws.iter_rows(values_only=True))[1:]  # drop header
+    # Exactly one match: c.hr.employees.ssn (pii=SSN), in-scope.
+    assert len(rows) == 1
+    r = rows[0]
+    assert r[0] == "mask_ssn" and r[5] == "c.hr.employees"
+    assert r[6] == "ssn" and r[7] == "pii" and r[8] == "SSN"
 
 
 def test_build_report_saves_to_buffer_not_path(tmp_path, monkeypatch):

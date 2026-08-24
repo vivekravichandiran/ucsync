@@ -279,7 +279,8 @@ class InventoryService:
         for catalog in catalogs:
             try:
                 tags = read_tags(self.sql, catalog)
-            except Exception:  # noqa: BLE001 - keep inventory usable
+            except Exception as exc:  # noqa: BLE001 - keep inventory usable
+                print(f"[inventory] tag read failed for {catalog}: {exc!r}")
                 tags = {"objects": {}, "columns": {}}
             object_tags = tags.get("objects", {})
             column_tags = tags.get("columns", {})
@@ -293,7 +294,8 @@ class InventoryService:
                     }
             try:
                 policies = read_abac_policies(self.sql, catalog)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                print(f"[inventory] ABAC read failed for {catalog}: {exc!r}")
                 policies = []
             objects.extend(policies)
 

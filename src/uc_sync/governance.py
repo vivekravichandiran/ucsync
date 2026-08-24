@@ -1,9 +1,9 @@
 """Governed-tag and ABAC-policy inventory reads + DDL builders.
 
-Tags and ABAC policies are UC governance that lives in ``information_schema`` /
-``system.information_schema`` (SQL, not the REST catalog API), so these helpers
-take a SQL executor. Reconstructed DDL is replayed verbatim on the target — names
-are never remapped, and each ABAC policy keeps its source ``EXCEPT`` list.
+Tags and ABAC policies are UC governance that lives in each catalog's
+``information_schema`` (SQL, not the REST catalog API), so these helpers take a
+SQL executor. Reconstructed DDL is replayed verbatim on the target — names are
+never remapped, and each ABAC policy keeps its source ``EXCEPT`` list.
 """
 
 from __future__ import annotations
@@ -52,7 +52,8 @@ def read_tags(sql: Any, catalog: str) -> dict[str, Any]:
         )
         try:
             rows = _rows(sql, stmt)
-        except Exception:  # noqa: BLE001 - tag table may be empty/absent
+        except Exception as exc:  # noqa: BLE001 - tag table may be empty/absent
+            print(f"[governance] {level} tag read failed for {catalog}: {exc!r}")
             continue
         for row in rows:
             *ident, tag_name, tag_value = row
@@ -90,18 +91,27 @@ def _describe_policy(
 
 
 def read_abac_policies(sql: Any, catalog: str) -> list[UCObject]:
-    """Inventory ABAC policies attached at/under ``catalog`` as UCObjects."""
+    """Inventory ABAC policies attached at/under ``catalog`` as UCObjects.
 
+    Reads the catalog's OWN ``information_schema`` (not ``system.``): the
+    metastore-wide ``system.information_schema`` is a separately governed system
+    schema that is not always resolvable/granted on classic job compute, so a
+    read there silently returns nothing. Each catalog's ``information_schema`` is
+    available to anyone with ``USE`` on the catalog — the same view the tag reads
+    use — and its ``abac_policy_definitions`` already scopes to that catalog.
+    """
+
+    cat_q = quote_identifier(catalog)
     stmt = (
         "SELECT policy_name, policy_type, catalog_name, schema_name, "
         "securable_name, on_securable_type, to_principals, except_principals, "
         "for_securable_type, when_condition, match_columns "
-        "FROM system.information_schema.abac_policy_definitions "
-        f"WHERE catalog_name = '{escape_literal(catalog)}'"
+        f"FROM {cat_q}.information_schema.abac_policy_definitions"
     )
     try:
         rows = _rows(sql, stmt)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        print(f"[governance] ABAC policy read failed for {catalog}: {exc!r}")
         return []
     policies: list[UCObject] = []
     for row in rows:

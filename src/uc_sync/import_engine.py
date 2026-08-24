@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import random
 import re
+import time
 from dataclasses import asdict, dataclass
 from typing import Any, Iterable, List, Optional, Protocol
 
@@ -69,6 +71,159 @@ class SparkSqlExecutor:
             raise RuntimeError(f"SHOW CREATE returned no rows for {full_name}")
         row = rows[0]
         return str(row[0])
+
+
+class _TransientSqlError(Exception):
+    """A statement failure worth retrying (network blip, warehouse warming)."""
+
+
+# Substrings in a statement error that indicate a transient, retryable failure
+# (warehouse spinning up, capacity, service maintenance) rather than a
+# deterministic SQL error (syntax/permission/not-found), which must fail fast.
+_RETRYABLE_STATEMENT_HINTS = (
+    "temporarily_unavailable",
+    "service_under_maintenance",
+    "temporarily unavailable",
+    "please try again",
+    "try again later",
+    "deadline_exceeded",
+    "deadline exceeded",
+    "warehouse is starting",
+    "cluster is starting",
+    "no worker",
+    "capacity",
+)
+
+
+def _statement_error_is_retryable(message: str) -> bool:
+    low = (message or "").lower()
+    return any(hint in low for hint in _RETRYABLE_STATEMENT_HINTS)
+
+
+class RestSqlExecutor:
+    """Run SQL against a (possibly remote) workspace via the Statement
+    Execution API instead of a local Spark session.
+
+    Governance reads (tags, ABAC policies) query ``information_schema`` on the
+    workspace that OWNS the objects. When the job runs on the target but
+    inventories a remote source (``connectivity_mode=direct``), a local
+    ``SparkSqlExecutor`` would hit the target's Spark session — where the source
+    catalogs do not exist — so those reads come back empty. Pointing this
+    executor at the source workspace (same SP creds as the REST inventory) makes
+    tag/ABAC reads follow the source like everything else.
+
+    Returns rows as plain lists so callers can index/unpack them exactly like
+    ``spark.sql(...).collect()`` rows (JSON_ARRAY renders every value as a
+    string, so array columns arrive as JSON text — ``governance._json_list``
+    already parses that).
+
+    Production hardening: the reads are idempotent SELECT/DESCRIBE, so the whole
+    statement is retried with exponential backoff + jitter on transient failures
+    — network/HTTP errors surfacing from the client (which itself already retries
+    429/5xx) and transient statement states (warehouse warming, capacity).
+    Deterministic SQL errors (syntax, permission, not-found) fail fast without
+    retry. Polling backs off up to a cap so a cold-warehouse wait does not hammer
+    the API.
+    """
+
+    def __init__(
+        self,
+        client: "WorkspaceClient",
+        warehouse_id: str,
+        *,
+        poll_seconds: float = 2.0,
+        max_wait_seconds: float = 600.0,
+        max_retries: int = 4,
+        retry_base_seconds: float = 1.0,
+        poll_cap_seconds: float = 15.0,
+    ):
+        if not warehouse_id:
+            raise ValueError("warehouse_id is required for RestSqlExecutor")
+        self.client = client
+        self.warehouse_id = warehouse_id
+        self.poll_seconds = poll_seconds
+        self.max_wait_seconds = max_wait_seconds
+        self.max_retries = max(0, int(max_retries))
+        self.retry_base_seconds = retry_base_seconds
+        self.poll_cap_seconds = poll_cap_seconds
+
+    def execute(self, sql: str) -> list[list[Any]]:
+        last_err: Optional[Exception] = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                return self._run_once(sql)
+            except _TransientSqlError as exc:
+                last_err = exc
+                if attempt >= self.max_retries:
+                    break
+                delay = min(self.retry_base_seconds * (2 ** attempt), 30.0)
+                time.sleep(delay + random.uniform(0, delay * 0.25))
+        raise RuntimeError(
+            f"statement failed after {self.max_retries + 1} attempt(s): {last_err}"
+        )
+
+    def _run_once(self, sql: str) -> list[list[Any]]:
+        try:
+            resp = self.client.post(
+                "/api/2.0/sql/statements",
+                {
+                    "warehouse_id": self.warehouse_id,
+                    "statement": sql,
+                    "wait_timeout": "30s",
+                    "on_wait_timeout": "CONTINUE",
+                    "disposition": "INLINE",
+                    "format": "JSON_ARRAY",
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - client raises RuntimeError
+            raise _TransientSqlError(f"submit failed: {exc}") from exc
+
+        deadline = time.time() + self.max_wait_seconds
+        delay = self.poll_seconds
+        while True:
+            state = str((resp.get("status") or {}).get("state") or "").upper()
+            if state == "SUCCEEDED":
+                break
+            if state in {"FAILED", "CANCELED", "CLOSED"}:
+                err = (resp.get("status") or {}).get("error") or {}
+                msg = str(err.get("message") or err or sql[:120])
+                if _statement_error_is_retryable(msg):
+                    raise _TransientSqlError(f"statement {state}: {msg}")
+                # Deterministic SQL error — do not retry.
+                raise RuntimeError(f"statement {state}: {msg}")
+            if time.time() > deadline:
+                # A cold warehouse warms in well under this; a timeout here means
+                # something is wrong that a resubmit won't fix — fail terminally.
+                raise RuntimeError(
+                    f"statement did not finish before "
+                    f"{self.max_wait_seconds:.0f}s (state={state})"
+                )
+            time.sleep(delay + random.uniform(0, delay * 0.25))
+            delay = min(delay * 1.5, self.poll_cap_seconds)
+            try:
+                resp = self.client.get(
+                    f"/api/2.0/sql/statements/{resp.get('statement_id')}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise _TransientSqlError(f"poll failed: {exc}") from exc
+
+        result = resp.get("result") or {}
+        rows = [list(r) for r in (result.get("data_array") or [])]
+        # Follow chunk links in case a governance read spans multiple chunks.
+        next_link = result.get("next_chunk_internal_link")
+        while next_link:
+            try:
+                chunk = self.client.get(next_link)
+            except Exception as exc:  # noqa: BLE001
+                raise _TransientSqlError(f"chunk fetch failed: {exc}") from exc
+            rows.extend(list(r) for r in (chunk.get("data_array") or []))
+            next_link = chunk.get("next_chunk_internal_link")
+        return rows
+
+    def show_create(self, object_type: str, full_name: str) -> str:
+        raise NotImplementedError(
+            "RestSqlExecutor is used for governance reads only, not SHOW CREATE"
+        )
 
 
 class ImportEngine:

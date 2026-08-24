@@ -69,6 +69,10 @@ class SyncConfig:
     source_secret_scope: str = ""
     source_secret_key: str = ""
     source_token: str = ""
+    # SQL warehouse on the SOURCE workspace, used for governance reads
+    # (tags/ABAC) when inventorying a remote source in direct mode. Not needed
+    # when the source is the current workspace (local/airgap-on-source).
+    source_warehouse_id: str = ""
     target_workspace_url: str = ""
     target_oauth_secret_scope: str = ""
     target_client_id_secret_key: str = ""
@@ -386,6 +390,9 @@ def from_sources(
             pick("source_secret_key", "source_client_secret_key", source.get("client_secret_key"))
         ),
         source_token=str(pick("source_token", source.get("token"))),
+        source_warehouse_id=str(
+            pick("source_warehouse_id", source.get("warehouse_id"))
+        ),
         target_workspace_url=str(pick("target_workspace_url", target.get("workspace_url"))),
         target_oauth_secret_scope=str(
             pick("target_oauth_secret_scope", target.get("secret_scope"))

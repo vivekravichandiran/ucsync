@@ -54,6 +54,7 @@
           "source_client_secret": "${source_client_secret}",
           "source_secret_scope": "${source_secret_scope}",
           "source_secret_key": "${source_secret_key}",
+          "source_warehouse_id": "${source_warehouse_id}",
           "run_id": "{{job.run_id}}"
         }
       }

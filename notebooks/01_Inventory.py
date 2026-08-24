@@ -21,7 +21,7 @@ for _p in ("../src", "./src", os.path.abspath(os.path.join(os.getcwd(), "..", "s
 
 from uc_sync.config import from_sources
 from uc_sync.inventory import InventoryService
-from uc_sync.import_engine import SparkSqlExecutor
+from uc_sync.import_engine import SparkSqlExecutor, RestSqlExecutor
 from uc_sync.auth import local_workspace_auth, direct_workspace_auth
 from uc_sync.workspace_client import WorkspaceClient
 
@@ -42,6 +42,11 @@ dbutils.widgets.text("source_client_id", "")       # plaintext (never a secret)
 dbutils.widgets.text("source_client_secret", "")   # plaintext secret (option 1)
 dbutils.widgets.text("source_secret_scope", "")    # secret scope (option 2)
 dbutils.widgets.text("source_secret_key", "")      # secret key   (option 2)
+# SQL warehouse on the SOURCE workspace. REQUIRED when reading a remote source
+# (source_workspace_url set): tags + ABAC policies live in information_schema and
+# are read over the Statement Execution API on the source. Leave blank when the
+# source is the current workspace (local/airgap-on-source) — Spark is used then.
+dbutils.widgets.text("source_warehouse_id", "")
 dbutils.widgets.text("run_id", "")
 
 # COMMAND ----------
@@ -50,7 +55,7 @@ widgets = {k: dbutils.widgets.get(k) for k in (
     "connectivity_mode", "catalogs", "schemas", "output_volume_path",
     "ops_catalog", "ops_schema", "source_workspace_url",
     "source_client_id", "source_client_secret", "source_secret_scope",
-    "source_secret_key",
+    "source_secret_key", "source_warehouse_id",
 )}
 widgets["stage"] = "INVENTORY"
 cfg = from_sources(widgets)
@@ -75,9 +80,23 @@ else:
     auth = local_workspace_auth(dbutils)
 source = WorkspaceClient(auth)
 
+# Governance reads (tags/ABAC) query information_schema on the workspace that owns
+# the objects. When inventorying a REMOTE source, the local Spark session points at
+# the wrong workspace, so run those reads over the source's SQL warehouse instead.
+if cfg.source_workspace_url:
+    if not cfg.source_warehouse_id:
+        raise ValueError(
+            "source_warehouse_id is required to inventory a remote source: "
+            "tags and ABAC policies are read via the source workspace's SQL "
+            "warehouse (Spark on this job runs against the target)."
+        )
+    gov_sql = RestSqlExecutor(source, cfg.source_warehouse_id)
+else:
+    gov_sql = SparkSqlExecutor(spark)
+
 # COMMAND ----------
 
-objects = InventoryService(source, cfg, SparkSqlExecutor(spark)).run()
+objects = InventoryService(source, cfg, gov_sql).run()
 payload = json.dumps([o.to_dict() for o in objects], indent=2, default=str)
 dst = f"{_local(run_dir)}/inventory.json"
 with open(dst, "w") as fh:

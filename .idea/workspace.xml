@@ -4,7 +4,19 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="1862a172-d182-46cb-8967-79eb137ce7bc" name="Changes" comment="Added mask application" />
+    <list default="true" id="1862a172-d182-46cb-8967-79eb137ce7bc" name="Changes" comment="Fix excel creation in report">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/jobs/airgap_source.json" beforeDir="false" afterPath="$PROJECT_DIR$/jobs/airgap_source.json" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/jobs/e2e_dry_run.json" beforeDir="false" afterPath="$PROJECT_DIR$/jobs/e2e_dry_run.json" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/jobs/e2e_live.json" beforeDir="false" afterPath="$PROJECT_DIR$/jobs/e2e_live.json" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/notebooks/00_Install_Jobs.py" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/00_Install_Jobs.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/notebooks/01_Inventory.py" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/01_Inventory.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/uc_sync/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/config.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/uc_sync/governance.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/governance.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/uc_sync/import_engine.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/import_engine.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/uc_sync/inventory.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/inventory.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_governance.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_governance.py" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -92,11 +104,20 @@
       <option name="project" value="LOCAL" />
       <updated>1787403397316</updated>
     </task>
-    <option name="localTasksCounter" value="4" />
+    <task id="LOCAL-00004" summary="Fix excel creation in report">
+      <option name="closed" value="true" />
+      <created>1787499636183</created>
+      <option name="number" value="00004" />
+      <option name="presentableId" value="LOCAL-00004" />
+      <option name="project" value="LOCAL" />
+      <updated>1787499636183</updated>
+    </task>
+    <option name="localTasksCounter" value="5" />
     <servers />
   </component>
   <component name="VcsManagerConfiguration">
     <MESSAGE value="Added mask application" />
-    <option name="LAST_COMMIT_MESSAGE" value="Added mask application" />
+    <MESSAGE value="Fix excel creation in report" />
+    <option name="LAST_COMMIT_MESSAGE" value="Fix excel creation in report" />
   </component>
 </project>

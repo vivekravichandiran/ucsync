@@ -4,9 +4,33 @@ from __future__ import annotations
 
 from uc_sync.governance import (
     abac_policy_create_statement,
+    read_abac_policies,
     tag_statements_for_object,
 )
 from uc_sync.models import ObjectType, UCObject
+
+
+class _RecordingSql:
+    """Captures executed statements; returns no rows."""
+
+    def __init__(self):
+        self.statements: list[str] = []
+
+    def execute(self, sql):
+        self.statements.append(sql)
+        return []
+
+
+def test_read_abac_policies_uses_per_catalog_information_schema():
+    """ABAC must be read from the catalog's own information_schema, not the
+    metastore-wide system schema (which is not reliably resolvable on classic
+    job compute and silently returned nothing — the airgap ABAC-empty bug)."""
+    sql = _RecordingSql()
+    read_abac_policies(sql, "ai27_uc_gov_src")
+    assert len(sql.statements) == 1
+    stmt = sql.statements[0]
+    assert "`ai27_uc_gov_src`.information_schema.abac_policy_definitions" in stmt
+    assert "system.information_schema" not in stmt
 
 
 def test_tag_statements_object_and_column_levels():
