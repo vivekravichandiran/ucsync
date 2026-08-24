@@ -172,6 +172,35 @@ def test_grants_sheet_has_level_column(tmp_path):
     assert levels["c"] == "CATALOG" and levels["c.s.t"] == "TABLE"
 
 
+def test_masks_sheet_object_header_and_dynamic_view_identity(tmp_path):
+    """Classic masks/row filters are table-only, so their sheet's first column is
+    'object' (can be an MV/streaming table, never a view). Dynamic views instead
+    surface their in-definition protection via an identity_aware column."""
+    objects = [
+        {"object_type": "TABLE", "full_name": "c.s.t", "owner": "me", "tags": {},
+         "grants": [], "definition": {
+             "column_masks": [{"column_name": "ssn", "function_name": "c.sec.m",
+                               "using_column_names": []}]}},
+        {"object_type": "DYNAMIC_VIEW", "full_name": "c.s.dv", "owner": "me",
+         "tags": {}, "grants": [], "definition": {
+             "view_definition": "SELECT id, CASE WHEN is_account_group_member('hr') "
+                                "THEN ssn ELSE '***' END AS ssn FROM c.s.t "
+                                "WHERE dept = current_user()"}},
+    ]
+    out = tmp_path / "r.xlsx"
+    build_report(objects, str(out), stage="INVENTORY")
+    from openpyxl import load_workbook
+    wb = load_workbook(out)
+
+    cm = list(wb["Column Masks & Row Filters"].iter_rows(values_only=True))
+    assert cm[0][0] == "object"
+
+    dv = list(wb["Dynamic Views"].iter_rows(values_only=True))
+    idx = dv[0].index("identity_aware")
+    markers = dv[1][idx]
+    assert "is_account_group_member" in markers and "current_user" in markers
+
+
 def test_build_report_saves_to_buffer_not_path(tmp_path, monkeypatch):
     """UC Volumes FUSE mounts reject the seeks openpyxl needs to write a ZIP to a
     path directly, so the workbook must be built in an in-memory buffer and then

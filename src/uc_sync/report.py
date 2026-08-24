@@ -227,9 +227,30 @@ _TABLE_COLS = [
     ("comment", lambda o: _cell(o, "comment")),
     ("owner", lambda o: o.get("owner") or ""),
 ]
+# Identity functions that make a view "dynamic": its SELECT/WHERE masks columns
+# or filters rows based on the querying principal. UC has no classic ALTER-applied
+# masks/row filters on views (those are table-only) — a view expresses the same
+# protection inside its own definition, so surface which markers are present.
+_IDENTITY_MARKERS = (
+    "current_user(",
+    "session_user(",
+    "is_member(",
+    "is_account_group_member(",
+)
+
+
+def _view_identity(o: dict[str, Any]) -> str:
+    d = o.get("definition") or {}
+    text = " ".join(
+        str(d.get(k) or "") for k in ("view_definition", "view_original_text")
+    ).lower()
+    return ", ".join(m.rstrip("(") for m in _IDENTITY_MARKERS if m in text)
+
+
 _VIEW_COLS = [
     ("view", lambda o: o["full_name"]),
     ("columns", _col_count),
+    ("identity_aware", _view_identity),
     ("definition", lambda o: _truncate(_cell(o, "view_definition", "view_original_text"))),
     ("comment", lambda o: _cell(o, "comment")),
     ("owner", lambda o: o.get("owner") or ""),
@@ -448,10 +469,14 @@ def build_report(
             for k, v in ctags.items():
                 tags.append([o["full_name"], "COLUMN", col, k, v])
 
-    # Column masks & row filters (classic)
+    # Column masks & row filters (classic, ALTER-applied). These are table-only in
+    # UC — the securable is a table, external table, materialized view, or
+    # streaming table (never a plain/dynamic view), so the first column is the
+    # general "object", not "table". Views express equivalent protection in their
+    # own definition (see the identity_aware column on the view sheets).
     cm = _sheet(
         "Column Masks & Row Filters",
-        ["table", "kind", "column", "function", "using/on cols"],
+        ["object", "kind", "column", "function", "using/on cols"],
     )
     for o in objects:
         d = o.get("definition") or {}
