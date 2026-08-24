@@ -66,12 +66,19 @@ MigrateExportService(
     mappings=cfg.mappings, run_id=run_id,
 ).run(dry_run=False)
 
+# Persist per-object export results into the migrated bundle so the IMPORT stage
+# can carry the export_status forward (each report becomes the base for the next).
+export_results = result.get("results") or []
+with open(f"{_local(base)}/migrated/export_results.json", "w") as fh:
+    json.dump(export_results, fh, indent=2, default=str)
+
 # Operator-facing export report from the path-rewritten (migrated) bundle.
 try:
     from uc_sync.report import build_report_from_file
     inv = f"{_local(base)}/migrated/inventory/objects.json"
     report_path = f"{_local(base)}/reports/export.xlsx"
-    build_report_from_file(inv, report_path, run_id=run_id)
+    build_report_from_file(inv, report_path, run_id=run_id, stage="EXPORT",
+                           export_results=export_results)
     print(f"report: {report_path}")
 except Exception as _exc:  # noqa: BLE001 - report is best-effort
     import traceback

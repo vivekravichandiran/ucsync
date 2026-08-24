@@ -116,6 +116,62 @@ def test_storage_sheets_status_skipped_vs_created(tmp_path):
     assert "SKIPPED" in loc[1][-1]                        # not created by utility
 
 
+def test_stage_status_columns(tmp_path):
+    """Each stage's report is the base for the next: inventory has no status
+    column, export adds export_status, import carries export_status forward and
+    adds import_status."""
+    from openpyxl import load_workbook
+
+    objects = [{"object_type": "TABLE", "full_name": "c.s.t", "owner": "me",
+                "tags": {}, "grants": [], "definition": {}}]
+
+    # INVENTORY — no status columns at all.
+    inv = tmp_path / "inventory.xlsx"
+    build_report(objects, str(inv), stage="INVENTORY")
+    hdr = list(load_workbook(inv)["Tables"].iter_rows(values_only=True))[0]
+    assert "export_status" not in hdr and "import_status" not in hdr
+
+    # EXPORT — export_status only, populated from the export results.
+    exp = tmp_path / "export.xlsx"
+    build_report(objects, str(exp), stage="EXPORT",
+                 export_results=[{"full_name": "c.s.t", "status": "SUCCESS"}])
+    rows = list(load_workbook(exp)["Tables"].iter_rows(values_only=True))
+    assert rows[0][-1] == "export_status" and "import_status" not in rows[0]
+    assert rows[1][-1] == "EXPORTED"
+
+    # IMPORT — both columns, export carried forward + this stage's import status.
+    imp = tmp_path / "import.xlsx"
+    build_report(
+        objects, str(imp), stage="IMPORT",
+        export_results=[{"full_name": "c.s.t", "status": "SUCCESS"}],
+        import_results=[{"target_full_name": "c.s.t", "status": "SUCCESS",
+                         "action": "CREATE"}],
+    )
+    rows = list(load_workbook(imp)["Tables"].iter_rows(values_only=True))
+    assert rows[0][-2] == "export_status" and rows[0][-1] == "import_status"
+    assert rows[1][-2] == "EXPORTED" and rows[1][-1] == "CREATED"
+
+
+def test_grants_sheet_has_level_column(tmp_path):
+    """The Grants sheet records the securable level of each explicit grant so
+    catalog/schema/table/view/function/volume grants are distinguishable."""
+    objects = [
+        {"object_type": "CATALOG", "full_name": "c", "owner": "me", "tags": {},
+         "grants": [{"principal": "u@x.com", "principal_type": "USER",
+                     "privileges": ["USE_CATALOG"]}]},
+        {"object_type": "TABLE", "full_name": "c.s.t", "owner": "me", "tags": {},
+         "grants": [{"principal": "u@x.com", "principal_type": "USER",
+                     "privileges": ["SELECT"]}]},
+    ]
+    out = tmp_path / "r.xlsx"
+    build_report(objects, str(out), stage="INVENTORY")
+    from openpyxl import load_workbook
+    rows = list(load_workbook(out)["Grants"].iter_rows(values_only=True))
+    assert rows[0] == ("object", "level", "principal", "type", "privileges")
+    levels = {r[0]: r[1] for r in rows[1:]}
+    assert levels["c"] == "CATALOG" and levels["c.s.t"] == "TABLE"
+
+
 def test_build_report_saves_to_buffer_not_path(tmp_path, monkeypatch):
     """UC Volumes FUSE mounts reject the seeks openpyxl needs to write a ZIP to a
     path directly, so the workbook must be built in an in-memory buffer and then

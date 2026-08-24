@@ -105,6 +105,47 @@ def _import_index(
     return idx
 
 
+def _export_index(
+    export_results: Iterable[dict[str, Any]],
+) -> dict[str, dict[str, str]]:
+    """Map securable name → its export (stage 02) result.
+
+    Keyed by both target and source name so it resolves against the migrated
+    inventory the export/import reports read (names are never remapped, so the
+    two coincide, but resolving either is robust).
+    """
+    idx: dict[str, dict[str, str]] = {}
+    for r in export_results or []:
+        entry = {
+            "status": str(r.get("status") or ""),
+            "error_code": str(r.get("error_code") or ""),
+            "error_message": str(r.get("error_message") or ""),
+        }
+        for key in (r.get("target_full_name"), r.get("full_name")):
+            key = str(key or "")
+            if key and key not in idx:
+                idx[key] = entry
+    return idx
+
+
+def _render_export_status(entry: Optional[dict[str, str]]) -> str:
+    """Human-readable export outcome for an object row (stage 02)."""
+    if not entry:
+        return ""  # no export in this stage (inventory report)
+    status = entry["status"]
+    msg = entry.get("error_message") or ""
+    tail = f": {msg[:200]}" if msg else ""
+    if status == "ERROR":
+        return f"FAILED{tail}"
+    if status == "SUCCESS_WITH_WARNINGS":
+        return f"EXPORTED (with warnings{tail})"
+    if status == "DRY_RUN":
+        return "DRY RUN (validated, not exported)"
+    if status == "SUCCESS":
+        return "EXPORTED"
+    return status or ""
+
+
 def _render_import_status(entry: Optional[dict[str, str]]) -> str:
     """Human-readable import outcome for an object row.
 
@@ -264,15 +305,61 @@ def build_report(
     objects: list[dict[str, Any]],
     out_path: str,
     *,
+    stage: Optional[str] = None,
+    export_results: Optional[list[dict[str, Any]]] = None,
     import_results: Optional[list[dict[str, Any]]] = None,
     run_id: str = "",
 ) -> str:
-    """Write the migration workbook to ``out_path`` (.xlsx). Returns the path."""
+    """Write the migration workbook to ``out_path`` (.xlsx). Returns the path.
+
+    Each stage's report becomes the base for the next, so the per-object-type
+    sheets carry stage-appropriate status columns:
+
+    * ``INVENTORY`` — no status columns (nothing has happened yet).
+    * ``EXPORT``    — an ``export_status`` column.
+    * ``IMPORT``    — both ``export_status`` (carried forward from stage 02) and
+      ``import_status`` columns.
+
+    ``stage`` is inferred from which results are supplied when not passed
+    explicitly (import → IMPORT, export → EXPORT, neither → INVENTORY).
+    """
 
     from openpyxl import Workbook
     from openpyxl.styles import Font
 
+    if stage is None:
+        stage = (
+            "IMPORT" if import_results is not None
+            else "EXPORT" if export_results is not None
+            else "INVENTORY"
+        )
+    stage = str(stage).upper()
+
+    export_idx = _export_index(export_results or [])
     idx = _import_index(import_results or [])
+
+    def _status_headers() -> list[str]:
+        headers: list[str] = []
+        if stage in ("EXPORT", "IMPORT"):
+            headers.append("export_status")
+        if stage == "IMPORT":
+            headers.append("import_status")
+        return headers
+
+    def _status_cells(o: dict[str, Any]) -> list[str]:
+        name = o["full_name"]
+        tname = str(o.get("target_full_name") or "")
+        cells: list[str] = []
+        if stage in ("EXPORT", "IMPORT"):
+            cells.append(
+                _render_export_status(export_idx.get(name) or export_idx.get(tname))
+            )
+        if stage == "IMPORT":
+            cells.append(
+                _render_import_status(idx.get(name) or idx.get(tname))
+            )
+        return cells
+
     wb = Workbook()
 
     def _sheet(title: str, headers: list[str]):
@@ -296,8 +383,16 @@ def build_report(
     ws.append(["object_type", "count"])
     for k in sorted(counts):
         ws.append([k, counts[k]])
-    if import_results:
-        st: dict[str, int] = {}
+    if stage in ("EXPORT", "IMPORT") and export_results:
+        st = {}
+        for r in export_results:
+            st[r.get("status", "")] = st.get(r.get("status", ""), 0) + 1
+        ws.append([])
+        ws.append(["export_status", "count"])
+        for k in sorted(st):
+            ws.append([k, st[k]])
+    if stage == "IMPORT" and import_results:
+        st = {}
         for r in import_results:
             st[r.get("status", "")] = st.get(r.get("status", ""), 0) + 1
         ws.append([])
@@ -311,41 +406,38 @@ def build_report(
     for o in objects:
         by_type.setdefault(o["object_type"], []).append(o)
 
-    def _status_for(o: dict[str, Any]) -> str:
-        entry = idx.get(o["full_name"]) or idx.get(str(o.get("target_full_name") or ""))
-        return _render_import_status(entry)
+    status_headers = _status_headers()
 
     for obj_type, title, cols in _TYPE_SHEETS:
         rows = by_type.get(obj_type)
         if not rows:
             continue
-        ws_t = _sheet(title, [h for h, _ in cols] + ["import_status"])
+        ws_t = _sheet(title, [h for h, _ in cols] + status_headers)
         for o in sorted(rows, key=lambda x: x["full_name"]):
-            ws_t.append([fn(o) for _, fn in cols] + [_status_for(o)])
+            ws_t.append([fn(o) for _, fn in cols] + _status_cells(o))
 
     for obj_type, title in _INVENTORY_ONLY:
         rows = by_type.get(obj_type)
         if not rows:
             continue
-        ws_t = _sheet(title, ["object", "comment", "owner", "note", "import_status"])
+        ws_t = _sheet(title, ["object", "comment", "owner", "note"] + status_headers)
         for o in sorted(rows, key=lambda x: x["full_name"]):
             ws_t.append([
                 o["full_name"], _cell(o, "comment"), o.get("owner") or "",
                 "inventory-only — recreate manually (out of utility scope)",
-                _status_for(o),
-            ])
+            ] + _status_cells(o))
 
     # Catch-all for any present type not explicitly modeled above (never drop an
     # object silently). ABAC policies have their own dedicated sheets below.
     _known = {t for t, _, _ in _TYPE_SHEETS} | {t for t, _ in _INVENTORY_ONLY} | {"ABAC_POLICY"}
     other = [o for o in objects if o["object_type"] not in _known]
     if other:
-        ws_t = _sheet("Other Objects", ["object", "type", "comment", "owner", "import_status"])
+        ws_t = _sheet("Other Objects", ["object", "type", "comment", "owner"] + status_headers)
         for o in sorted(other, key=lambda x: (x["object_type"], x["full_name"])):
             ws_t.append([
                 o["full_name"], o["object_type"], _cell(o, "comment"),
-                o.get("owner") or "", _status_for(o),
-            ])
+                o.get("owner") or "",
+            ] + _status_cells(o))
 
     # Tags (object + column grain)
     tags = _sheet("Tags", ["object", "level", "column", "key", "value"])
@@ -438,12 +530,16 @@ def build_report(
             )
             matched.append(base + ["", "", "", note])
 
-    # Grants
-    grants = _sheet("Grants", ["object", "principal", "type", "privileges"])
+    # Grants (explicit privilege assignments captured at each securable level).
+    # These are the grants the utility replays; UC re-establishes inheritance on
+    # the target automatically once the parent-level (catalog/schema) grants are
+    # replayed, so inherited-only effective privileges are intentionally not
+    # listed here (they are not migrated as per-object grants).
+    grants = _sheet("Grants", ["object", "level", "principal", "type", "privileges"])
     for o in objects:
         for g in o.get("grants") or []:
             grants.append([
-                o["full_name"], g.get("principal"),
+                o["full_name"], o["object_type"], g.get("principal"),
                 g.get("principal_type"),
                 ", ".join(g.get("privileges") or []),
             ])

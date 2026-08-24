@@ -106,7 +106,7 @@ with open(dst, "w") as fh:
 try:
     from uc_sync.report import build_report
     report_path = f"{cfg.export_volume_path.rstrip('/')}/run_{run_id}/reports/inventory.xlsx"
-    build_report([o.to_dict() for o in objects], report_path, run_id=run_id)
+    build_report([o.to_dict() for o in objects], report_path, run_id=run_id, stage="INVENTORY")
     print(f"report: {report_path}")
 except Exception as _exc:  # noqa: BLE001 - report is best-effort
     import traceback

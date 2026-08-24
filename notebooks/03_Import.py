@@ -61,13 +61,21 @@ results = PackageImportEngine(
     workspace_client=WorkspaceClient(local_workspace_auth(dbutils)),
 ).run()
 
-# Clean migration report (spine + governance sheets) under reports/.
+# Clean migration report (spine + governance sheets) under reports/. The import
+# report carries the export_status forward from stage 02 (export_results.json)
+# alongside this stage's import_status, so it is the cumulative base report.
 try:
     from uc_sync.report import build_report_from_file
     inv = f"{migrated}/inventory/objects.json"
     report_path = f"{_local(base)}/reports/import.xlsx"
+    export_results = []
+    _er = f"{migrated}/export_results.json"
+    if os.path.exists(_er):
+        with open(_er) as fh:
+            export_results = json.load(fh)
     build_report_from_file(
-        inv, report_path, run_id=run_id,
+        inv, report_path, run_id=run_id, stage="IMPORT",
+        export_results=export_results,
         import_results=[r.to_dict() for r in results],
     )
     print(f"report: {report_path}")
