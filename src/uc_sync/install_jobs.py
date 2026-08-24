@@ -70,6 +70,32 @@ def _substitute(node: Any, values: Mapping[str, Any]) -> Any:
     return node
 
 
+# Jobs that execute on / write to the TARGET workspace — these honor the target
+# run-as service principal so every created securable is owned by that SP and the
+# SP's privileges (CREATE CATALOG, etc.) are what the import uses. The
+# source-only Inventory+Export job is intentionally excluded.
+_TARGET_RUN_AS_JOB_KEYS = {"airgap_import_target", "e2e_dry_run", "e2e_live"}
+
+
+def _apply_run_as(spec: dict[str, Any], run_as_spn: str) -> dict[str, Any]:
+    """Set the job's ``run_as`` to a service principal, or leave it default.
+
+    Mirrors the workspace-migration utility's model: the job runs as its target
+    run-as SP, so both the notebook's SQL (Spark) and its REST calls execute as
+    that identity. A blank value leaves ``run_as`` unset (the job runs as the
+    installing user). Only a service-principal **application id** is accepted;
+    an empty ``service_principal_name`` would be rejected by the Jobs API, so it
+    is omitted rather than sent blank.
+    """
+
+    spn = str(run_as_spn or "").strip()
+    if spn:
+        spec["run_as"] = {"service_principal_name": spn}
+    else:
+        spec.pop("run_as", None)
+    return spec
+
+
 def _apply_cluster_override(spec: dict[str, Any], existing_cluster_id: str) -> dict[str, Any]:
     """Point every task at an existing cluster instead of the shared job cluster.
 
@@ -100,7 +126,10 @@ def load_job_spec(
     base = Path(specs_dir) if specs_dir else _default_specs_dir()
     raw = json.loads((base / JOB_SPECS[job_key]).read_text(encoding="utf-8"))
     spec = _substitute(raw, values)
-    return _apply_cluster_override(spec, str(values.get("existing_cluster_id", "")))
+    spec = _apply_cluster_override(spec, str(values.get("existing_cluster_id", "")))
+    if job_key in _TARGET_RUN_AS_JOB_KEYS:
+        spec = _apply_run_as(spec, str(values.get("run_as_spn", "")))
+    return spec
 
 
 def resolve_job_keys(selection: Iterable[str] | str) -> list[str]:

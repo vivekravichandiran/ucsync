@@ -57,6 +57,18 @@ dbutils.widgets.text("source_secret_key", "")      # secret key   (option 2)
 # source is the current workspace (local/airgap-on-source).
 dbutils.widgets.text("source_warehouse_id", "")
 
+# --- target run-as service principal (import/e2e jobs) ---
+# Application id of a service principal to run the TARGET (import) jobs as, so every
+# migrated securable is owned by it and its privileges (CREATE CATALOG, etc.) are
+# used. Blank = run as the installing user. The SP must be a workspace member with
+# the needed UC privileges. (The source-only Inventory+Export job is unaffected.)
+dbutils.widgets.text("run_as_spn", "")
+
+# --- import scope filter (import/e2e jobs; blank = import everything) ---
+dbutils.widgets.text("filter_catalogs", "")   # csv catalog names
+dbutils.widgets.text("filter_schemas", "")    # csv catalog.schema (or bare schema)
+dbutils.widgets.text("filter_tables", "")     # csv catalog.schema.table (or bare table)
+
 # --- cluster ---
 dbutils.widgets.text("existing_cluster_id", "")  # blank = new USER_ISOLATION job cluster
 dbutils.widgets.text("spark_version", "15.4.x-scala2.12")
@@ -79,6 +91,7 @@ _simple = (
     "ops_catalog", "ops_schema", "mapping_file_path", "run_id",
     "source_workspace_url", "source_client_id", "source_client_secret",
     "source_secret_scope", "source_secret_key", "source_warehouse_id",
+    "run_as_spn", "filter_catalogs", "filter_schemas", "filter_tables",
     "existing_cluster_id", "spark_version", "node_type_id", "job_name_prefix",
 )
 values = {k: dbutils.widgets.get(k).strip() for k in _simple}

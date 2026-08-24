@@ -159,6 +159,8 @@ def _render_import_status(entry: Optional[dict[str, str]]) -> str:
     tail = f": {msg[:200]}" if msg else ""
     if action == "SKIP_CREATE_DISABLED":
         return "SKIPPED — not created by utility (create toggle off; pre-existing)"
+    if action == "SKIP_FILTERED":
+        return "SKIPPED — excluded by import scope filter"
     if status == "FAILURE":
         return f"FAILED{tail}"
     if status == "MANUAL_ACTION_REQUIRED":

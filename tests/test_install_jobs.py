@@ -64,6 +64,32 @@ def test_resolve_job_keys_rejects_unknown():
         resolve_job_keys("not_a_job")
 
 
+def test_run_as_spn_applied_to_target_jobs_only():
+    spn = "11111111-2222-3333-4444-555555555555"
+    for key in ("airgap_import_target", "e2e_dry_run", "e2e_live"):
+        spec = load_job_spec(key, _values(run_as_spn=spn))
+        assert spec["run_as"] == {"service_principal_name": spn}
+    # The source-only inventory+export job is never run as the target SP.
+    assert "run_as" not in load_job_spec("airgap_source", _values(run_as_spn=spn))
+
+
+def test_run_as_omitted_when_blank():
+    # A blank SP must not emit an empty run_as (the Jobs API would reject it).
+    for key in ("airgap_import_target", "e2e_dry_run", "e2e_live"):
+        assert "run_as" not in load_job_spec(key, _values(run_as_spn=""))
+
+
+def test_import_filter_placeholders_substituted():
+    spec = load_job_spec(
+        "e2e_live",
+        _values(filter_catalogs="ai27_uc_gov_src", filter_tables="ai27_uc_gov_src.hr.employees"),
+    )
+    params = spec["tasks"][-1]["notebook_task"]["base_parameters"]
+    assert params["filter_catalogs"] == "ai27_uc_gov_src"
+    assert params["filter_tables"] == "ai27_uc_gov_src.hr.employees"
+    assert params["filter_schemas"] == ""
+
+
 def test_airgap_source_two_tasks_chained_by_job_run_id():
     spec = load_job_spec("airgap_source", _values())
     assert spec["name"] == "UC-Gov-Migration - Airgap Inventory+Export (source)"

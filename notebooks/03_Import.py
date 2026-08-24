@@ -15,7 +15,7 @@ for _p in ("../src", "./src", os.path.abspath(os.path.join(os.getcwd(), "..", "s
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
 
-from uc_sync.config import from_sources, CREATE_TOGGLES, APPLY_TOGGLES
+from uc_sync.config import from_sources, CREATE_TOGGLES, APPLY_TOGGLES, _split_csv
 from uc_sync.package_import import PackageImportEngine
 from uc_sync.import_engine import SparkSqlExecutor
 from uc_sync.auth import local_workspace_auth
@@ -27,6 +27,13 @@ dbutils.widgets.text("output_volume_path", "")
 dbutils.widgets.text("ops_catalog", "")
 dbutils.widgets.text("ops_schema", "")
 dbutils.widgets.text("run_id", "")
+# Optional import scope filter: import only a subset of the bundle. Blank = import
+# everything. Composed with AND. Catalogs/schemas/functions/volumes needed by a
+# selected table still come along; the tables filter narrows only table-like
+# securables. Names accept fully-qualified (catalog.schema[.table]) or bare.
+dbutils.widgets.text("filter_catalogs", "")   # csv catalog names
+dbutils.widgets.text("filter_schemas", "")    # csv catalog.schema (or bare schema)
+dbutils.widgets.text("filter_tables", "")     # csv catalog.schema.table (or bare table)
 for _t in (*CREATE_TOGGLES, *APPLY_TOGGLES):
     dbutils.widgets.dropdown(_t, "true", ["true", "false"])
 dbutils.widgets.dropdown("dry_run", "false", ["true", "false"])
@@ -59,6 +66,9 @@ toggles = {t: getattr(cfg, t) for t in (*CREATE_TOGGLES, *APPLY_TOGGLES)}
 results = PackageImportEngine(
     migrated, SparkSqlExecutor(spark), dry_run=cfg.dry_run, toggles=toggles,
     workspace_client=WorkspaceClient(local_workspace_auth(dbutils)),
+    select_catalogs=_split_csv(dbutils.widgets.get("filter_catalogs")),
+    select_schemas=_split_csv(dbutils.widgets.get("filter_schemas")),
+    select_tables=_split_csv(dbutils.widgets.get("filter_tables")),
 ).run()
 
 # Clean migration report (spine + governance sheets) under reports/. The import

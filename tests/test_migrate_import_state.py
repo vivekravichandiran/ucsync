@@ -149,6 +149,37 @@ def test_package_import_executes_and_records_failure(tmp_path: Path):
     assert by_type["TABLE"].source_definition_hash == "h1"
 
 
+def test_import_scope_filter_selects_subset(tmp_path: Path):
+    """The import scope filter creates only in-scope objects; a table outside the
+    filter is SKIP_FILTERED, while the catalog/schema it needs still come along."""
+    root = tmp_path / "migrated"
+    (root / "ddl").mkdir(parents=True)
+    (root / "inventory").mkdir()
+    for fn, ddl in (
+        ("CATALOG_c.sql", "CREATE CATALOG IF NOT EXISTS `c`;\n"),
+        ("SCHEMA_c__s.sql", "CREATE SCHEMA IF NOT EXISTS `c`.`s`;\n"),
+        ("TABLE_c__s__keep.sql", "CREATE TABLE IF NOT EXISTS `c`.`s`.`keep` (id INT);\n"),
+        ("TABLE_c__s__drop.sql", "CREATE TABLE IF NOT EXISTS `c`.`s`.`drop` (id INT);\n"),
+        ("FUNCTION_c__s__fn.sql", "CREATE FUNCTION IF NOT EXISTS `c`.`s`.`fn`() RETURNS INT RETURN 1;\n"),
+    ):
+        (root / "ddl" / fn).write_text(ddl, encoding="utf-8")
+    (root / "inventory" / "objects.json").write_text("[]", encoding="utf-8")
+
+    sql = FakeSql()
+    results = PackageImportEngine(
+        str(root), sql, dry_run=False, select_tables=["c.s.keep"],
+    ).run()
+    by_name = {r.target_full_name: r for r in results}
+
+    # The selected table + its parents + non-table securables are created.
+    for name in ("c", "c.s", "c.s.keep", "c.s.fn"):  # function comes along
+        assert by_name[name].action != "SKIP_FILTERED"
+        assert by_name[name].status == "SUCCESS"
+    # The unselected table is skipped, and its CREATE never ran.
+    assert by_name["c.s.drop"].action == "SKIP_FILTERED"
+    assert not any("`drop`" in s for s in sql.statements)
+
+
 def test_split_statements_preserves_dollar_blocks():
     sql = """
 CREATE VIEW v AS $$

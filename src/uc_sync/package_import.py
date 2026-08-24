@@ -250,6 +250,9 @@ class PackageImportEngine:
         catalog_mapping: Optional[dict[str, str]] = None,
         toggles: Optional[dict[str, bool]] = None,
         workspace_client: Any = None,
+        select_catalogs: Optional[Iterable[str]] = None,
+        select_schemas: Optional[Iterable[str]] = None,
+        select_tables: Optional[Iterable[str]] = None,
     ):
         self.root = Path(package_root)
         self.sql = sql_executor
@@ -257,6 +260,13 @@ class PackageImportEngine:
         self.dry_run = dry_run
         self.apply_grants = apply_grants
         self.catalog_mapping = dict(catalog_mapping or {})
+        # Optional import-time scope filter: restrict which catalogs / schemas /
+        # tables are created + governed from the bundle (a subset import). Empty =
+        # everything. Catalogs/schemas/functions/volumes are still created for an
+        # in-scope schema; the tables filter narrows only table-like securables.
+        self._sel_catalogs = {s for s in (select_catalogs or []) if s}
+        self._sel_schemas = {s for s in (select_schemas or []) if s}
+        self._sel_tables = {s for s in (select_tables or []) if s}
         # create_*/apply_* gates (default all-on). create_* gate object creation;
         # apply_* gate governance. apply_grants kw is kept for back-compat.
         self.toggles = {**(toggles or {})}
@@ -286,6 +296,43 @@ class PackageImportEngine:
     def _create_enabled(self, object_type: str) -> bool:
         toggle = self._CREATE_TOGGLE_FOR_TYPE.get(object_type)
         return self.toggles.get(toggle, True) if toggle else True
+
+    # Table-like securables the tables filter narrows (everything else in an
+    # in-scope schema — functions, volumes — still comes along).
+    _TABLE_LIKE_TYPES = {
+        "TABLE", "EXTERNAL_TABLE", "VIEW", "DYNAMIC_VIEW",
+        "METRIC_VIEW", "MATERIALIZED_VIEW", "STREAMING_TABLE",
+    }
+
+    def _in_scope(self, object_type: str, full_name: str) -> bool:
+        """Is this object within the optional import scope filter?
+
+        Filters compose (AND). Semantics mirror the inventory filter:
+        - Storage credentials / external locations are never filtered out — they
+          are shared prerequisites for external tables/volumes.
+        - The catalogs filter applies to every catalog-bearing object; the schemas
+          filter to every schema-bearing object (catalogs excepted, so parents are
+          created); the tables filter only to table-like securables (so the
+          catalogs/schemas/functions that a selected table needs still flow).
+        - Schema/table names accept either the fully-qualified or the bare name.
+        """
+        if not (self._sel_catalogs or self._sel_schemas or self._sel_tables):
+            return True
+        if object_type in {"STORAGE_CREDENTIAL", "EXTERNAL_LOCATION"}:
+            return True
+        parts = str(full_name or "").split(".")
+        catalog = parts[0] if parts else ""
+        schema = parts[1] if len(parts) > 1 else ""
+        if self._sel_catalogs and catalog and catalog not in self._sel_catalogs:
+            return False
+        if self._sel_schemas and schema and object_type != "CATALOG":
+            if schema not in self._sel_schemas and f"{catalog}.{schema}" not in self._sel_schemas:
+                return False
+        if self._sel_tables and object_type in self._TABLE_LIKE_TYPES:
+            table = parts[-1] if parts else ""
+            if full_name not in self._sel_tables and table not in self._sel_tables:
+                return False
+        return True
 
     def _create_storage_credential_via_rest(
         self, statements: list[str]
@@ -346,6 +393,19 @@ class PackageImportEngine:
         for order, path in enumerate(ddl_files, start=1):
             object_type, parsed_name = _parse_sql_filename(path.name)
             target_full_name = self._map_name(parsed_name)
+            if not self._in_scope(object_type, target_full_name):
+                results.append(PackageImportResult(
+                    object_type=object_type,
+                    source_full_name=parsed_name,
+                    target_full_name=target_full_name,
+                    full_name=parsed_name,
+                    action="SKIP_FILTERED",
+                    status="SUCCESS",
+                    message="excluded by import scope filter",
+                    dependency_level=_type_rank(object_type),
+                    import_order=order,
+                ))
+                continue
             inventory_row = (
                 by_target.get(target_full_name)
                 or inventory.get(parsed_name)
@@ -536,6 +596,8 @@ class PackageImportEngine:
         for offset, path in enumerate(files, start=1):
             object_type, parsed_name = _parse_sql_filename(path.name)
             target_full_name = self._map_name(parsed_name)
+            if not self._in_scope(object_type, target_full_name):
+                continue  # object excluded by the import scope filter
             inventory_row = (
                 by_target.get(target_full_name) or inventory.get(parsed_name) or {}
             )
@@ -626,6 +688,8 @@ class PackageImportEngine:
         for offset, path in enumerate(policy_files, start=1):
             object_type, parsed_name = _parse_sql_filename(path.name)
             target_full_name = self._map_name(parsed_name)
+            if not self._in_scope(object_type, target_full_name):
+                continue  # object excluded by the import scope filter
             inventory_row = (
                 by_target.get(target_full_name)
                 or inventory.get(parsed_name)
