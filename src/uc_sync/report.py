@@ -1,8 +1,12 @@
 """Clean, operator-facing migration report (Excel) for the governance model.
 
-One workbook per Import run: a spine (one row per securable with its import
-status) plus governance-detail sheets so a reviewer can read, per line, exactly
-which mask/policy/tag/grant is applied where (design §9). Kept deliberately simple.
+One workbook per stage: a sheet per object type (storage credentials, external
+locations, catalogs, schemas, volumes, functions, tables, views, …) carrying that
+type's captured detail plus an import-status column, then governance-detail sheets
+(tags, classic masks/row filters, ABAC policies, derived policy→column matches,
+grants) so a reviewer can read, per line, exactly which mask/policy/tag/grant is
+applied where (design §9). Storage credentials and external locations show an
+explicit SKIPPED status when the utility did not create them (create toggle off).
 """
 
 from __future__ import annotations
@@ -77,6 +81,185 @@ def _import_status_by_name(import_results: Iterable[dict[str, Any]]) -> dict[str
     return status
 
 
+def _import_index(
+    import_results: Iterable[dict[str, Any]],
+) -> dict[str, dict[str, str]]:
+    """Map securable name → its **creation** import result (status/action/message).
+
+    The engine appends create/structure results before governance phases, so the
+    FIRST result seen per name is the creation one — which is what the per-object
+    sheets report. Indexed by both target and source name so it resolves whether
+    the report reads the migrated (target) or source inventory.
+    """
+    idx: dict[str, dict[str, str]] = {}
+    for r in import_results or []:
+        entry = {
+            "status": str(r.get("status") or ""),
+            "action": str(r.get("action") or ""),
+            "message": str(r.get("message") or ""),
+        }
+        for key in (r.get("target_full_name"), r.get("full_name")):
+            key = str(key or "")
+            if key and key not in idx:
+                idx[key] = entry
+    return idx
+
+
+def _render_import_status(entry: Optional[dict[str, str]]) -> str:
+    """Human-readable import outcome for an object row.
+
+    Storage credentials / external locations created outside the utility surface
+    as ``SKIP_CREATE_DISABLED`` (create toggle off) — rendered as an explicit
+    SKIPPED so the reader never mistakes "we didn't touch it" for "it imported".
+    """
+    if not entry:
+        return ""  # no import in this stage (inventory/export reports)
+    status, action, msg = entry["status"], entry["action"], entry["message"]
+    tail = f": {msg[:200]}" if msg else ""
+    if action == "SKIP_CREATE_DISABLED":
+        return "SKIPPED — not created by utility (create toggle off; pre-existing)"
+    if status == "FAILURE":
+        return f"FAILED{tail}"
+    if status == "MANUAL_ACTION_REQUIRED":
+        return f"MANUAL ACTION REQUIRED{tail}"
+    if status == "PENDING" or action == "DRY_RUN":
+        return "DRY RUN (validated, not applied)"
+    if action == "SKIP_EXISTING":
+        return "ALREADY EXISTS (skipped)"
+    if action in ("CREATE", "CREATE_OR_SKIP"):
+        return "CREATED"
+    if status == "SUCCESS":
+        return f"SUCCESS ({action})" if action else "SUCCESS"
+    return f"{status} ({action})".strip()
+
+
+# --- Per-object-type sheet column specs -------------------------------------
+# Each column is (header, extractor). A trailing "import_status" column is added
+# by the renderer for every type.
+
+def _cell(o: dict[str, Any], *keys: str) -> Any:
+    """First non-empty value among top-level then ``definition`` for each key."""
+    d = o.get("definition") or {}
+    for k in keys:
+        v = o.get(k)
+        if v not in (None, "", [], {}):
+            return v
+        v = d.get(k)
+        if v not in (None, "", [], {}):
+            return v
+    return ""
+
+
+def _truncate(v: Any, n: int = 300) -> str:
+    s = str(v or "")
+    return s if len(s) <= n else s[:n] + "…"
+
+
+def _col_count(o: dict[str, Any]) -> Any:
+    return len((o.get("definition") or {}).get("columns") or []) or ""
+
+
+def _has_mask(o: dict[str, Any]) -> str:
+    return "yes" if (o.get("definition") or {}).get("column_masks") else ""
+
+
+def _has_row_filter(o: dict[str, Any]) -> str:
+    rf = (o.get("definition") or {}).get("row_filter")
+    return "yes" if isinstance(rf, dict) and rf.get("function_name") else ""
+
+
+_VOLUME_COLS = [
+    ("volume", lambda o: o["full_name"]),
+    ("volume_type", lambda o: _cell(o, "volume_type")),
+    ("storage_location", lambda o: _cell(o, "storage_location")),
+    ("comment", lambda o: _cell(o, "comment")),
+    ("owner", lambda o: o.get("owner") or ""),
+]
+_TABLE_COLS = [
+    ("table", lambda o: o["full_name"]),
+    ("table_type", lambda o: _cell(o, "table_type")),
+    ("format", lambda o: _cell(o, "data_source_format")),
+    ("storage_location", lambda o: _cell(o, "storage_location")),
+    ("columns", _col_count),
+    ("column_mask", _has_mask),
+    ("row_filter", _has_row_filter),
+    ("comment", lambda o: _cell(o, "comment")),
+    ("owner", lambda o: o.get("owner") or ""),
+]
+_VIEW_COLS = [
+    ("view", lambda o: o["full_name"]),
+    ("columns", _col_count),
+    ("definition", lambda o: _truncate(_cell(o, "view_definition", "view_original_text"))),
+    ("comment", lambda o: _cell(o, "comment")),
+    ("owner", lambda o: o.get("owner") or ""),
+]
+
+# Ordered: creation-dependency order (creds/locations first, governance-bearing
+# securables after). Titles are the sheet names.
+_TYPE_SHEETS: list[tuple[str, str, list]] = [
+    ("STORAGE_CREDENTIAL", "Storage Credentials", [
+        ("credential", lambda o: o["full_name"]),
+        ("credential_type", lambda o: _cell(o, "credential_type")),
+        ("purpose", lambda o: _cell(o, "credential_purpose")),
+        ("access_connector_id", lambda o: _cell(o, "access_connector_id")),
+        ("managed_identity_id", lambda o: _cell(o, "user_assigned_managed_identity_id")),
+        ("read_only", lambda o: _cell(o, "read_only")),
+        ("comment", lambda o: _cell(o, "comment")),
+        ("owner", lambda o: o.get("owner") or ""),
+    ]),
+    ("EXTERNAL_LOCATION", "External Locations", [
+        ("external_location", lambda o: o["full_name"]),
+        ("url", lambda o: _cell(o, "url", "storage_location")),
+        ("credential_name", lambda o: _cell(o, "credential_name", "storage_credential_name")),
+        ("read_only", lambda o: _cell(o, "read_only")),
+        ("comment", lambda o: _cell(o, "comment")),
+        ("owner", lambda o: o.get("owner") or ""),
+    ]),
+    ("CATALOG", "Catalogs", [
+        ("catalog", lambda o: o["full_name"]),
+        ("catalog_type", lambda o: _cell(o, "catalog_type")),
+        ("isolation_mode", lambda o: _cell(o, "isolation_mode")),
+        ("storage_root", lambda o: _cell(o, "storage_root")),
+        ("comment", lambda o: _cell(o, "comment")),
+        ("owner", lambda o: o.get("owner") or ""),
+    ]),
+    ("SCHEMA", "Schemas", [
+        ("schema", lambda o: o["full_name"]),
+        ("comment", lambda o: _cell(o, "comment")),
+        ("owner", lambda o: o.get("owner") or ""),
+    ]),
+    ("VOLUME", "Volumes", _VOLUME_COLS),
+    ("EXTERNAL_VOLUME", "External Volumes", _VOLUME_COLS),
+    ("FUNCTION", "Functions", [
+        ("function", lambda o: o["full_name"]),
+        ("returns", lambda o: _cell(o, "data_type", "full_data_type")),
+        ("deterministic", lambda o: _cell(o, "is_deterministic")),
+        ("routine_body", lambda o: _cell(o, "routine_body")),
+        ("comment", lambda o: _cell(o, "comment")),
+        ("owner", lambda o: o.get("owner") or ""),
+    ]),
+    ("TABLE", "Tables", _TABLE_COLS),
+    ("EXTERNAL_TABLE", "External Tables", _TABLE_COLS),
+    ("STREAMING_TABLE", "Streaming Tables", _TABLE_COLS),
+    ("VIEW", "Views", _VIEW_COLS),
+    ("DYNAMIC_VIEW", "Dynamic Views", _VIEW_COLS),
+    ("MATERIALIZED_VIEW", "Materialized Views", _VIEW_COLS),
+    ("METRIC_VIEW", "Metric Views", _VIEW_COLS),
+]
+
+# Objects the utility inventories but never creates (recreate-by-hand); each gets
+# a lean sheet flagged as inventory-only.
+_INVENTORY_ONLY = [
+    ("MODEL", "Models"),
+    ("CONNECTION", "Connections"),
+    ("SERVICE_CREDENTIAL", "Service Credentials"),
+    ("FOREIGN_CATALOG", "Foreign Catalogs"),
+    ("SHARE", "Shares"),
+    ("RECIPIENT", "Recipients"),
+    ("PROVIDER", "Providers"),
+]
+
+
 def build_report(
     objects: list[dict[str, Any]],
     out_path: str,
@@ -89,7 +272,7 @@ def build_report(
     from openpyxl import Workbook
     from openpyxl.styles import Font
 
-    status_by = _import_status_by_name(import_results or [])
+    idx = _import_index(import_results or [])
     wb = Workbook()
 
     def _sheet(title: str, headers: list[str]):
@@ -122,15 +305,47 @@ def build_report(
         for k in sorted(st):
             ws.append([k, st[k]])
 
-    # Spine: one row per securable
-    spine = _sheet("Objects", ["object", "type", "import_status", "note"])
-    for o in sorted(objects, key=lambda x: (x["object_type"], x["full_name"])):
-        if o["object_type"] == "ABAC_POLICY":
+    # One sheet per object type, each carrying that type's captured detail plus
+    # an import-status column. Only types actually present get a sheet.
+    by_type: dict[str, list[dict[str, Any]]] = {}
+    for o in objects:
+        by_type.setdefault(o["object_type"], []).append(o)
+
+    def _status_for(o: dict[str, Any]) -> str:
+        entry = idx.get(o["full_name"]) or idx.get(str(o.get("target_full_name") or ""))
+        return _render_import_status(entry)
+
+    for obj_type, title, cols in _TYPE_SHEETS:
+        rows = by_type.get(obj_type)
+        if not rows:
             continue
-        spine.append([
-            o["full_name"], o["object_type"],
-            status_by.get(o["full_name"], ""), o.get("owner") or "",
-        ])
+        ws_t = _sheet(title, [h for h, _ in cols] + ["import_status"])
+        for o in sorted(rows, key=lambda x: x["full_name"]):
+            ws_t.append([fn(o) for _, fn in cols] + [_status_for(o)])
+
+    for obj_type, title in _INVENTORY_ONLY:
+        rows = by_type.get(obj_type)
+        if not rows:
+            continue
+        ws_t = _sheet(title, ["object", "comment", "owner", "note", "import_status"])
+        for o in sorted(rows, key=lambda x: x["full_name"]):
+            ws_t.append([
+                o["full_name"], _cell(o, "comment"), o.get("owner") or "",
+                "inventory-only — recreate manually (out of utility scope)",
+                _status_for(o),
+            ])
+
+    # Catch-all for any present type not explicitly modeled above (never drop an
+    # object silently). ABAC policies have their own dedicated sheets below.
+    _known = {t for t, _, _ in _TYPE_SHEETS} | {t for t, _ in _INVENTORY_ONLY} | {"ABAC_POLICY"}
+    other = [o for o in objects if o["object_type"] not in _known]
+    if other:
+        ws_t = _sheet("Other Objects", ["object", "type", "comment", "owner", "import_status"])
+        for o in sorted(other, key=lambda x: (x["object_type"], x["full_name"])):
+            ws_t.append([
+                o["full_name"], o["object_type"], _cell(o, "comment"),
+                o.get("owner") or "", _status_for(o),
+            ])
 
     # Tags (object + column grain)
     tags = _sheet("Tags", ["object", "level", "column", "key", "value"])

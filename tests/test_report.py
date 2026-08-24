@@ -29,8 +29,9 @@ def test_build_report_has_governance_sheets(tmp_path):
     assert out.exists()
     from openpyxl import load_workbook
     wb = load_workbook(out)
+    # Per-type sheets appear only for types present; governance sheets always do.
     assert set(wb.sheetnames) == {
-        "Summary", "Objects", "Tags", "Column Masks & Row Filters",
+        "Summary", "Catalogs", "Tables", "Tags", "Column Masks & Row Filters",
         "ABAC Policies", "Policy Matched Columns", "Grants",
     }
     # ABAC sheet carries the policy with its EXCEPT.
@@ -39,6 +40,9 @@ def test_build_report_has_governance_sheets(tmp_path):
     # Tags sheet has the column tag.
     tag_rows = list(wb["Tags"].iter_rows(values_only=True))
     assert any("SSN" in str(r) for r in tag_rows)
+    # The table's per-type sheet carries its import status.
+    table_rows = list(wb["Tables"].iter_rows(values_only=True))
+    assert any("c.s.t" in str(r) for r in table_rows)
 
 
 def test_policy_matched_columns_derives_from_tags_within_scope(tmp_path):
@@ -74,6 +78,44 @@ def test_policy_matched_columns_derives_from_tags_within_scope(tmp_path):
     assert r[6] == "ssn" and r[7] == "pii" and r[8] == "SSN"
 
 
+def test_storage_sheets_status_skipped_vs_created(tmp_path):
+    """Storage creds / external locations get their own sheets, and the status
+    says SKIPPED when the utility did not create them (create toggle off) vs the
+    real import outcome when it did."""
+    objects = [
+        {"object_type": "STORAGE_CREDENTIAL", "full_name": "cred_a", "owner": "me",
+         "credential_type": "AZURE_MANAGED_IDENTITY",
+         "access_connector_id": "/subscriptions/x/ac/conn",
+         "definition": {"read_only": False}, "grants": []},
+        {"object_type": "EXTERNAL_LOCATION", "full_name": "loc_a", "owner": "me",
+         "definition": {"url": "abfss://c@acct/p", "credential_name": "cred_a",
+                        "read_only": False}, "grants": []},
+    ]
+    # cred was created by the utility; the external location's create was toggled off.
+    results = [
+        {"object_type": "STORAGE_CREDENTIAL", "full_name": "cred_a",
+         "target_full_name": "cred_a", "status": "SUCCESS", "action": "CREATE"},
+        {"object_type": "EXTERNAL_LOCATION", "full_name": "loc_a",
+         "target_full_name": "loc_a", "status": "SUCCESS",
+         "action": "SKIP_CREATE_DISABLED"},
+    ]
+    out = tmp_path / "r.xlsx"
+    build_report(objects, str(out), import_results=results, run_id="r1")
+    from openpyxl import load_workbook
+    wb = load_workbook(out)
+
+    cred = list(wb["Storage Credentials"].iter_rows(values_only=True))
+    assert cred[0][-1] == "import_status"
+    assert cred[1][0] == "cred_a"
+    assert "/subscriptions/x/ac/conn" in cred[1]        # access connector captured
+    assert cred[1][-1] == "CREATED"
+
+    loc = list(wb["External Locations"].iter_rows(values_only=True))
+    assert loc[1][0] == "loc_a"
+    assert "abfss://c@acct/p" in loc[1]                  # url captured
+    assert "SKIPPED" in loc[1][-1]                        # not created by utility
+
+
 def test_build_report_saves_to_buffer_not_path(tmp_path, monkeypatch):
     """UC Volumes FUSE mounts reject the seeks openpyxl needs to write a ZIP to a
     path directly, so the workbook must be built in an in-memory buffer and then
@@ -107,4 +149,4 @@ def test_build_report_saves_to_buffer_not_path(tmp_path, monkeypatch):
 
     assert out.exists()
     from openpyxl import load_workbook
-    assert "Objects" in load_workbook(out).sheetnames
+    assert "Catalogs" in load_workbook(out).sheetnames
