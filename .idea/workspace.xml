@@ -6,8 +6,6 @@
   <component name="ChangeListManager">
     <list default="true" id="1862a172-d182-46cb-8967-79eb137ce7bc" name="Changes" comment="ABAC listing fix">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/uc_sync/report.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/report.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_report.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_report.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />

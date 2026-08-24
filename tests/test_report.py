@@ -201,6 +201,26 @@ def test_masks_sheet_object_header_and_dynamic_view_identity(tmp_path):
     assert "is_account_group_member" in markers and "current_user" in markers
 
 
+def test_view_functions_applied_from_dependencies(tmp_path):
+    """A view that masks a column by calling a UDF inline is detected via UC's
+    view_dependencies (no SQL parsing) and surfaced in functions_applied."""
+    objects = [
+        {"object_type": "VIEW", "full_name": "c.s.masked", "owner": "me",
+         "tags": {}, "grants": [], "definition": {
+             "view_definition": "SELECT id, c.sec.mask_email(email) AS email FROM c.s.t",
+             "view_dependencies": {"dependencies": [
+                 {"function": {"function_full_name": "c.sec.mask_email"}},
+                 {"table": {"table_full_name": "c.s.t"}},
+             ]}}},
+    ]
+    out = tmp_path / "r.xlsx"
+    build_report(objects, str(out), stage="INVENTORY")
+    from openpyxl import load_workbook
+    rows = list(load_workbook(out)["Views"].iter_rows(values_only=True))
+    idx = rows[0].index("functions_applied")
+    assert rows[1][idx] == "c.sec.mask_email"
+
+
 def test_build_report_saves_to_buffer_not_path(tmp_path, monkeypatch):
     """UC Volumes FUSE mounts reject the seeks openpyxl needs to write a ZIP to a
     path directly, so the workbook must be built in an in-memory buffer and then

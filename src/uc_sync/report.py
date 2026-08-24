@@ -247,10 +247,35 @@ def _view_identity(o: dict[str, Any]) -> str:
     return ", ".join(m.rstrip("(") for m in _IDENTITY_MARKERS if m in text)
 
 
+def _view_functions(o: dict[str, Any]) -> str:
+    """Functions the view applies, from UC's authoritative ``view_dependencies``.
+
+    A view can protect a column by calling a UDF inline
+    (``SELECT sec.mask_email(email) AS email``). UC records that as a function
+    dependency, so we surface it without parsing SQL — this is how a
+    function-masked view (as opposed to an identity-based dynamic view) shows up
+    in the report.
+    """
+    d = o.get("definition") or {}
+    vd = d.get("view_dependencies") or {}
+    deps = vd.get("dependencies") if isinstance(vd, dict) else vd
+    names: list[str] = []
+    for item in deps or []:
+        if not isinstance(item, dict):
+            continue
+        fn = item.get("function")
+        if isinstance(fn, dict):
+            name = fn.get("function_full_name") or fn.get("name")
+            if name:
+                names.append(str(name))
+    return ", ".join(sorted(set(names)))
+
+
 _VIEW_COLS = [
     ("view", lambda o: o["full_name"]),
     ("columns", _col_count),
     ("identity_aware", _view_identity),
+    ("functions_applied", _view_functions),
     ("definition", lambda o: _truncate(_cell(o, "view_definition", "view_original_text"))),
     ("comment", lambda o: _cell(o, "comment")),
     ("owner", lambda o: o.get("owner") or ""),
