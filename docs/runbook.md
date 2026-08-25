@@ -26,8 +26,9 @@ Do you have a target metastore with working storage?
          └─ Creds/external locations pre-created by hand .. Scenario 3
 Scoping to one catalog/schema? ......................... Scenario 4 (combine with 1–3)
 Source & target can't reach each other over network? .. Scenario 5 (airgap)
-Same workspace, quick local test? ...................... Scenario 6 (direct/local)
-Re-running to pick up new grants/tags/policies? ........ Scenario 7 (incremental)
+Job runs on the target, reads source remotely? ......... Scenario 6 (direct)
+Want the catalog under a different name on target? ..... Scenario 7 (catalog rename)
+Re-running to pick up new objects/grants/tags? ......... Scenario 8 (additive re-run)
 ```
 
 Every run is three stages: **01 Inventory → 02 Export → 03 Import**. Inventory +
@@ -64,15 +65,23 @@ give the widget values; you can also run the three stage notebooks directly.
 
 Common widgets: `output_volume_path` (bundle + reports), `ops_catalog` +
 `ops_schema` (audit/state tables), `run_id` (from Inventory; reuse for Export +
-Import), `mapping_file_path` (storage-cred + location CSV, § configuration.md).
+Import), `mapping_file_path` (storage-cred + location CSV, § configuration.md), and
+`source_warehouse_id` (SQL warehouse for tags + ABAC reads — **required in every mode,
+including airgap**, or ABAC policies export empty; § configuration.md).
+
+Import-only extras (all optional): `filter_tables` (import a subset of tables),
+`catalog_mapping_json` (recreate a source catalog under a different target name),
+`run_as_spn` (run the import as a target service principal so it owns everything).
 
 ### Scenario 1 — From scratch (new target metastore)
 | Stage | Widget | Value |
 |---|---|---|
 | 01 Inventory | `connectivity_mode` | `airgap` (run on source) |
 | | `catalogs` | `sales_prod` (or blank = whole metastore) |
+| | `source_warehouse_id` | a source SQL warehouse (**required for ABAC**) |
 | | `output_volume_path` | `/Volumes/ops/mig/out` |
 | 02 Export | `mapping_file_path` | `/Volumes/ops/mig/mapping.csv` |
+| | `source_warehouse_id` | same warehouse |
 | 03 Import | all `create_*` | `true` |
 | | all `apply_*` | `true` |
 
@@ -96,20 +105,33 @@ them). Only that subtree is migrated.
 
 ### Scenario 5 — Airgap (no network between regions)
 1. Run **01 + 02** on the **source** workspace (`connectivity_mode=airgap`).
+   **Set `source_warehouse_id`** to a SQL warehouse on the source, or ABAC policies
+   export **empty** (classic job-cluster Spark can't read `abac_policy_definitions`).
 2. Move the whole `run_<id>/` directory to the target (download/upload the volume
    folder). Verify `manifest.json` + `checksums/` are present.
 3. Run **03** on the **target** workspace pointing at the moved `run_<id>/`.
 
-### Scenario 6 — Direct / local (same workspace)
-`connectivity_mode=direct`, leave the source SP widgets blank (reads the current
-workspace). Note: real region moves use two metastores; same-metastore is a test
-convenience (source and target names are identical, so use two workspaces/metastores
-for an actual migration).
+### Scenario 6 — Direct (job runs on target, reads source over a warehouse)
+`connectivity_mode=direct`; set `source_workspace_url` + source SP creds +
+`source_warehouse_id` so 01/02 read the source. For a same-workspace **local test**,
+leave the source widgets blank (reads the current workspace) but still set
+`source_warehouse_id` to a local warehouse for ABAC. Note: real region moves use two
+metastores.
 
-### Scenario 7 — Incremental re-run
-Re-run the same three stages with the same widgets. New objects/grants/tags/
-policies at source are **applied**; unchanged objects are **skipped**
-(`SKIP_EXISTING`); **removals at source are reported, never applied** (additive-only).
+### Scenario 7 — Rename the catalog on the target
+To land a source catalog under a different name, set (03 Import)
+`catalog_mapping_json = {"<source_catalog>":"<target_catalog>"}`. Inventory/Export
+still use the source name; the rename happens on import (every DDL/grant/tag/ABAC
+statement is rewritten). Storage paths still come from the mapping CSV — the rename
+does not affect them. Combine with `filter_tables` to replicate only some tables.
+
+### Scenario 8 — Re-run (additive, idempotent)
+Re-run the same stages with the same widgets. New objects/grants/tags/policies at
+source are **created/applied**; existing objects are **skipped** (`SKIP_EXISTING`);
+**removals at source are never applied** (additive-only). Note this is a full
+idempotent re-apply, **not** a computed delta: a *changed* existing table is not
+re-altered, and source deletions are not propagated. True incremental (diff-driven)
+sync is not yet implemented — the `uc_sync_state` table is the groundwork for it.
 
 ---
 

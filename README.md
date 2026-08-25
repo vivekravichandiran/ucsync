@@ -21,12 +21,21 @@ except data); **governed-tag assignments**; **ABAC policies** (verbatim, incl.
 each policy's `EXCEPT`); **classic column masks / row filters**; **grants**.
 
 ## Quick start
-1. Prerequisites (once): target metastore + storage, and account-level governed-tag
+The utility is **four notebooks**: `00_Install_Jobs` (the wrapper) + the three stages
+`01_Inventory` → `02_Export` → `03_Import`. You normally fill the widgets once in
+`00_Install_Jobs`, pick which job(s) to create in `jobs_to_create`, and run — it builds
+the Databricks Jobs for you. You can also run the three stage notebooks directly.
+
+1. Prerequisites (once): target metastore + storage + a Databricks **access connector**
+   with `Storage Blob Data Contributor` on it, and account-level governed-tag
    definitions — see [`docs/manual-actions.md`](docs/manual-actions.md).
-2. Run **`notebooks/01_Inventory`** on the source (scope with `catalogs`/`schemas`).
-3. Run **`notebooks/02_Export`** (same `run_id`, provide `mapping_file_path`).
+2. Run **`01_Inventory`** on the source (scope with `catalogs`/`schemas`). **Set
+   `source_warehouse_id`** — required to capture ABAC policies (in airgap too).
+3. Run **`02_Export`** (same `run_id`, provide `mapping_file_path`).
 4. (Airgap) move the `run_<id>/` folder to the target.
-5. Run **`notebooks/03_Import`** on the target (`create_*`/`apply_*` toggles).
+5. Run **`03_Import`** on the target (`create_*`/`apply_*` toggles). Optional:
+   `filter_tables` (subset), `catalog_mapping_json` (rename the catalog on target),
+   `run_as_spn` (own everything as a target service principal).
 
 Follow [`docs/runbook.md`](docs/runbook.md) — a scenario-by-scenario guide with exact
 widget values. Reference: [`docs/configuration.md`](docs/configuration.md),
