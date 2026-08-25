@@ -4,13 +4,11 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="1862a172-d182-46cb-8967-79eb137ce7bc" name="Changes" comment="ABAC listing fix">
+    <list default="true" id="1862a172-d182-46cb-8967-79eb137ce7bc" name="Changes" comment="SC mapping &amp; ABAC listing fix">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/notebooks/00_Install_Jobs.py" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/00_Install_Jobs.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/notebooks/01_Inventory.py" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/01_Inventory.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/uc_sync/mapping.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/mapping.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/uc_sync/migrate_export.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/migrate_export.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_mapping_connector.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_mapping_connector.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/notebooks/02_Export.py" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/02_Export.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/notebooks/03_Import.py" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/03_Import.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/tests/test_migrate_import_state.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_migrate_import_state.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -124,13 +122,22 @@
       <option name="project" value="LOCAL" />
       <updated>1787536431113</updated>
     </task>
-    <option name="localTasksCounter" value="7" />
+    <task id="LOCAL-00007" summary="SC mapping &amp; ABAC listing fix">
+      <option name="closed" value="true" />
+      <created>1787622370259</created>
+      <option name="number" value="00007" />
+      <option name="presentableId" value="LOCAL-00007" />
+      <option name="project" value="LOCAL" />
+      <updated>1787622370259</updated>
+    </task>
+    <option name="localTasksCounter" value="8" />
     <servers />
   </component>
   <component name="VcsManagerConfiguration">
     <MESSAGE value="Added mask application" />
     <MESSAGE value="Fix excel creation in report" />
     <MESSAGE value="ABAC listing fix" />
-    <option name="LAST_COMMIT_MESSAGE" value="ABAC listing fix" />
+    <MESSAGE value="SC mapping &amp; ABAC listing fix" />
+    <option name="LAST_COMMIT_MESSAGE" value="SC mapping &amp; ABAC listing fix" />
   </component>
 </project>

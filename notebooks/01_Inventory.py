@@ -20,6 +20,7 @@ for _p in ("../src", "./src", os.path.abspath(os.path.join(os.getcwd(), "..", "s
         sys.path.insert(0, _p)
 
 from uc_sync.config import from_sources
+from uc_sync.audit import AuditService, stage_audit_row
 from uc_sync.inventory import InventoryService
 from uc_sync.import_engine import SparkSqlExecutor, RestSqlExecutor
 from uc_sync.auth import local_workspace_auth, direct_workspace_auth
@@ -107,6 +108,21 @@ else:
 # COMMAND ----------
 
 objects = InventoryService(source, cfg, gov_sql).run()
+
+# Append one INVENTORY row per object to {ops_catalog}.{ops_schema}.uc_sync_audit on
+# this workspace (best-effort: audit logging must never fail the inventory).
+try:
+    if cfg.audit_table and objects:
+        AuditService(spark, cfg.audit_table).append(
+            stage_audit_row(run_id=run_id, stage="INVENTORY", result=o.to_dict())
+            for o in objects
+        )
+        print(f"audit: wrote {len(objects)} INVENTORY rows to {cfg.audit_table}")
+except Exception as _exc:  # noqa: BLE001 - audit is best-effort
+    import traceback
+    print(f"audit write skipped: {_exc!r}")
+    traceback.print_exc()
+
 payload = json.dumps([o.to_dict() for o in objects], indent=2, default=str)
 dst = f"{_local(run_dir)}/inventory.json"
 with open(dst, "w") as fh:

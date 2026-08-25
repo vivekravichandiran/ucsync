@@ -15,11 +15,15 @@ for _p in ("../src", "./src", os.path.abspath(os.path.join(os.getcwd(), "..", "s
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
 
+import uuid
+from uc_sync import __version__
 from uc_sync.config import from_sources, CREATE_TOGGLES, APPLY_TOGGLES, _split_csv
 from uc_sync.package_import import PackageImportEngine
 from uc_sync.import_engine import SparkSqlExecutor
 from uc_sync.auth import local_workspace_auth
 from uc_sync.workspace_client import WorkspaceClient
+from uc_sync.audit import AuditService, stage_audit_row
+from uc_sync.sync_state import SyncStateService, state_row_from_import
 
 # COMMAND ----------
 
@@ -95,6 +99,39 @@ try:
 except Exception as _exc:  # noqa: BLE001 - report is best-effort
     import traceback
     print(f"report generation skipped: {_exc!r}")
+    traceback.print_exc()
+
+# Operations tables under {ops_catalog}.{ops_schema} on THIS (target) workspace:
+#   uc_sync_audit — one IMPORT row per object (append-only history).
+#   uc_sync_state — one row per source object (MERGE upsert), the per-object
+#     last-sync record that a future incremental run would diff against.
+# Best-effort: audit/state logging must never fail the migration itself.
+try:
+    if cfg.audit_table or cfg.state_table:
+        result_dicts = [r.to_dict() for r in results]
+        try:
+            ran_by = spark.sql("SELECT current_user()").collect()[0][0]
+        except Exception:  # noqa: BLE001
+            ran_by = ""
+        if cfg.audit_table:
+            AuditService(spark, cfg.audit_table).append(
+                stage_audit_row(run_id=run_id, stage="IMPORT", result=rd)
+                for rd in result_dicts
+            )
+            print(f"audit: wrote {len(result_dicts)} IMPORT rows to {cfg.audit_table}")
+        if cfg.state_table:
+            batch_id = str(uuid.uuid4())
+            SyncStateService(spark, cfg.state_table).upsert(
+                state_row_from_import(
+                    batch_id=batch_id, run_id=run_id, result=rd,
+                    ran_by=ran_by, utility_version=__version__,
+                )
+                for rd in result_dicts
+            )
+            print(f"state: upserted {len(result_dicts)} rows into {cfg.state_table}")
+except Exception as _exc:  # noqa: BLE001 - ops tables are best-effort
+    import traceback
+    print(f"ops audit/state write skipped: {_exc!r}")
     traceback.print_exc()
 
 summary = {}

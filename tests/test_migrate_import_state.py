@@ -288,6 +288,58 @@ def test_import_applies_catalog_mapping(tmp_path: Path):
     assert by["TABLE"].target_full_name == "tgt_cat.s.t"
 
 
+def test_import_results_produce_audit_and_state_rows():
+    """The 03_Import ops-table glue: every PackageImportResult must convert into a
+    well-formed uc_sync_audit (IMPORT) row and a uc_sync_state upsert row."""
+    from uc_sync.audit import AUDIT_COLUMNS, stage_audit_row
+    from uc_sync.package_import import PackageImportResult
+    from uc_sync.sync_state import STATE_COLUMNS, state_row_from_import
+
+    results = [
+        PackageImportResult(
+            object_type="TABLE",
+            source_full_name="src.s.t",
+            target_full_name="tgt.s.t",
+            full_name="tgt.s.t",
+            action="CREATE",
+            status="SUCCESS",
+            source_definition_hash="h1",
+        ),
+        PackageImportResult(
+            object_type="VIEW",
+            source_full_name="src.s.v",
+            target_full_name="tgt.s.v",
+            full_name="tgt.s.v",
+            action="CREATE",
+            status="FAILURE",
+            error_code="BOOM",
+            message="nope",
+        ),
+    ]
+    for r in results:
+        rd = r.to_dict()
+        audit = stage_audit_row(run_id="r1", stage="IMPORT", result=rd)
+        assert set(audit) == set(AUDIT_COLUMNS)
+        assert audit["operation_mode"] == "IMPORT"
+        assert audit["import_status"] == audit["status"]
+        assert audit["target_full_name"] == r.target_full_name
+
+        state = state_row_from_import(
+            batch_id="b1", run_id="r1", result=rd, ran_by="me", utility_version="9.9",
+        )
+        assert set(state) == set(STATE_COLUMNS)
+        assert state["source_full_name"] == "src.s.t" if r.status == "SUCCESS" else True
+        assert state["last_synced_by"] == "me"
+
+    ok = stage_audit_row(run_id="r1", stage="IMPORT", result=results[0].to_dict())
+    bad = state_row_from_import(
+        batch_id="b1", run_id="r1", result=results[1].to_dict(), ran_by="me",
+        utility_version="9.9",
+    )
+    assert ok["status"] == "SUCCESS"
+    assert bad["last_sync_status"] == "FAILURE"
+
+
 def test_split_statements_preserves_dollar_blocks():
     sql = """
 CREATE VIEW v AS $$

@@ -15,6 +15,7 @@ for _p in ("../src", "./src", os.path.abspath(os.path.join(os.getcwd(), "..", "s
         sys.path.insert(0, _p)
 
 from uc_sync.config import from_sources
+from uc_sync.audit import AuditService, stage_audit_row
 from uc_sync.export import ExportService
 from uc_sync.migrate_export import MigrateExportService
 from uc_sync.import_engine import SparkSqlExecutor, RestSqlExecutor
@@ -112,6 +113,20 @@ MigrateExportService(
 export_results = result.get("results") or []
 with open(f"{_local(base)}/migrated/export_results.json", "w") as fh:
     json.dump(export_results, fh, indent=2, default=str)
+
+# Append one EXPORT row per object to {ops_catalog}.{ops_schema}.uc_sync_audit on
+# this workspace (best-effort: audit logging must never fail the export).
+try:
+    if cfg.audit_table and export_results:
+        AuditService(spark, cfg.audit_table).append(
+            stage_audit_row(run_id=run_id, stage="EXPORT", result=r)
+            for r in export_results
+        )
+        print(f"audit: wrote {len(export_results)} EXPORT rows to {cfg.audit_table}")
+except Exception as _exc:  # noqa: BLE001 - audit is best-effort
+    import traceback
+    print(f"audit write skipped: {_exc!r}")
+    traceback.print_exc()
 
 # Operator-facing export report from the path-rewritten (migrated) bundle.
 try:
