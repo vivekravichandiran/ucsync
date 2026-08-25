@@ -1,0 +1,4 @@
+schema,volume,table,location
+ap,,invoices_ext,abfss://data@ai27tgtfine9fc8b.dfs.core.windows.net/ap/invoices_ext
+gl,,accounts_ext,abfss://data@ai27tgtfine9fc8b.dfs.core.windows.net/gl/accounts_ext
+orders,archive,,abfss://data@ai27tgtsale9fc8b.dfs.core.windows.net/orders/archive

@@ -1,0 +1,4 @@
+source_location,target_location,target_access_connector_id
+abfss://data@ai27govd1a1e8.dfs.core.windows.net,abfss://data@ai27tgtgove9fc8b.dfs.core.windows.net,/subscriptions/edd4cc45-85c7-4aec-8bf5-648062d519bf/resourceGroups/ai27-uc-tgt-rg/providers/Microsoft.Databricks/accessConnectors/ai27-tgt-gov-e2
+abfss://data@ai27find1a1e8.dfs.core.windows.net,abfss://data@ai27tgtfine9fc8b.dfs.core.windows.net,/subscriptions/edd4cc45-85c7-4aec-8bf5-648062d519bf/resourceGroups/ai27-uc-tgt-rg/providers/Microsoft.Databricks/accessConnectors/ai27-tgt-fin-e2
+abfss://data@ai27sald1a1e8.dfs.core.windows.net,abfss://data@ai27tgtsale9fc8b.dfs.core.windows.net,/subscriptions/edd4cc45-85c7-4aec-8bf5-648062d519bf/resourceGroups/ai27-uc-tgt-rg/providers/Microsoft.Databricks/accessConnectors/ai27-tgt-sales-e2

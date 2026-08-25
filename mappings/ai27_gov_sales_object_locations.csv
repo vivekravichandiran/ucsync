@@ -1,0 +1,2 @@
+schema,volume,table,location
+orders,archive,,abfss://data@ai27tgtsale9fc8b.dfs.core.windows.net/orders/archive
