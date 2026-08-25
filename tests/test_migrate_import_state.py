@@ -340,6 +340,98 @@ def test_import_results_produce_audit_and_state_rows():
     assert bad["last_sync_status"] == "FAILURE"
 
 
+def _owner_package(tmp_path: Path) -> Path:
+    """An external location + a catalog whose managed location is that EL, with
+    an `OWNER TO <source-owner>` grant on the EL (as the export bundle emits)."""
+    root = tmp_path / "migrated"
+    (root / "ddl").mkdir(parents=True)
+    (root / "grants").mkdir(parents=True)
+    (root / "inventory").mkdir(parents=True)
+    (root / "ddl" / "EXTERNAL_LOCATION_ai27_el.sql").write_text(
+        "CREATE EXTERNAL LOCATION `ai27_el` URL 'abfss://data@x/' "
+        "WITH (STORAGE CREDENTIAL `ai27_cred`);\n",
+        encoding="utf-8",
+    )
+    (root / "ddl" / "CATALOG_ai27_cat.sql").write_text(
+        "CREATE CATALOG `ai27_cat` MANAGED LOCATION 'abfss://data@x/';\n",
+        encoding="utf-8",
+    )
+    (root / "grants" / "EXTERNAL_LOCATION_ai27_el.sql").write_text(
+        "ALTER EXTERNAL LOCATION `ai27_el` OWNER TO `source_owner@databricks.com`;\n",
+        encoding="utf-8",
+    )
+    (root / "inventory" / "objects.json").write_text("[]", encoding="utf-8")
+    return root
+
+
+def test_owner_transfer_deferred_until_after_creates():
+    """`ALTER … OWNER TO` must run AFTER the catalog is created, not right after
+    the EL — otherwise the run principal loses CREATE MANAGED STORAGE on the EL
+    before the catalog (the PERMISSION_DENIED cascade we hit)."""
+    from uc_sync.package_import import _is_owner_statement, _owner_statement_target
+
+    # helper-level checks
+    stmt = "ALTER EXTERNAL LOCATION `ai27_el` OWNER TO `o@x`;"
+    assert _is_owner_statement(stmt)
+    assert _owner_statement_target(stmt) == ("EXTERNAL_LOCATION", "ai27_el")
+    assert _owner_statement_target("ALTER TABLE `c`.`s`.`t` OWNER TO `g`") == (
+        "TABLE", "c.s.t")
+    assert not _is_owner_statement("GRANT SELECT ON TABLE c.s.t TO `u`")
+
+
+def test_owner_transfer_runs_last(tmp_path: Path):
+    root = _owner_package(tmp_path)
+    sql = FakeSql()
+    engine = PackageImportEngine(str(root), sql, dry_run=False)
+    results = engine.run()
+
+    owner_idx = next(i for i, s in enumerate(sql.statements) if "OWNER TO" in s.upper())
+    cat_idx = next(i for i, s in enumerate(sql.statements) if "CREATE CATALOG" in s.upper())
+    el_idx = next(
+        i for i, s in enumerate(sql.statements) if "CREATE EXTERNAL LOCATION" in s.upper()
+    )
+    # Ownership transfer happens after BOTH the EL and the catalog were created.
+    assert owner_idx > cat_idx > el_idx
+    assert engine._ownership_transferred == 1
+    assert engine._ownership_skipped == 0
+    by = {r.object_type: r for r in results}
+    assert by["EXTERNAL_LOCATION"].status == "SUCCESS"
+    assert by["CATALOG"].status == "SUCCESS"
+
+
+def test_missing_owner_is_a_warning_not_a_failure(tmp_path: Path):
+    """A source owner absent on the target degrades to a warning; the objects
+    stay SUCCESS and the run does not raise."""
+    root = _owner_package(tmp_path)
+    sql = FakeSql(fail_on="OWNER TO")  # simulate: principal doesn't exist on target
+    engine = PackageImportEngine(str(root), sql, dry_run=False)
+    results = engine.run()  # must not raise
+
+    by = {r.object_type: r for r in results}
+    assert by["EXTERNAL_LOCATION"].status == "SUCCESS"
+    assert by["CATALOG"].status == "SUCCESS"
+    assert engine._ownership_skipped == 1
+    assert engine._ownership_transferred == 0
+    # No object result was marked FAILURE because of the ownership hand-off.
+    assert all(r.status != "FAILURE" for r in results)
+
+
+def test_regular_grants_still_applied_inline(tmp_path: Path):
+    """Only OWNER TO is deferred; ordinary GRANTs still run during the object's
+    own step and are never queued."""
+    root = _package_with(
+        tmp_path,
+        "TABLE_c__s__t.sql",
+        "CREATE TABLE c.s.t (id INT);\n",
+        grants="GRANT SELECT ON TABLE c.s.t TO `analyst`;\n",
+    )
+    sql = FakeSql()
+    engine = PackageImportEngine(str(root), sql, dry_run=False)
+    engine.run()
+    assert any("GRANT SELECT" in s.upper() for s in sql.statements)
+    assert engine._deferred_owner == []
+
+
 def test_split_statements_preserves_dollar_blocks():
     sql = """
 CREATE VIEW v AS $$
@@ -483,12 +575,14 @@ def test_grant_not_found_fails_the_object(tmp_path: Path):
         tmp_path,
         "VOLUME_tgt__s__v.sql",
         "CREATE VOLUME tgt.s.v;\n",
-        grants="ALTER VOLUME tgt.s.v OWNER TO `someone`;\n",
+        # A non-owner grant: OWNER TO is now deferred, but ordinary grants still
+        # run inline, so a NOT_FOUND here still proves the object never created.
+        grants="GRANT READ VOLUME ON VOLUME tgt.s.v TO `someone`;\n",
     )
 
     class MissingAfterCreate:
         def execute(self, sql: str):
-            if sql.upper().startswith("ALTER"):
+            if sql.upper().startswith("GRANT"):
                 raise RuntimeError("[UC_VOLUME_NOT_FOUND] Volume does not exist")
 
     result = PackageImportEngine(str(root), MissingAfterCreate(), dry_run=False).run()[0]
@@ -501,13 +595,13 @@ def test_grant_warning_still_allows_success(tmp_path: Path):
         tmp_path,
         "TABLE_tgt__s__t.sql",
         "CREATE TABLE tgt.s.t (id INT);\n",
-        grants="ALTER TABLE tgt.s.t OWNER TO `someone`;\n",
+        grants="GRANT SELECT ON TABLE tgt.s.t TO `someone`;\n",
     )
 
     class PermissionDenied:
         def execute(self, sql: str):
-            if sql.upper().startswith("ALTER"):
-                raise RuntimeError("PERMISSION_DENIED: cannot set owner")
+            if sql.upper().startswith("GRANT"):
+                raise RuntimeError("PERMISSION_DENIED: cannot grant")
 
     result = PackageImportEngine(str(root), PermissionDenied(), dry_run=False).run()[0]
     assert result.status == "SUCCESS"

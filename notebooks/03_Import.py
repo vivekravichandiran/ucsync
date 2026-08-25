@@ -19,6 +19,7 @@ import uuid
 from uc_sync import __version__
 from uc_sync.config import from_sources, CREATE_TOGGLES, APPLY_TOGGLES, _split_csv
 from uc_sync.package_import import PackageImportEngine
+from uc_sync.location_mapping import load_object_locations_csv
 from uc_sync.import_engine import SparkSqlExecutor
 from uc_sync.auth import local_workspace_auth
 from uc_sync.workspace_client import WorkspaceClient
@@ -41,6 +42,12 @@ dbutils.widgets.text("filter_tables", "")
 # name. JSON object {"source_catalog":"target_catalog"} (blank = keep source
 # names). Every replayed statement is rewritten source->target catalog.
 dbutils.widgets.text("catalog_mapping_json", "")
+# Optional per-object target locations (CSV: schema,volume,table,location).
+# A schema listed here is created with that MANAGED LOCATION (else it inherits the
+# catalog root); an external volume/table row supplies that object's LOCATION. Used
+# mainly when replicating into an existing catalog (its storage credential +
+# external location are prerequisites). Blank = every schema uses the catalog root.
+dbutils.widgets.text("object_locations_path", "")
 for _t in (*CREATE_TOGGLES, *APPLY_TOGGLES):
     dbutils.widgets.dropdown(_t, "true", ["true", "false"])
 dbutils.widgets.dropdown("dry_run", "false", ["true", "false"])
@@ -69,6 +76,13 @@ migrated = f"{_local(base)}/migrated"
 
 toggles = {t: getattr(cfg, t) for t in (*CREATE_TOGGLES, *APPLY_TOGGLES)}
 
+# Optional explicit per-object locations (schema / external volume / external table).
+_object_locations_path = _local(dbutils.widgets.get("object_locations_path").strip())
+object_locations = (
+    load_object_locations_csv(_object_locations_path)
+    if _object_locations_path else None
+)
+
 # COMMAND ----------
 
 results = PackageImportEngine(
@@ -76,6 +90,7 @@ results = PackageImportEngine(
     workspace_client=WorkspaceClient(local_workspace_auth(dbutils)),
     catalog_mapping=cfg.catalog_mapping,
     select_tables=_split_csv(dbutils.widgets.get("filter_tables")),
+    object_locations=object_locations,
 ).run()
 
 # Clean migration report (spine + governance sheets) under reports/. The import

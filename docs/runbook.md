@@ -70,8 +70,10 @@ Import), `mapping_file_path` (storage-cred + location CSV, § configuration.md),
 including airgap**, or ABAC policies export empty; § configuration.md).
 
 Import-only extras (all optional): `filter_tables` (import a subset of tables),
-`catalog_mapping_json` (recreate a source catalog under a different target name),
-`run_as_spn` (run the import as a target service principal so it owns everything).
+`catalog_mapping_json` (recreate a source catalog under a different target name — or
+replicate into an existing one, Scenario 7b), `object_locations_path` (per-schema /
+external-object target locations, § configuration.md), `run_as_spn` (run the import as a
+target service principal so it owns everything).
 
 ### Scenario 1 — From scratch (new target metastore)
 | Stage | Widget | Value |
@@ -122,8 +124,25 @@ metastores.
 To land a source catalog under a different name, set (03 Import)
 `catalog_mapping_json = {"<source_catalog>":"<target_catalog>"}`. Inventory/Export
 still use the source name; the rename happens on import (every DDL/grant/tag/ABAC
-statement is rewritten). Storage paths still come from the mapping CSV — the rename
-does not affect them. Combine with `filter_tables` to replicate only some tables.
+statement is rewritten; hyphenated names and prefix look-alikes are safe). Storage
+paths still come from the mapping CSV — the rename does not affect them. Combine with
+`filter_tables` to replicate only some tables.
+
+### Scenario 7b — Replicate into an **existing** catalog (existing-catalog mode)
+When the mapped target catalog **already exists** on the target metastore, the import
+auto-detects it and treats the catalog + its storage credential + external location as
+**prerequisites** — it skips creating them and only replicates the schemas + objects
+inside (existing schemas/objects are skipped). No mapping CSV is needed. Setup:
+1. Pre-create the target catalog (any name) + its storage credential + external
+   location; `catalog_mapping_json = {"<source>":"<existing_target>"}` (identity name is
+   fine).
+2. Grant the run principal `USE CATALOG` + `CREATE SCHEMA` on that catalog (or run as its
+   owner) — otherwise schema creation fails `PERMISSION_DENIED`.
+3. Schemas land under the **catalog root** by default. To place a schema (or an external
+   table/volume) at a specific location, list it in `object_locations_path`
+   (`schema,volume,table,location`; § configuration.md). External tables/volumes **must**
+   be listed here in this mode, and every location must be covered by an existing EL, or
+   they report `EXTERNAL_LOCATION_MISSING`.
 
 ### Scenario 8 — Re-run (additive, idempotent)
 Re-run the same stages with the same widgets. New objects/grants/tags/policies at

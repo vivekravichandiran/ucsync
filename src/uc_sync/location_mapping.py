@@ -131,6 +131,84 @@ def load_location_mapping_csv(path: str | Path) -> list[LocationMapping]:
         return parse_location_mappings(reader)
 
 
+@dataclass(frozen=True)
+class ObjectLocations:
+    """Explicit target locations for schemas / external volumes / external tables.
+
+    Sourced from the optional ``object_locations`` CSV (``schema, volume, table,
+    location``). Which columns are filled decides the row's meaning:
+
+    * ``schema`` + ``location`` → the schema's ``MANAGED LOCATION``;
+    * ``schema`` + ``volume`` + ``location`` → that external volume's ``LOCATION``;
+    * ``schema`` + ``table`` + ``location`` → that external table's ``LOCATION``.
+
+    Keys are **source** names (only the catalog is remapped on import, so schema /
+    volume / table names are identical source→target).
+    """
+
+    schemas: dict[str, str]
+    volumes: dict[tuple[str, str], str]
+    tables: dict[tuple[str, str], str]
+
+    def schema_location(self, schema: str) -> Optional[str]:
+        return self.schemas.get(str(schema or ""))
+
+    def volume_location(self, schema: str, volume: str) -> Optional[str]:
+        return self.volumes.get((str(schema or ""), str(volume or "")))
+
+    def table_location(self, schema: str, table: str) -> Optional[str]:
+        return self.tables.get((str(schema or ""), str(table or "")))
+
+    def __bool__(self) -> bool:
+        return bool(self.schemas or self.volumes or self.tables)
+
+
+def parse_object_locations(rows: Iterable[dict[str, Any]]) -> ObjectLocations:
+    """Validate and index ``object_locations`` rows."""
+
+    schemas: dict[str, str] = {}
+    volumes: dict[tuple[str, str], str] = {}
+    tables: dict[tuple[str, str], str] = {}
+    for index, raw in enumerate(rows, start=2):
+        row = {
+            str(key or "").strip().lower(): str(value or "").strip()
+            for key, value in raw.items()
+        }
+        schema = row.get("schema", "")
+        volume = row.get("volume", "")
+        table = row.get("table", "")
+        location = _clean_location(row.get("location"))
+        if not any((schema, volume, table, location)):
+            continue  # blank line
+        if not schema or not location:
+            raise ValueError(
+                f"object_locations row {index} needs both a schema and a location"
+            )
+        if volume and table:
+            raise ValueError(
+                f"object_locations row {index} sets both volume and table; "
+                "use one per row"
+            )
+        if volume:
+            volumes[(schema, volume)] = location
+        elif table:
+            tables[(schema, table)] = location
+        else:
+            schemas[schema] = location
+    return ObjectLocations(schemas=schemas, volumes=volumes, tables=tables)
+
+
+def load_object_locations_csv(path: str | Path) -> ObjectLocations:
+    locations_path = Path(path)
+    if not locations_path.exists():
+        raise FileNotFoundError(f"object-locations CSV does not exist: {path}")
+    with locations_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames:
+            raise ValueError(f"object-locations CSV has no header: {path}")
+        return parse_object_locations(reader)
+
+
 def mappings_from_legacy_config(
     external_locations: dict[str, Any],
     storage_credentials: dict[str, Any],

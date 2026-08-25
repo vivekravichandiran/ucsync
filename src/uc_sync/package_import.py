@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from uc_sync.dependency import _TYPE_RANK
+from uc_sync.location_mapping import ObjectLocations
 from uc_sync.models import ObjectType
 
 
@@ -50,6 +51,32 @@ def _parse_sql_filename(name: str) -> tuple[str, str]:
             encoded = stem[len(prefix) :]
             return object_type, encoded.replace("__", ".")
     return "UNKNOWN", stem.replace("__", ".")
+
+
+_OWNER_TO_RE = re.compile(r"\bOWNER\s+TO\b", re.IGNORECASE)
+_OWNER_TARGET_RE = re.compile(
+    r"\bALTER\s+(EXTERNAL\s+LOCATION|STORAGE\s+CREDENTIAL|MATERIALIZED\s+VIEW|"
+    r"STREAMING\s+TABLE|CATALOG|SCHEMA|TABLE|VIEW|VOLUME|FUNCTION|CONNECTION|SHARE)"
+    r"\s+(.+?)\s+OWNER\s+TO\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _is_owner_statement(statement: str) -> bool:
+    """True for an ``ALTER … OWNER TO …`` ownership transfer."""
+
+    return bool(_OWNER_TO_RE.search(statement or ""))
+
+
+def _owner_statement_target(statement: str) -> tuple[str, str]:
+    """(object_type, unquoted full name) parsed from an ``OWNER TO`` statement."""
+
+    match = _OWNER_TARGET_RE.search(statement or "")
+    if not match:
+        return "", ""
+    object_type = re.sub(r"\s+", "_", match.group(1).strip().upper())
+    name = match.group(2).strip().replace("`", "")
+    return object_type, name
 
 
 def _type_rank(object_type: str) -> int:
@@ -289,6 +316,7 @@ class PackageImportEngine:
         toggles: Optional[dict[str, bool]] = None,
         workspace_client: Any = None,
         select_tables: Optional[Iterable[str]] = None,
+        object_locations: Optional[ObjectLocations] = None,
     ):
         self.root = Path(package_root)
         self.workspace_client = workspace_client
@@ -316,6 +344,20 @@ class PackageImportEngine:
             self.toggles["apply_grants"] = apply_grants
         self.apply_grants = self.toggles["apply_grants"]
         self._context: tuple[str, str] = ("", "")
+        # Ownership (`ALTER … OWNER TO`) transfers are deferred to a final phase so
+        # the run principal keeps CREATE/MODIFY on each securable while it is still
+        # building children and applying governance. Each entry is
+        # (object_type, target_full_name, statement).
+        self._deferred_owner: list[tuple[str, str, str]] = []
+        self._ownership_transferred = 0
+        self._ownership_skipped = 0
+        # Explicit per-object target locations (schema MANAGED LOCATION / external
+        # table+volume LOCATION) from the optional object-locations config.
+        self.object_locations = object_locations
+        # Existing-catalog (Mode B): set when the mapped target catalog already
+        # exists, so storage-credential / external-location / catalog creation are
+        # skipped (they are prerequisites) and only the contents are replicated.
+        self._existing_catalog_mode = False
 
     # Object type → the create_* toggle that gates its creation.
     _CREATE_TOGGLE_FOR_TYPE = {
@@ -403,6 +445,7 @@ class PackageImportEngine:
                 f"Migrated export package not found: {self.root}"
             )
         inventory = self._load_inventory()
+        self._maybe_enter_existing_catalog_mode()
         by_target = {
             str(row.get("target_full_name") or ""): row
             for row in inventory.values()
@@ -475,6 +518,22 @@ class PackageImportEngine:
                     _normalize_create_statement(statement)
                     for statement in _split_statements(sql_text)
                 ]
+                # Apply explicit target locations from the object-locations config
+                # (schema MANAGED LOCATION / external LOCATION). An external
+                # table/volume with no configured location in existing-catalog mode
+                # cannot be placed — skip it with actionable guidance.
+                statements, manual_reason = self._apply_object_locations(
+                    object_type, parsed_name, statements
+                )
+                if manual_reason and not self.dry_run and self._create_enabled(
+                    object_type
+                ):
+                    result.status = "MANUAL_ACTION_REQUIRED"
+                    result.action = "MANUAL"
+                    result.error_code = "EXTERNAL_LOCATION_MISSING"
+                    result.message = manual_reason
+                    results.append(result)
+                    continue
                 if not self._create_enabled(object_type):
                     # create_*=false: the object is assumed to already exist on
                     # target; skip creation but still (later) govern it. Grants
@@ -482,7 +541,7 @@ class PackageImportEngine:
                     result.status = "SUCCESS"
                     result.action = "SKIP_CREATE_DISABLED"
                     if not self.dry_run:
-                        grant_warning = self._apply_grants_file(grants_path)
+                        grant_warning = self._apply_grants_file(grants_path, object_type, target_full_name)
                         result.message = (
                             "create disabled by toggle; assumed pre-existing"
                             + (f"; grant warning: {grant_warning}" if grant_warning else "")
@@ -541,7 +600,7 @@ class PackageImportEngine:
                             "create reported an existing object but "
                             f"{target_full_name} is not present in the target"
                         )
-                    grant_warning = self._apply_grants_file(grants_path)
+                    grant_warning = self._apply_grants_file(grants_path, object_type, target_full_name)
                     if grant_warning and _is_not_found_error(grant_warning):
                         # Grants cannot resolve an object that was never created.
                         raise RuntimeError(
@@ -568,7 +627,7 @@ class PackageImportEngine:
                     or _is_location_conflict_error(message)
                     or _is_already_exists_error(message)
                 ):
-                    grant_warning = self._apply_grants_file(grants_path)
+                    grant_warning = self._apply_grants_file(grants_path, object_type, target_full_name)
                     result.status = "SUCCESS"
                     result.action = "SKIP_EXISTING"
                     result.error_code = ""
@@ -598,6 +657,10 @@ class PackageImportEngine:
                 "abac", "CREATE_POLICY", inventory, by_target, len(results)))
         if self.toggles.get("apply_masks_row_filters", True):
             results.extend(self._apply_policy_files(inventory, by_target, len(results)))
+        # Ownership transfers run dead last, once every object exists and all
+        # governance is applied, so the run principal never loses privileges it
+        # still needs mid-run.
+        self._apply_deferred_ownership()
         return results
 
     def _apply_governance_dir(
@@ -784,19 +847,181 @@ class PackageImportEngine:
             results.append(result)
         return results
 
-    def _apply_grants_file(self, grants_path: Path) -> str:
-        """Run grant/owner statements; return the last warning, if any."""
+    def _apply_grants_file(
+        self, grants_path: Path, object_type: str = "", target_full_name: str = ""
+    ) -> str:
+        """Run a grants file; return the last warning, if any.
+
+        Ordinary ``GRANT … TO`` statements run inline. ``ALTER … OWNER TO``
+        transfers are **queued** for a final ownership phase instead of running
+        here, so the run principal keeps CREATE/MODIFY on the securable while it is
+        still building children and applying governance (handing an external
+        location or catalog to its source owner mid-run would strip the very
+        privileges the next create/ALTER needs — the CREATE MANAGED STORAGE bug).
+        """
         if not (self.apply_grants and grants_path.exists()):
             return ""
         warning = ""
         for statement in _split_statements(
             grants_path.read_text(encoding="utf-8")
         ):
+            if _is_owner_statement(statement):
+                self._deferred_owner.append(
+                    (object_type, target_full_name, statement)
+                )
+                continue
             try:
                 self.sql.execute(statement)
             except Exception as grant_exc:  # noqa: BLE001
                 warning = str(grant_exc)
         return warning
+
+    def _apply_deferred_ownership(self) -> None:
+        """Run queued ``OWNER TO`` transfers, after all creates + governance.
+
+        A source owner that does not exist on the target is expected in a region
+        move, so a failed transfer is a **warning**, not a failure — the object
+        simply stays owned by the run principal. Skipped in dry-run.
+        """
+        if self.dry_run or not self._deferred_owner:
+            return
+        for _object_type, _target, statement in self._deferred_owner:
+            try:
+                self.sql.execute(statement)
+                self._ownership_transferred += 1
+            except Exception as exc:  # noqa: BLE001
+                self._ownership_skipped += 1
+                print(
+                    "[import] ownership not transferred (left with the run "
+                    f"principal): {str(exc)[:300]} :: {statement[:200]}"
+                )
+        print(
+            f"[import] ownership phase: {self._ownership_transferred} transferred, "
+            f"{self._ownership_skipped} left with the run principal "
+            "(owner missing on target or not permitted)."
+        )
+
+    def _maybe_enter_existing_catalog_mode(self) -> None:
+        """Existing-catalog (Mode B) auto-detection.
+
+        When a catalog mapping is supplied and the mapped **target** catalog(s)
+        already exist on the target metastore, the catalog + its storage credential
+        + external location are treated as prerequisites the user created: their
+        creation is skipped and only the contents (schemas, tables, views,
+        functions, volumes, governance) are replicated. If the target catalog does
+        not exist, nothing changes and the utility creates everything from the
+        mapping CSV as before (Mode A).
+
+        Detected only in a real import (a workspace client is present) — pure-SQL
+        unit tests without one keep whatever ``create_*`` toggles they set.
+        """
+        if self.dry_run or self._existing_catalog_mode:
+            return
+        if self.workspace_client is None or not self.catalog_mapping:
+            return
+        targets = sorted({t for t in self.catalog_mapping.values() if t})
+        if not targets or not all(
+            self._object_exists("CATALOG", target) for target in targets
+        ):
+            return
+        for toggle in (
+            "create_catalogs",
+            "create_storage_credentials",
+            "create_external_locations",
+        ):
+            self.toggles[toggle] = False
+        self._existing_catalog_mode = True
+        print(
+            "[import] existing-catalog mode: target catalog(s) "
+            f"{targets} already present — skipping storage-credential / external-"
+            "location / catalog creation; replicating schemas + objects only."
+        )
+
+    def _apply_object_locations(
+        self, object_type: str, source_full_name: str, statements: list[str]
+    ) -> tuple[list[str], str]:
+        """Apply configured schema / external-object locations to CREATE statements.
+
+        Returns ``(statements, manual_reason)``. A non-empty ``manual_reason`` means
+        the object must be skipped as ``MANUAL_ACTION_REQUIRED`` — an external
+        table/volume with no configured location while in existing-catalog mode,
+        which cannot be placed (there is no path to reparent onto, by design).
+        """
+        parts = [part for part in str(source_full_name or "").split(".") if part]
+        schema = parts[1] if len(parts) >= 2 else ""
+        leaf = parts[-1] if parts else ""
+        locations = self.object_locations
+
+        if object_type == "SCHEMA":
+            schema_name = parts[-1] if len(parts) >= 2 else leaf
+            location = locations.schema_location(schema_name) if locations else None
+            if location:
+                return (
+                    [self._apply_schema_location(s, location) for s in statements],
+                    "",
+                )
+            return statements, ""
+
+        if object_type == "EXTERNAL_VOLUME":
+            location = locations.volume_location(schema, leaf) if locations else None
+            if location:
+                return (
+                    [self._replace_location_literal(s, location) for s in statements],
+                    "",
+                )
+            if self._existing_catalog_mode:
+                return statements, (
+                    f"external volume {source_full_name} has no target location; "
+                    f"add a row '{schema},{leaf},,<location>' to the object-locations "
+                    "file (its external location must already exist on target)"
+                )
+            return statements, ""
+
+        if object_type == "EXTERNAL_TABLE":
+            location = locations.table_location(schema, leaf) if locations else None
+            if location:
+                return (
+                    [self._replace_location_literal(s, location) for s in statements],
+                    "",
+                )
+            if self._existing_catalog_mode:
+                return statements, (
+                    f"external table {source_full_name} has no target location; "
+                    f"add a row '{schema},,{leaf},<location>' to the object-locations "
+                    "file (its external location must already exist on target)"
+                )
+            return statements, ""
+
+        return statements, ""
+
+    def _apply_schema_location(self, statement: str, location: str) -> str:
+        """Inject (or replace) a schema's ``MANAGED LOCATION`` from config."""
+
+        escaped = str(location).replace("'", "''")
+        stripped = re.sub(
+            r"\s+MANAGED\s+LOCATION\s+'[^']*'", "", statement, flags=re.IGNORECASE
+        )
+        clause = f" MANAGED LOCATION '{escaped}'"
+        idx = stripped.upper().find(" COMMENT ")
+        if idx != -1:
+            return stripped[:idx] + clause + stripped[idx:]
+        trimmed = stripped.rstrip()
+        if trimmed.endswith(";"):
+            return trimmed[:-1] + clause + ";"
+        return trimmed + clause
+
+    @staticmethod
+    def _replace_location_literal(statement: str, location: str) -> str:
+        """Replace the first ``LOCATION '…'`` literal with the configured path."""
+
+        escaped = str(location).replace("'", "''")
+        return re.sub(
+            r"(LOCATION\s+')[^']*(')",
+            lambda match: f"{match.group(1)}{escaped}{match.group(2)}",
+            statement,
+            count=1,
+            flags=re.IGNORECASE,
+        )
 
     def _apply_context(self, object_type: str, target_full_name: str) -> None:
         parts = str(target_full_name or "").split(".")

@@ -15,7 +15,8 @@
 | `source_workspace_url` + source SP credentials | — | 01, 02 | Remote source (blank = current workspace). Credential widgets below. Redacted from artifacts. |
 | `source_warehouse_id` | warehouse id | 01, 02 | **SQL warehouse for governance reads (tags + ABAC).** Required for a remote source. **Also required in airgap-on-source to capture ABAC** — classic job-cluster Spark cannot read `information_schema.abac_policy_definitions`, so without a warehouse ABAC policies (and Policy-Matched-Columns) come back **empty** (tags still work). Point it at any warehouse on the workspace that owns the objects. |
 | `filter_tables` | csv or blank | 03 | Import only a subset of **tables** (`catalog.schema.table` or bare table). Blank = all. Catalog/schema scoping is done upstream via `catalogs`/`schemas`; the catalogs/schemas/functions/volumes a selected table needs still come along. |
-| `catalog_mapping_json` | JSON or blank | 03 | Replicate a source catalog under a **different target name**, e.g. `{"src_cat":"tgt_cat"}`. Blank = keep source names. Rewrites the catalog name in every replayed statement (DDL, grants, tags, ABAC, masks). Does **not** affect storage paths — those always come from the mapping CSV. |
+| `catalog_mapping_json` | JSON or blank | 03 | Replicate a source catalog under a **different target name**, e.g. `{"src_cat":"tgt_cat"}` (identity like `{"x":"x"}` is fine too). Blank = keep source names. Rewrites the catalog name in every replayed statement (DDL, grants, tags, ABAC, masks); hyphenated names and prefix look-alikes are handled safely. Does **not** affect storage paths. **If the mapped target catalog already exists, the import auto-switches to existing-catalog mode** (skips storage-credential / external-location / catalog creation — they are prerequisites — and just replicates schemas + objects). |
+| `object_locations_path` | `/Volumes/…csv` or blank | 03 | Optional per-object target locations (below). Blank = every schema uses the catalog root; external tables/volumes keep the mapping-CSV path (Mode A) or must be listed here (existing-catalog mode). |
 | `run_as_spn` | SP application id or blank | 03 | Run the import as a target **service principal** (so migrated securables are owned by it). Blank = run as the installing user. Applies only to the import/e2e jobs. |
 | `create_storage_credentials`, `create_external_locations`, `create_catalogs`, `create_schemas`, `create_volumes`, `create_functions`, `create_tables`, `create_views`, `create_abac_policies` | bool (default true) | 03 | Gate **creation** per object family. Off = assume pre-existing, skip create, still govern. |
 | `apply_grants`, `apply_tags`, `apply_masks_row_filters` | bool (default true) | 03 | Gate governance application. |
@@ -74,6 +75,33 @@ abfss://uc@src.dfs.core.windows.net,abfss://uc@tgt.dfs.core.windows.net,/subscri
 
 So: **create target ADLS + access connector, hand over the connector id and the
 path mapping — that's it.** Names, credential, and EL are carried from source.
+
+## Object-locations file (optional, `object_locations_path`)
+
+Explicit target locations for **schemas** and **external tables/volumes**, one row per
+object. Which columns are filled decides the row's meaning:
+
+```csv
+schema,volume,table,location
+crm,,,abfss://data@acct.dfs.core.windows.net/crm            # schema MANAGED LOCATION
+orders,archive,,abfss://data@acct.dfs.core.windows.net/orders/archive   # external VOLUME
+sales,,raw_events,abfss://data@acct.dfs.core.windows.net/raw_events     # external TABLE
+```
+
+- **`schema` + `location`** → the schema is created with that `MANAGED LOCATION`.
+  **Not listed → the schema is created at the catalog root** (managed). No reparenting.
+- **`schema` + `volume` + `location`** → that external volume's `LOCATION`.
+- **`schema` + `table` + `location`** → that external table's `LOCATION`.
+- Names are **source** names (only the catalog is remapped on import).
+- Every location must be covered by an **existing** external location on target (a
+  prerequisite); the import reports `EXTERNAL_LOCATION_MISSING` if it is not.
+- In **existing-catalog mode** an external table/volume with **no** row here cannot be
+  placed and is reported `EXTERNAL_LOCATION_MISSING` (managed objects are unaffected).
+
+Use with `catalog_mapping_json` to **replicate into an existing catalog**: pre-create the
+catalog + its storage credential + external location, grant the run principal
+`USE CATALOG` + `CREATE SCHEMA` on it, then the import creates only the schemas + objects
+inside (existing ones are skipped).
 
 ## Compute
 Masks and row filters require **Standard (USER_ISOLATION)** or **serverless**

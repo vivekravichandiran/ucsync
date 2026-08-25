@@ -137,6 +137,7 @@
           "dry_run": "false",
           "filter_tables": "${filter_tables}",
           "catalog_mapping_json": "${catalog_mapping_json}",
+          "object_locations_path": "${object_locations_path}",
           "create_storage_credentials": "${create_storage_credentials}",
           "create_external_locations": "${create_external_locations}",
           "create_catalogs": "${create_catalogs}",

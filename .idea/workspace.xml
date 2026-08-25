@@ -4,12 +4,19 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="1862a172-d182-46cb-8967-79eb137ce7bc" name="Changes" comment="SC mapping &amp; ABAC listing fix">
+    <list default="true" id="1862a172-d182-46cb-8967-79eb137ce7bc" name="Changes" comment="Updated docs">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/docs/configuration.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/configuration.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/docs/runbook.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/runbook.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/docs/troubleshooting.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/troubleshooting.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/jobs/airgap_import_target.json" beforeDir="false" afterPath="$PROJECT_DIR$/jobs/airgap_import_target.json" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/jobs/e2e_dry_run.json" beforeDir="false" afterPath="$PROJECT_DIR$/jobs/e2e_dry_run.json" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/jobs/e2e_live.json" beforeDir="false" afterPath="$PROJECT_DIR$/jobs/e2e_live.json" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/notebooks/00_Install_Jobs.py" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/00_Install_Jobs.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/notebooks/03_Import.py" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/03_Import.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/uc_sync/location_mapping.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/location_mapping.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/uc_sync/package_import.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/package_import.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_migrate_import_state.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_migrate_import_state.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -138,7 +145,15 @@
       <option name="project" value="LOCAL" />
       <updated>1787623460868</updated>
     </task>
-    <option name="localTasksCounter" value="9" />
+    <task id="LOCAL-00009" summary="Updated docs">
+      <option name="closed" value="true" />
+      <created>1787626740495</created>
+      <option name="number" value="00009" />
+      <option name="presentableId" value="LOCAL-00009" />
+      <option name="project" value="LOCAL" />
+      <updated>1787626740495</updated>
+    </task>
+    <option name="localTasksCounter" value="10" />
     <servers />
   </component>
   <component name="VcsManagerConfiguration">
@@ -146,6 +161,7 @@
     <MESSAGE value="Fix excel creation in report" />
     <MESSAGE value="ABAC listing fix" />
     <MESSAGE value="SC mapping &amp; ABAC listing fix" />
-    <option name="LAST_COMMIT_MESSAGE" value="SC mapping &amp; ABAC listing fix" />
+    <MESSAGE value="Updated docs" />
+    <option name="LAST_COMMIT_MESSAGE" value="Updated docs" />
   </component>
 </project>

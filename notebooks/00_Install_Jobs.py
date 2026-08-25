@@ -71,6 +71,10 @@ dbutils.widgets.text("filter_tables", "")     # csv catalog.schema.table (or bar
 # --- catalog rename (import/e2e jobs): replicate a source catalog under a
 #     different target name. JSON {"source_catalog":"target_catalog"}; blank = keep. ---
 dbutils.widgets.text("catalog_mapping_json", "")
+# --- per-object locations (import/e2e jobs): CSV schema,volume,table,location.
+#     Schema rows set MANAGED LOCATION; external volume/table rows set LOCATION.
+#     Used mainly when replicating into an existing catalog. Blank = catalog root. ---
+dbutils.widgets.text("object_locations_path", "")
 
 # --- cluster ---
 dbutils.widgets.text("existing_cluster_id", "")  # blank = new USER_ISOLATION job cluster
@@ -94,7 +98,7 @@ _simple = (
     "ops_catalog", "ops_schema", "mapping_file_path", "run_id",
     "source_workspace_url", "source_client_id", "source_client_secret",
     "source_secret_scope", "source_secret_key", "source_warehouse_id",
-    "run_as_spn", "filter_tables", "catalog_mapping_json",
+    "run_as_spn", "filter_tables", "catalog_mapping_json", "object_locations_path",
     "existing_cluster_id", "spark_version", "node_type_id", "job_name_prefix",
 )
 values = {k: dbutils.widgets.get(k).strip() for k in _simple}
