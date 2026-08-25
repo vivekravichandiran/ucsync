@@ -52,9 +52,10 @@ dbutils.widgets.text("source_client_id", "")       # plaintext (never a secret)
 dbutils.widgets.text("source_client_secret", "")   # plaintext secret (option 1)
 dbutils.widgets.text("source_secret_scope", "")    # secret scope (option 2)
 dbutils.widgets.text("source_secret_key", "")      # secret key   (option 2)
-# SQL warehouse on the SOURCE workspace — REQUIRED for a remote source: tags +
-# ABAC policies are read via the source's Statement Execution API. Blank when the
-# source is the current workspace (local/airgap-on-source).
+# SQL warehouse for governance reads (tags + ABAC). REQUIRED for a remote source,
+# and STRONGLY RECOMMENDED for airgap-on-source too: without it ABAC policies come
+# back EMPTY (classic job-cluster Spark cannot serve abac_policy_definitions). Point
+# it at any SQL warehouse on the workspace that owns the objects.
 dbutils.widgets.text("source_warehouse_id", "")
 
 # --- target run-as service principal (import/e2e jobs) ---

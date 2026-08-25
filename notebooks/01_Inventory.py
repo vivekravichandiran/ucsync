@@ -42,10 +42,12 @@ dbutils.widgets.text("source_client_id", "")       # plaintext (never a secret)
 dbutils.widgets.text("source_client_secret", "")   # plaintext secret (option 1)
 dbutils.widgets.text("source_secret_scope", "")    # secret scope (option 2)
 dbutils.widgets.text("source_secret_key", "")      # secret key   (option 2)
-# SQL warehouse on the SOURCE workspace. REQUIRED when reading a remote source
-# (source_workspace_url set): tags + ABAC policies live in information_schema and
-# are read over the Statement Execution API on the source. Leave blank when the
-# source is the current workspace (local/airgap-on-source) — Spark is used then.
+# SQL warehouse used for governance reads (tags + ABAC policies, which live in
+# information_schema). REQUIRED for a remote source (source_workspace_url set).
+# STRONGLY RECOMMENDED even for airgap-on-source: classic job-cluster Spark cannot
+# serve `information_schema.abac_policy_definitions`, so ABAC policies come back
+# EMPTY without a warehouse (tags still work, but ABAC/Policy-Matched-Columns are
+# blank). Point it at any SQL warehouse on the workspace that owns the objects.
 dbutils.widgets.text("source_warehouse_id", "")
 dbutils.widgets.text("run_id", "")
 
@@ -81,17 +83,25 @@ else:
 source = WorkspaceClient(auth)
 
 # Governance reads (tags/ABAC) query information_schema on the workspace that owns
-# the objects. When inventorying a REMOTE source, the local Spark session points at
-# the wrong workspace, so run those reads over the source's SQL warehouse instead.
-if cfg.source_workspace_url:
-    if not cfg.source_warehouse_id:
-        raise ValueError(
-            "source_warehouse_id is required to inventory a remote source: "
-            "tags and ABAC policies are read via the source workspace's SQL "
-            "warehouse (Spark on this job runs against the target)."
-        )
+# the objects. Prefer a SQL warehouse whenever one is given: it is REQUIRED for a
+# remote source (local Spark points at the wrong workspace), and it is the only
+# path that can read `information_schema.abac_policy_definitions` — classic
+# job-cluster Spark serves the tag views but returns EMPTY for ABAC, so airgap runs
+# without a warehouse silently drop all ABAC policies.
+if cfg.source_warehouse_id:
     gov_sql = RestSqlExecutor(source, cfg.source_warehouse_id)
+elif cfg.source_workspace_url:
+    raise ValueError(
+        "source_warehouse_id is required to inventory a remote source: "
+        "tags and ABAC policies are read via the source workspace's SQL "
+        "warehouse (Spark on this job runs against the target)."
+    )
 else:
+    print(
+        "[inventory] WARNING: no source_warehouse_id set — ABAC policies are NOT "
+        "readable on classic job compute and will be EMPTY (tags still work). "
+        "Provide a SQL warehouse (or run on serverless) to capture ABAC policies."
+    )
     gov_sql = SparkSqlExecutor(spark)
 
 # COMMAND ----------

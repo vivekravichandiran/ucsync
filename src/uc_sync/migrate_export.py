@@ -83,6 +83,7 @@ class MigrateExportService:
         self.mapper = MappingResolver(mappings or {})
         self.run_id = run_id
         self.fs = fs
+        self._cred_source_location = self._read_credential_source_locations()
         self.volume_root = (
             Path(volume_root) / f"run_{run_id}" / "migrated"
             if volume_root and run_id
@@ -209,6 +210,44 @@ class MigrateExportService:
 
         return relative
 
+    def _read_credential_source_locations(self) -> dict[str, str]:
+        """Map ``storage_credential_name -> source storage location`` from the
+        bundle inventory's external locations.
+
+        Storage-credential DDL carries only the credential name and its source
+        access-connector id — not the storage path — so the correct *target*
+        connector can only be resolved by finding which source location the
+        credential backs. Each external location records both its
+        ``storage_credential_name`` and its (source) ``storage_location``.
+        """
+
+        inventory = self.source_root / "inventory" / "objects.json"
+        if not inventory.is_file():
+            return {}
+        try:
+            rows = json.loads(inventory.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        mapping: dict[str, str] = {}
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            if row.get("object_type") != ObjectType.EXTERNAL_LOCATION.value:
+                continue
+            definition = row.get("definition") or {}
+            cred = (
+                row.get("storage_credential_name")
+                or definition.get("credential_name")
+            )
+            location = (
+                row.get("storage_location")
+                or definition.get("storage_location")
+                or definition.get("url")
+            )
+            if cred and location and str(cred) not in mapping:
+                mapping[str(cred)] = str(location)
+        return mapping
+
     def _rewrite_file(self, relative: str, content: str) -> str:
         lowered = relative.lower()
         if lowered.endswith("inventory/objects.json") or lowered.endswith(
@@ -228,9 +267,19 @@ class MigrateExportService:
             if artifact == "ddl":
                 rewritten = strip_managed_storage_clauses(rewritten, object_type)
                 if object_type == "STORAGE_CREDENTIAL":
-                    # Point the credential at the target-region access connector.
+                    # Point the credential at the target-region access connector
+                    # for the source location it backs (per-catalog connectors),
+                    # falling back to the first mapping connector when unknown.
+                    source_location = self._cred_source_location.get(encoded, "")
+                    connector = (
+                        self.mapper.target_access_connector_id_for_location(
+                            source_location
+                        )
+                        if source_location
+                        else None
+                    ) or self.mapper.target_access_connector_id()
                     rewritten = rewrite_access_connector_id(
-                        rewritten, self.mapper.target_access_connector_id() or ""
+                        rewritten, connector or ""
                     )
         return rewritten
 

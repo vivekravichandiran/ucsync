@@ -106,6 +106,74 @@ def test_migrate_rewrites_paths_and_preserves_names(tmp_path: Path):
     )
 
 
+def test_migrate_rewrites_each_credential_to_its_own_connector(tmp_path: Path):
+    """Per-catalog credentials must each be rewritten to the target connector of
+    the source location they back — not all to the first mapping row's connector
+    (regression: finance+sales credentials both got the gov connector, so their
+    external locations failed UC's managed-identity validation)."""
+    source = tmp_path / "export_staging" / "run1"
+    (source / "ddl").mkdir(parents=True)
+    (source / "inventory").mkdir()
+    # Two credentials, each backing an external location in a distinct account.
+    for cred, connector in (
+        ("fin_cred", "src-fin"),
+        ("sal_cred", "src-sal"),
+    ):
+        (source / "ddl" / f"STORAGE_CREDENTIAL_{cred}.sql").write_text(
+            f"CREATE STORAGE CREDENTIAL `{cred}` WITH AZURE_MANAGED_IDENTITY "
+            f"(ACCESS_CONNECTOR_ID = '/subscriptions/SRC/connectors/{connector}');\n",
+            encoding="utf-8",
+        )
+    (source / "inventory" / "objects.json").write_text(
+        json.dumps(
+            [
+                {
+                    "object_type": "EXTERNAL_LOCATION",
+                    "full_name": "fin_el",
+                    "storage_location": "abfss://data@fin.dfs.core.windows.net",
+                    "storage_credential_name": "fin_cred",
+                },
+                {
+                    "object_type": "EXTERNAL_LOCATION",
+                    "full_name": "sal_el",
+                    "storage_location": "abfss://data@sal.dfs.core.windows.net",
+                    "storage_credential_name": "sal_cred",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    mappings = {
+        "location_mappings": [
+            {
+                "source_location": "abfss://data@fin.dfs.core.windows.net",
+                "target_location": "abfss://data@tgtfin.dfs.core.windows.net",
+                "target_access_connector_id": "/subscriptions/TGT/connectors/tgt-fin",
+            },
+            {
+                "source_location": "abfss://data@sal.dfs.core.windows.net",
+                "target_location": "abfss://data@tgtsal.dfs.core.windows.net",
+                "target_access_connector_id": "/subscriptions/TGT/connectors/tgt-sal",
+            },
+        ]
+    }
+    target = tmp_path / "migrated"
+    MigrateExportService(
+        source_root=str(source),
+        target_root=str(target),
+        mappings=mappings,
+        run_id="run1",
+    ).run(dry_run=False)
+
+    fin = (target / "ddl" / "STORAGE_CREDENTIAL_fin_cred.sql").read_text()
+    sal = (target / "ddl" / "STORAGE_CREDENTIAL_sal_cred.sql").read_text()
+    assert "/subscriptions/TGT/connectors/tgt-fin" in fin
+    assert "/subscriptions/TGT/connectors/tgt-sal" in sal
+    # The finance credential must NOT get the sales connector, and vice versa.
+    assert "tgt-sal" not in fin
+    assert "tgt-fin" not in sal
+
+
 def test_package_import_executes_and_records_failure(tmp_path: Path):
     root = tmp_path / "migrated"
     (root / "ddl").mkdir(parents=True)
