@@ -50,9 +50,10 @@ def test_build_report_has_governance_sheets(tmp_path):
 
 
 def test_issues_sheet_counts_split_and_governance_status(tmp_path):
-    """Plan #D/#6: the Issues sheet lists every non-success op (FAILURE first),
-    the Summary counts objects and governance ops separately, and governance
-    sheets carry an import_status column."""
+    """The Issues sheet lists every non-success op (FAILURE first); the Summary has a
+    single per-object tally (ABAC policies counted as objects; a governance failure
+    folds into its object) with no separate governance section; governance sheets
+    carry an import_status column."""
     objects = [
         {"object_type": "TABLE", "full_name": "c.s.t", "owner": "me",
          "tags": {"cls": "OK"}, "grants": []},
@@ -95,16 +96,17 @@ def test_issues_sheet_counts_split_and_governance_status(tmp_path):
     # The two non-success ops (dropped table + failed tag), no SUCCESS ones.
     assert len(issues) - 1 == 2
 
-    # Summary: per-object count (objects only, not governance) + governance block.
+    # Summary: a SINGLE per-object tally, no separate governance section.
     summary = [tuple(r) for r in wb["Summary"].iter_rows(values_only=True)]
     flat = [str(c) for row in summary for c in row if c is not None]
     assert "import_status (per object)" in flat
-    assert "governance operations" in flat
-    # Per-object tally: exactly one SUCCESS + one FAILURE object row.
+    assert "governed-tag operations" not in flat and "governance operations" not in flat
+    # The created table SUCCESS + the ABAC policy SUCCESS = 2 SUCCESS, plus the
+    # dropped table's FAILURE = 1. The tag ALTER row is excluded (folded into the
+    # table it failed).
     sflat = {summary[i][0]: summary[i][1] for i in range(len(summary))
-             if summary[i][0] in ("SUCCESS", "FAILURE", "APPLIED", "FAILED", "SKIPPED")}
-    assert sflat.get("SUCCESS") == 1 and sflat.get("FAILURE") == 1
-    assert sflat.get("APPLIED") == 1 and sflat.get("FAILED") == 1
+             if summary[i][0] in ("SUCCESS", "FAILURE")}
+    assert sflat.get("SUCCESS") == 2 and sflat.get("FAILURE") == 1
 
     # Tags sheet carries import_status; the bad table's tag reads FAILED.
     tag_rows = list(wb["Tags"].iter_rows(values_only=True))
@@ -115,6 +117,67 @@ def test_issues_sheet_counts_split_and_governance_status(tmp_path):
     # ABAC sheet also carries import_status keyed by the policy full name.
     abac_rows = list(wb["ABAC Policies"].iter_rows(values_only=True))
     assert abac_rows[0][-1] == "import_status"
+
+
+def test_abac_counts_as_object_so_export_and_import_totals_match(tmp_path):
+    """Parity: an ABAC policy is an object on BOTH sides, so the export-object total
+    equals the import per-object total. Tags stay in the supplementary block (they
+    are attributes on objects already counted, never part of the object total)."""
+    from openpyxl import load_workbook
+
+    objects = [
+        {"object_type": "CATALOG", "full_name": "c", "owner": "me",
+         "tags": {"cls": "INTERNAL"}, "grants": []},
+        {"object_type": "TABLE", "full_name": "c.s.t", "owner": "me",
+         "tags": {}, "grants": []},
+        {"object_type": "ABAC_POLICY", "full_name": "c.s.t#policy:p",
+         "definition": {"policy_name": "p", "policy_type": "COLUMN_MASK",
+                        "on_securable": "c.s.t", "function_name": "c.sec.m",
+                        "match_columns": [], "to_principals": [],
+                        "except_principals": []}},
+    ]  # 3 objects total (incl. the ABAC policy)
+    export_results = [
+        {"full_name": "c", "status": "SUCCESS"},
+        {"full_name": "c.s.t", "status": "SUCCESS"},
+        {"full_name": "c.s.t#policy:p", "status": "SUCCESS"},
+    ]
+    import_results = [
+        {"object_type": "CATALOG", "target_full_name": "c", "full_name": "c",
+         "status": "SUCCESS", "action": "CREATE_OR_SKIP"},
+        {"object_type": "TABLE", "target_full_name": "c.s.t", "full_name": "c.s.t",
+         "status": "SUCCESS", "action": "CREATE_OR_SKIP"},
+        # the ABAC policy — an OBJECT create (CREATE POLICY), counts per-object.
+        {"object_type": "ABAC_POLICY", "target_full_name": "c.s.t#policy:p",
+         "full_name": "c.s.t#policy:p", "status": "SUCCESS", "action": "CREATE_POLICY",
+         "policies_path": "/abac/x.sql"},
+        # a governed-tag op on the catalog — supplementary, NOT a per-object row.
+        {"object_type": "CATALOG", "target_full_name": "c", "full_name": "c",
+         "status": "SUCCESS", "action": "APPLY_TAGS",
+         "policies_path": "/tags/CATALOG_c.sql"},
+    ]
+    out = tmp_path / "r.xlsx"
+    build_report(objects, str(out), stage="IMPORT", run_id="r1",
+                 export_results=export_results, import_results=import_results)
+    summary = [tuple(r) for r in load_workbook(out)["Summary"].iter_rows(values_only=True)]
+
+    def _count(label, key):
+        # find the block header row, then read the key within that block
+        seen = False
+        for row in summary:
+            if row and row[0] == label:
+                seen = True
+                continue
+            if seen and row and row[0] == key:
+                return row[1]
+        return None
+
+    # export objects == import per-object == 3 (all incl. the ABAC policy). The
+    # governed-tag ALTER on the catalog is folded into the catalog's object status
+    # (SUCCESS here), NOT a separate tally.
+    assert _count("export_status", "SUCCESS") == 3
+    assert _count("import_status (per object)", "SUCCESS") == 3
+    flat = [str(c) for row in summary for c in row if c is not None]
+    assert "governed-tag operations" not in flat and "governance operations" not in flat
 
 
 def test_policy_matched_columns_derives_from_tags_within_scope(tmp_path):

@@ -135,25 +135,20 @@ def _tag_op_index(
     return idx
 
 
-def _is_governance_result(r: dict[str, Any]) -> bool:
-    """A governance-phase result (tag / ABAC / classic binding), not an object.
+def _is_tag_op_result(r: dict[str, Any]) -> bool:
+    """A governed-tag ``SET TAGS`` op — the only import result that is NOT an object.
 
-    Governance ops set ``policies_path``; ABAC results also carry object_type
-    ``ABAC_POLICY``. Object creation results set ``ddl_path`` instead, so this
-    keeps the per-object count clean.
+    A tag is an *attribute* on a securable that is already counted as an object
+    (its catalog / schema / table), so tallying it as an object too would double-
+    count — it belongs in the supplementary governed-tag block instead.
+
+    An **ABAC policy**, by contrast, is a distinct securable the utility creates
+    (its own ``CREATE POLICY``), so it counts as an OBJECT on import exactly as it
+    does on export — that keeps the export-object and import-object totals at
+    parity. Tag ops set ``policies_path`` and are not ``ABAC_POLICY``; ABAC results
+    set ``policies_path`` too but carry object_type ``ABAC_POLICY`` (excluded here).
     """
-    return bool(r.get("policies_path")) or str(r.get("object_type")) == "ABAC_POLICY"
-
-
-def _governance_bucket(r: dict[str, Any]) -> str:
-    """Bucket a governance result as APPLIED / FAILED / SKIPPED for the Summary."""
-    status = str(r.get("status") or "")
-    action = str(r.get("action") or "")
-    if status in ("FAILURE", "MANUAL_ACTION_REQUIRED"):
-        return "FAILED"
-    if action == "SKIP_EXISTING" or status.startswith("SKIP"):
-        return "SKIPPED"
-    return "APPLIED"
+    return bool(r.get("policies_path")) and str(r.get("object_type")) != "ABAC_POLICY"
 
 
 def _export_index(
@@ -492,14 +487,17 @@ def build_report(
         for k in sorted(st):
             ws.append([k, st[k]])
     if stage == "IMPORT" and import_results:
-        # Counts are split so export objects and import objects match: the
-        # import_status tally is PER OBJECT (each object's create result, which
-        # already folds in its governance outcome — a table dropped fail-closed
-        # shows FAILURE here). Governance work (tags / ABAC / classic bindings) is
-        # tallied separately as APPLIED / FAILED / SKIPPED so it is visible without
-        # being conflated with the object count.
-        object_results = [r for r in import_results if not _is_governance_result(r)]
-        gov_results = [r for r in import_results if _is_governance_result(r)]
+        # ONE import tally, at PARITY with the export-object total. A governance
+        # failure IS an object failure — the engine folds every tag / mask / row-
+        # filter / ABAC outcome into the status of the object it protects (a table
+        # whose tag failed is dropped → FAILURE; a catalog/schema/volume/view whose
+        # tag failed is marked FAILURE; a bad inline mask fails CREATE TABLE). ABAC
+        # policies are themselves objects (their own CREATE POLICY), counted here on
+        # both sides. So there is no separate governance section: every securable
+        # appears exactly once, and no object reads success if its governance failed.
+        # The per-tag detail still lives on the Tags sheet; governed-tag ALTER result
+        # rows are excluded here so they are not double-counted against their object.
+        object_results = [r for r in import_results if not _is_tag_op_result(r)]
         st: dict[str, int] = {}
         for r in object_results:
             st[r.get("status", "")] = st.get(r.get("status", ""), 0) + 1
@@ -507,14 +505,6 @@ def build_report(
         ws.append(["import_status (per object)", "count"])
         for k in sorted(st):
             ws.append([k, st[k]])
-        if gov_results:
-            gov = {"APPLIED": 0, "FAILED": 0, "SKIPPED": 0}
-            for r in gov_results:
-                gov[_governance_bucket(r)] += 1
-            ws.append([])
-            ws.append(["governance operations", "count"])
-            for k in ("APPLIED", "FAILED", "SKIPPED"):
-                ws.append([k, gov[k]])
 
     # Issues sheet (right after Summary): every non-success import op — a table
     # dropped fail-closed (PROTECTION_FAILED), a view that failed on its dropped
@@ -600,13 +590,18 @@ def build_report(
     def _grant_gov_status(*names: str) -> list[str]:
         """Grants sheet status ← APPLIED whenever the securable exists (grants run
         inline even when its create was skipped/disabled); FAILED only if the
-        securable's own create failed (plan P2-C). Never the create-skip label."""
+        securable's own create failed (plan P2-C). Never the create-skip label. In a
+        dry run nothing is applied, so it reads the same DRY RUN message as every
+        other sheet."""
         if stage != "IMPORT":
             return []
         entry = next((idx.get(n) for n in names if n and idx.get(n)), None)
         if not entry:
             return [""]
-        if entry.get("status") == "FAILURE":
+        status, action = entry.get("status"), entry.get("action")
+        if status == "PENDING" or action == "DRY_RUN":
+            return ["DRY RUN (validated, not applied)"]
+        if status == "FAILURE":
             return ["FAILED (object not created)"]
         return ["APPLIED"]
 

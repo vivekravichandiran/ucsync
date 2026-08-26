@@ -399,6 +399,16 @@ class PackageImportEngine:
         #    mutates its create result to FAILURE (PROTECTION_FAILED) in place.
         self._created_tables: dict[str, PackageImportResult] = {}
         self._failed_tables: dict[str, str] = {}
+        #  _created_objects: target_full_name -> the create PackageImportResult for
+        #    EVERY object this run touched (any type). A governed-tag failure on a
+        #    non-table securable (catalog/schema/volume/view) marks that object's
+        #    result FAILURE in place (no drop — dropping a catalog/schema is
+        #    destructive and it may hold succeeded children), so the failure shows
+        #    in the per-object count exactly like a dropped table does.
+        #  _failed_objects: target_full_name -> the governance feature that failed,
+        #    for those non-table securables.
+        self._created_objects: dict[str, PackageImportResult] = {}
+        self._failed_objects: dict[str, str] = {}
 
     # Object type → the create_* toggle that gates its creation.
     _CREATE_TOGGLE_FOR_TYPE = {
@@ -506,6 +516,8 @@ class PackageImportEngine:
         results: list[PackageImportResult] = []
         self._created_tables = {}
         self._failed_tables = {}
+        self._created_objects = {}
+        self._failed_objects = {}
         # ABAC scope metadata (file stem -> policy full name + on-securable), so an
         # ABAC failure can be mapped to the table(s) the policy protects for the
         # fail-closed drop sweep.
@@ -572,6 +584,15 @@ class PackageImportEngine:
             results.extend(self._apply_governance_dir(
                 "tags", "APPLY_TAGS", inventory, by_target, len(results),
                 type_predicate=lambda ot: ot in _VIEW_LIKE_TYPES))
+
+        # Phase 7 — fail (without dropping) every non-table securable a governance
+        # step failed on, plus any pre-existing table whose governance failed. A
+        # governance failure IS an object failure: the object's own create result is
+        # flipped to FAILURE in place so it shows in the per-object count, the Issues
+        # sheet, uc_sync_audit and uc_sync_state — never reported as success. (Fresh
+        # table shells were already dropped in Phase 4; catalogs/schemas/volumes/
+        # views and data-bearing tables are never dropped.)
+        self._mark_ungoverned_objects()
 
         # Ownership transfers run dead last, once every object exists and all
         # governance is applied, so the run principal never loses privileges it
@@ -799,6 +820,10 @@ class PackageImportEngine:
             and result.action == "CREATE_OR_SKIP"
         ):
             self._created_tables[target_full_name] = result
+        # Record every object's create result so a governed-tag failure on a
+        # non-table securable can mark it FAILURE in place (see _mark_failed_objects).
+        if target_full_name:
+            self._created_objects[target_full_name] = result
         return result
 
     def _abac_meta_by_stem(
@@ -849,24 +874,37 @@ class PackageImportEngine:
         meta: Optional[dict[str, str]],
         feature: str,
     ) -> bool:
-        """Record the table(s) a failed governance op leaves unprotected.
+        """Record the object(s) a failed governance op leaves unprotected.
 
-        Returns True if ≥1 table was recorded for the drop sweep — i.e. the failure
-        is on a table (classic/governed tag) or an ABAC policy that matches created
-        tables. A failure on a non-table securable (catalog/schema/volume/view)
-        records nothing and returns False.
+        A governed-tag failure fails the object it targets, on **every** type:
+        * a **table** is recorded for the drop sweep (dropped → FAILURE — fail-closed,
+          it is an empty shell this run created, so no data is lost);
+        * a **catalog / schema / volume / view** is recorded to be marked FAILURE in
+          place (never dropped — that would be destructive and it may hold succeeded
+          children).
+
+        For an **ABAC** failure (``CREATE_POLICY``) the ABAC policy is itself an
+        object whose own result already carries the FAILURE, so this only records the
+        matched table(s) to drop. Returns True if it recorded a table for the drop
+        sweep (kept for the caller's error-code choice).
         """
-        recorded = False
         if action_label == "CREATE_POLICY":
             policy = (meta or {}).get("full_name", "policy")
+            recorded = False
             for tbl in self._abac_matched_tables(meta):
                 self._failed_tables.setdefault(tbl, f"ABAC {policy} ({feature})")
                 recorded = True
             return recorded
         if object_type in _DROPPABLE_TABLE_TYPES:
-            self._failed_tables.setdefault(target_full_name, f"governed tag ({feature})")
-            recorded = True
-        return recorded
+            self._failed_tables.setdefault(
+                target_full_name, f"governed tag ({feature})"
+            )
+            return True
+        # Non-table securable: mark FAILURE in place (no drop).
+        self._failed_objects.setdefault(
+            target_full_name, f"governed tag ({feature})"
+        )
+        return False
 
     def _drop_failed_tables(self) -> None:
         """Drop every table a governance step failed on and flip its create result.
@@ -898,6 +936,34 @@ class PackageImportEngine:
             create_result.message = (
                 "table dropped (fail-closed): a governance step failed — "
                 f"{feature}"
+            )
+
+    def _mark_ungoverned_objects(self) -> None:
+        """Flip to FAILURE every object a governance step failed on that was NOT
+        dropped: catalog / schema / volume / view (never droppable), and any
+        pre-existing table (has data — never dropped). A governance failure is an
+        object failure, so the object's own result must never read success. The
+        create result is mutated in place so it reaches the per-object count, the
+        Issues sheet, uc_sync_audit and uc_sync_state.
+        """
+        if self.dry_run:
+            return
+        pending: dict[str, str] = dict(self._failed_objects)
+        # Pre-existing tables recorded for the (table) drop sweep but never dropped
+        # because they were not fresh shells this run created.
+        for target, feature in self._failed_tables.items():
+            if target not in self._created_tables:
+                pending.setdefault(target, feature)
+        for target_full_name, feature in pending.items():
+            result = self._created_objects.get(target_full_name)
+            if result is None or result.status == "FAILURE":
+                continue
+            result.status = "FAILURE"
+            result.action = "GOVERNANCE_FAILED"
+            result.error_code = "PROTECTION_FAILED"
+            result.message = (
+                "object not fully governed (fail-closed): a governance step "
+                f"failed — {feature}"
             )
 
     def _apply_governance_dir(

@@ -193,9 +193,11 @@ def test_failclosed_drops_and_propagates(tmp_path: Path):
         assert state["last_sync_status"] == "FAILURE"
 
 
-def test_failclosed_leaves_preexisting_table_untouched(tmp_path: Path):
-    """A pre-existing (SKIP_EXISTING) table whose tag fails is NOT dropped — only
-    empty shells this run created are droppable."""
+def test_failclosed_preexisting_table_marked_failed_not_dropped(tmp_path: Path):
+    """A pre-existing (SKIP_EXISTING) table whose tag fails is NEVER dropped (it may
+    hold data — only empty shells this run created are droppable), but its own status
+    is flipped to FAILURE: a governance failure is an object failure, so it must not
+    read success."""
     root = tmp_path / "migrated"
     _write(root, "ddl/TABLE_c__hr__pre.sql", "CREATE TABLE `c`.`hr`.`pre` (id INT);\n")
     _write(root, "tags/TABLE_c__hr__pre.sql",
@@ -215,10 +217,12 @@ def test_failclosed_leaves_preexisting_table_untouched(tmp_path: Path):
     sql = PreExistingSql(allowed_tags=set())
     results = PackageImportEngine(str(root), sql, dry_run=False).run()
     table_row = next(r for r in results if r.object_type == "TABLE")
-    # Pre-existing table stays SUCCESS/SKIP_EXISTING and is never dropped.
-    assert table_row.action == "SKIP_EXISTING"
-    assert table_row.status == "SUCCESS"
+    # Never dropped (has data)...
     assert not any("DROP TABLE" in s for s in sql.statements)
+    assert "c.hr.pre" in sql.tables
+    # ...but its status reflects the governance failure (not success).
+    assert table_row.status == "FAILURE"
+    assert table_row.error_code == "PROTECTION_FAILED"
 
 
 # --- #4 + #5 ABAC context + warehouse enforcement ---------------------------
@@ -313,6 +317,30 @@ def test_abac_dry_run_needs_no_warehouse(tmp_path: Path):
     ).run()
     abac_row = next(r for r in results if r.object_type == "ABAC_POLICY")
     assert abac_row.status == "PENDING"
+
+
+def test_governed_tag_failure_fails_the_catalog_object_without_drop(tmp_path: Path):
+    """A governed-tag failure on a non-table securable (here a catalog) marks THAT
+    object FAILURE — a governance failure is an object failure, on every type — but
+    the catalog is never dropped (destructive; may hold succeeded children)."""
+    root = tmp_path / "migrated"
+    _write(root, "ddl/CATALOG_c.sql", "CREATE CATALOG `c`;\n")
+    _write(root, "ddl/SCHEMA_c__hr.sql", "CREATE SCHEMA `c`.`hr`;\n")
+    _write(root, "tags/CATALOG_c.sql",
+           "ALTER CATALOG `c` SET TAGS ('missing_gov_tag' = 'x');\n")
+    _write(root, "inventory/objects.json", "[]")
+
+    sql = GovSql(allowed_tags={"allowed_only"})  # 'missing_gov_tag' not allowed
+    results = PackageImportEngine(str(root), sql, dry_run=False).run()
+    cat = next(r for r in results if r.object_type == "CATALOG")
+    schema = next(r for r in results if r.object_type == "SCHEMA")
+
+    # The catalog object itself is FAILURE (its governance failed)...
+    assert cat.status == "FAILURE"
+    assert cat.error_code == "PROTECTION_FAILED"
+    # ...but it is never dropped, and unrelated children are untouched.
+    assert not any("DROP" in s.upper() for s in sql.statements)
+    assert schema.status == "SUCCESS"
 
 
 # --- P2-B view-on-warehouse routing -----------------------------------------
