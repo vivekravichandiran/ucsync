@@ -50,6 +50,28 @@
    + create-as-SPN path in `package_import`). Repro: `testing/audit_rename.py` (grant-parity
    checks show it as `tgt_only` ALL_PRIVILEGES for the SPN).
 
+4. **Skipped external object mislabeled as fail-closed FAILURE (Mode B).** Found in the
+   2026-08-26 finance external-object test (rename `ai27_uc_finance` → `ai27_uc_finance_tgt`,
+   airgap, run 1 with **no** `object_locations`, run_id 240339694936437 / import run
+   319599302145590). When an external table/volume can't be placed (no `object_locations`
+   row) it is correctly reported `MANUAL_ACTION_REQUIRED` / `EXTERNAL_LOCATION_MISSING` and
+   is never created — GOOD. **But** if that same object also carries a **governed tag** or
+   is matched by a **tag-driven ABAC policy**, the downstream governance/fail-closed phase
+   still acts on it and marks it a second time as `FAILURE` / `PROTECTION_FAILED`
+   ("table dropped fail-closed") — even though it was never created and nothing was dropped.
+   Repro: `gl.accounts_ext` (has `ai27_uc_pii=BANK_ACCOUNT` col+table tag, matched by ABAC
+   `fin_mask_acct`) showed BOTH `MANUAL_ACTION_REQUIRED` and `FAILURE/PROTECTION_FAILED` in
+   the same report; `ap.invoices_ext` (inline classic mask only, no governed tag/ABAC)
+   correctly showed only `MANUAL_ACTION_REQUIRED`. Live target confirmed both absent, nothing
+   dropped. **How to handle:** an object whose create result is `MANUAL_ACTION_REQUIRED`
+   (intentionally skipped, not created) must be **excluded from the fail-closed governance
+   path** — its tag-apply and ABAC-match steps should be deferred/skipped, not treated as a
+   protection failure. In `package_import.py`: track skipped/manual objects (alongside
+   `_created_objects`/`_failed_objects`) and have the tag phase, `_abac_matched_tables` /
+   `_record_governance_failure`, and `_mark_ungoverned_objects()` skip any object in that set,
+   so it keeps a single `MANUAL_ACTION_REQUIRED` status (no double-count, no false
+   `PROTECTION_FAILED`). The report should list such an object once, as manual/deferred.
+
 ## Context / references
 - Verified-clean full-E2E baseline: memory `governance-failclosed-plan`
   ("FULL MODE A E2E — VERIFIED CLEAN 2026-08-26").
