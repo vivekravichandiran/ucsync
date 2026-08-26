@@ -6,6 +6,13 @@
 # MAGIC a manifest + checksums. Run on the **source** workspace (airgap) or current
 # MAGIC workspace (direct). In airgap the whole `run_<id>/` directory is what the
 # MAGIC operator moves to the target.
+# MAGIC
+# MAGIC **A SQL warehouse is required in BOTH modes** (`source_warehouse_id`): all
+# MAGIC full-fidelity DDL capture runs `SHOW CREATE` on the warehouse — a classic
+# MAGIC Spark cluster is flaky on masked/row-filtered tables, and a failed capture is
+# MAGIC a **hard failure** (no silent synthesized fallback that would drop
+# MAGIC masks/row filters/constraints). Functions are captured from
+# MAGIC `information_schema` over the same warehouse.
 
 # COMMAND ----------
 
@@ -78,25 +85,27 @@ for d in json.load(open(_local(f"{base}/bundle/inventory.json"))):
 
 # COMMAND ----------
 
-# SHOW CREATE reads run against the workspace that owns the objects. In direct mode
-# this job runs on the target, so — like 01_Inventory — capture DDL over the source
-# workspace's SQL warehouse. In airgap mode this notebook runs on the source, so the
-# local Spark session already sees the objects.
+# DDL capture is warehouse-only in BOTH connectivity modes (plan P2-A): SHOW CREATE
+# runs reliably on governed tables on a SQL warehouse but is flaky on a classic
+# Spark cluster, and there is no synthesized fallback for tables/views (a failed
+# capture is a hard failure). So source_warehouse_id is REQUIRED here.
+#   - direct: the job runs on the target; reach the source over its warehouse.
+#   - airgap: the job runs on the source; use a local client + the source warehouse.
+if not cfg.source_warehouse_id:
+    raise ValueError(
+        "source_warehouse_id is required for export: full-fidelity SHOW CREATE DDL "
+        "is captured over a SQL warehouse in both direct and airgap modes (a classic "
+        "Spark cluster is unreliable on masked/row-filtered tables, and a failed "
+        "capture is a hard failure — there is no synthesized fallback)."
+    )
 if cfg.source_workspace_url:
     secret = cfg.source_client_secret
     if not secret and cfg.source_secret_scope and cfg.source_secret_key:
         secret = dbutils.secrets.get(scope=cfg.source_secret_scope, key=cfg.source_secret_key)
     source = WorkspaceClient(direct_workspace_auth(cfg.source_workspace_url, cfg.source_client_id, secret))
-    if not cfg.source_warehouse_id:
-        raise ValueError(
-            "source_warehouse_id is required to export a remote source: full-fidelity "
-            "SHOW CREATE DDL is captured via the source workspace's SQL warehouse "
-            "(Spark on this job runs against the target). Falls back to synthesized "
-            "DDL from inventory if omitted."
-        )
-    ddl_sql = RestSqlExecutor(source, cfg.source_warehouse_id)
 else:
-    ddl_sql = SparkSqlExecutor(spark)
+    source = WorkspaceClient(local_workspace_auth(dbutils))
+ddl_sql = RestSqlExecutor.for_ddl_capture(source, cfg.source_warehouse_id)
 
 # Capture full-fidelity DDL + governance artifacts, then path-rewrite to target.
 export_root = f"{base}/export"

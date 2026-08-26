@@ -8,10 +8,10 @@
 | Schema | ✅ same name (`create_schemas`) | grants, tags, ABAC | |
 | Volume (managed) | ✅ (`create_volumes`) | grants, tags | Files not copied. |
 | External volume | ✅ (`create_volumes`) | grants, tags | `CREATE EXTERNAL VOLUME` at the path-rewritten target location; its covering external location is created too (from the mapping). Volume **files** are not copied. |
-| Function (incl. mask/filter UDFs) | ✅ (`create_functions`) | grants | Created before the masks/policies that reference them. |
-| **Managed table (full definition, no data)** | ✅ (`create_tables`) | tags, ABAC, classic masks/filters, grants | Full fidelity via `SHOW CREATE`: columns/types/nullability, comments, user `TBLPROPERTIES`, partitioning, clustering, constraints (PK/CHECK), generated & identity columns. Data is out of scope. |
-| External table | ✅ (`create_tables`) | grants | Path rewritten; requires a location mapping. |
-| View / dynamic view | ✅ (`create_views`) | grants, tags | Definition from `SHOW CREATE`. Pending if a referenced object isn't present yet. |
+| Function (incl. mask/filter UDFs) | ✅ (`create_functions`) | grants | Captured from `information_schema.routines`+`.parameters` over the warehouse (lossless). Created before the masks/policies that reference them. |
+| **Managed table (full definition, no data)** | ✅ (`create_tables`) | tags, ABAC, classic masks/filters (INLINE), grants | Full fidelity via `SHOW CREATE` **on the SQL warehouse** (`source_warehouse_id`): columns/types/nullability, comments, inline `MASK`/`WITH ROW FILTER`, user `TBLPROPERTIES`, partitioning, clustering, constraints (PK/CHECK), generated & identity columns. If `SHOW CREATE` fails after retries the object is a **hard `FAILURE`** (`DDL_CAPTURE_FAILED`) — no synthesized fallback. Data is out of scope. |
+| External table | ✅ (`create_tables`) | grants | Path rewritten; requires a location mapping. `SHOW CREATE` on the warehouse (hard-fail, as above). |
+| View / dynamic view | ✅ (`create_views`) | grants, tags | Definition from `SHOW CREATE` on the warehouse (hard-fail, as above). **Created on the SQL warehouse** (`import_warehouse_id`) at import — classic Spark errors on a view over a masked/row-filtered table. Fails naturally if a referenced object isn't present. |
 | Metric view | ✅ (`create_views`) | grants | YAML definition replayed. |
 | Materialized view / streaming table | ❌ (pipeline-backed) | governance applied once they exist | No create path. |
 | **Governed tags (assignments)** | — | ✅ `SET TAGS` at catalog/schema/table/column/volume | Definition must exist at account level (else `GOVERNANCE_PREREQ_MISSING`). |

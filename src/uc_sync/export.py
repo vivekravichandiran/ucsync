@@ -18,6 +18,7 @@ from uc_sync.models import ObjectType, UCObject
 from uc_sync.sql_ddl import (
     create_ddl_for_object,
     format_ddl_file,
+    function_ddl_from_information_schema,
     grant_statements_for_object,
     policy_statements_for_object,
     prefers_show_create,
@@ -25,6 +26,31 @@ from uc_sync.sql_ddl import (
     show_create_command,
     supports_show_create,
 )
+
+
+class DdlCaptureError(RuntimeError):
+    """A full-fidelity DDL capture (SHOW CREATE) that failed after all retries.
+
+    Raised for the table/view family, where synthesizing DDL from inventory would
+    silently drop column masks / row filters / constraints / generated / identity /
+    partition / clustering. Per plan P2-A there is NO synthesized fallback for these
+    types — the object is a hard FAILURE and the operator re-runs.
+    """
+
+
+# The table/view family whose ONLY full-fidelity source is SHOW CREATE. A capture
+# failure for one of these is a hard FAILURE (never a synthesized rebuild, which
+# would silently strip classic masks / row filters / constraints). Metric views
+# are intentionally excluded: they carry only YAML (no masks/constraints are
+# possible), so synthesizing them from the captured definition is lossless.
+_HARD_FAIL_SHOW_CREATE_TYPES = {
+    "TABLE",
+    "EXTERNAL_TABLE",
+    "VIEW",
+    "DYNAMIC_VIEW",
+    "MATERIALIZED_VIEW",
+    "STREAMING_TABLE",
+}
 
 
 @dataclass
@@ -279,12 +305,19 @@ class ExportService:
                     )
                 )
             except Exception as exc:  # noqa: BLE001 - report per-object errors
+                # A hard DDL-capture failure (no synth fallback, P2-A) gets a
+                # dedicated code so the report / Issues sheet names it clearly.
+                error_code = (
+                    "DDL_CAPTURE_FAILED"
+                    if isinstance(exc, DdlCaptureError)
+                    else type(exc).__name__
+                )
                 results.append(
                     ExportItemResult(
                         object_type=obj.object_type.value,
                         full_name=obj.full_name,
                         status="ERROR",
-                        error_code=type(exc).__name__,
+                        error_code=error_code,
                         error_message=str(exc),
                     )
                 )
@@ -385,49 +418,75 @@ class ExportService:
     def _capture_object_ddl(
         self, obj: UCObject, warnings: list[str]
     ) -> tuple[str | None, str | None]:
-        """Return (ddl_text, source) using SHOW CREATE when possible."""
+        """Return ``(ddl_text, source)``, warehouse-only for the DDL-bearing types.
 
-        tried_show = False
-        show_error: Exception | None = None
-        if self.sql is not None and supports_show_create(obj.object_type):
-            tried_show = True
+        Plan P2-A — capture is warehouse-only, with NO silent fidelity downgrade:
+
+        * **Functions** are read from ``information_schema`` over the warehouse
+          (lossless — functions carry no masks). If that read cannot be completed
+          the DDL is synthesized from the stage-01 inventory (equally lossless).
+        * **Table/view family** (``_HARD_FAIL_SHOW_CREATE_TYPES``) is captured via
+          ``SHOW CREATE`` on the warehouse (retries + backoff live in the executor).
+          A failure is a **hard FAILURE** (``DdlCaptureError``) — never a synthesized
+          rebuild, which would silently strip masks / row filters / constraints.
+        * **Everything else** (catalogs, schemas, volumes, external locations,
+          storage credentials, metric views) is synthesized from inventory — SQL
+          cannot produce it, and none of it carries classic protection.
+        """
+
+        otype = obj.object_type.value
+
+        if otype == "FUNCTION":
+            if self.sql is not None:
+                try:
+                    ddl = function_ddl_from_information_schema(
+                        self.sql, obj.full_name
+                    )
+                except Exception:  # noqa: BLE001 - fall back to synthesis below
+                    ddl = None
+                if ddl:
+                    return (
+                        format_ddl_file(
+                            obj,
+                            ddl,
+                            source="INFORMATION_SCHEMA",
+                            command="information_schema.routines/parameters",
+                        ),
+                        "INFORMATION_SCHEMA",
+                    )
+            synthesized = create_ddl_for_object(obj)
+            if synthesized:
+                return (
+                    format_ddl_file(obj, synthesized, source="SYNTHESIZED"),
+                    "SYNTHESIZED",
+                )
+            return None, None
+
+        if otype in _HARD_FAIL_SHOW_CREATE_TYPES:
+            if self.sql is None:
+                raise DdlCaptureError(
+                    "a SQL warehouse (sql_executor) is required to capture "
+                    f"full-fidelity DDL for {otype} {obj.full_name}"
+                )
             try:
-                ddl = self._capture_show_create(obj)
-                return ddl, "SHOW_CREATE"
-            except Exception as exc:  # noqa: BLE001
-                # SHOW CREATE may be unavailable for benign reasons — the object
-                # is not reachable on this compute (direct-mode export runs on
-                # the target, where the source objects do not yet exist), or the
-                # type has no SHOW CREATE (functions). This is NOT a warning on
-                # its own: we fall back to synthesizing the DDL from the stage-01
-                # inventory below and only surface a problem if that also fails.
-                show_error = exc
+                return self._capture_show_create(obj), "SHOW_CREATE"
+            except Exception as exc:  # noqa: BLE001 - no synth fallback for these
+                raise DdlCaptureError(
+                    f"SHOW CREATE failed for {otype} {obj.full_name} after retries; "
+                    "no synthesized fallback (it would drop masks / row filters / "
+                    f"constraints). Re-run once the warehouse is warm: {exc}"
+                ) from exc
 
         synthesized = create_ddl_for_object(obj)
         if synthesized:
             source = (
                 "SYNTHESIZED_MANUAL"
-                if obj.object_type.value == "STORAGE_CREDENTIAL"
-                and "MANUAL:" in synthesized
+                if otype == "STORAGE_CREDENTIAL" and "MANUAL:" in synthesized
                 else "SYNTHESIZED"
             )
             return (
-                format_ddl_file(
-                    obj,
-                    synthesized,
-                    source=source,
-                    command="",
-                ),
+                format_ddl_file(obj, synthesized, source=source, command=""),
                 source,
-            )
-
-        # No DDL at all (e.g. materialized view / streaming table, which cannot be
-        # synthesized and need SHOW CREATE). Now the SHOW CREATE failure is a real
-        # problem worth flagging on the object's row.
-        if tried_show and prefers_show_create(obj.object_type):
-            detail = f": {show_error}" if show_error else ""
-            warnings.append(
-                f"DDL_UNAVAILABLE: SHOW CREATE failed and no synthesis available{detail}"
             )
         return None, None
 

@@ -188,6 +188,54 @@ def test_storage_sheets_status_skipped_vs_created(tmp_path):
     assert "SKIPPED" in loc[1][-1]                        # not created by utility
 
 
+def test_tags_and_grants_status_reflect_governance_not_create_skip(tmp_path):
+    """Plan P2-C: on a SKIP_CREATE_DISABLED catalog (existing-catalog mode) the
+    Tags status is the APPLY_TAGS op result and the Grants status is APPLIED —
+    never 'not created by utility' (which is the catalog's create-skip label). A
+    failed tag on a table reads FAILED."""
+    objects = [
+        {"object_type": "CATALOG", "full_name": "c", "owner": "me",
+         "tags": {"cls": "INTERNAL"},
+         "grants": [{"principal": "account users", "principal_type": "GROUP",
+                     "privileges": ["USE_CATALOG"]}]},
+        {"object_type": "TABLE", "full_name": "c.s.bad", "owner": "me",
+         "tags": {"missing": "x"}, "grants": []},
+    ]
+    import_results = [
+        # Catalog create was skipped (existing-catalog mode), grants/tags still ran.
+        {"object_type": "CATALOG", "target_full_name": "c", "full_name": "c",
+         "status": "SUCCESS", "action": "SKIP_CREATE_DISABLED"},
+        {"object_type": "TABLE", "target_full_name": "c.s.bad",
+         "full_name": "c.s.bad", "status": "SUCCESS", "action": "CREATE_OR_SKIP"},
+        # Governance ops: catalog tag applied; the table's tag failed.
+        {"object_type": "CATALOG", "target_full_name": "c", "full_name": "c",
+         "status": "SUCCESS", "action": "APPLY_TAGS",
+         "policies_path": "/tags/CATALOG_c.sql"},
+        {"object_type": "TABLE", "target_full_name": "c.s.bad",
+         "full_name": "c.s.bad", "status": "FAILURE", "action": "MANUAL",
+         "error_code": "PROTECTION_FAILED", "policies_path": "/tags/TABLE_c__s__bad.sql",
+         "message": "unknown tag"},
+    ]
+    out = tmp_path / "r.xlsx"
+    build_report(objects, str(out), import_results=import_results, run_id="r1")
+    from openpyxl import load_workbook
+    wb = load_workbook(out)
+
+    # Tags: the catalog tag reads applied (APPLY_TAGS), NOT "not created by utility".
+    tag_rows = list(wb["Tags"].iter_rows(values_only=True))
+    cat_tag = next(r for r in tag_rows[1:] if r[0] == "c")
+    assert "not created by utility" not in str(cat_tag[-1])
+    assert "APPLY_TAGS" in str(cat_tag[-1]) or "SUCCESS" in str(cat_tag[-1])
+    bad_tag = next(r for r in tag_rows[1:] if r[0] == "c.s.bad")
+    assert "FAILED" in str(bad_tag[-1])
+
+    # Grants: the catalog grant reads APPLIED (create skipped, grant ran), never
+    # "not created by utility".
+    grant_rows = list(wb["Grants"].iter_rows(values_only=True))
+    cat_grant = next(r for r in grant_rows[1:] if r[0] == "c")
+    assert cat_grant[-1] == "APPLIED"
+
+
 def test_stage_status_columns(tmp_path):
     """Each stage's report is the base for the next: inventory has no status
     column, export adds export_status, import carries export_status forward and

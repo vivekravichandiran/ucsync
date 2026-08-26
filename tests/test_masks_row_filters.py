@@ -273,11 +273,20 @@ def test_migrate_preserves_policy_alter_statements(tmp_path: Path):
 # ---- export writes the policies artifact ------------------------------------
 
 
+class _TableShowCreate:
+    """A warehouse executor that answers SHOW CREATE for the policy fixture table
+    (tables are captured warehouse-only now — plan P2-A)."""
+
+    def show_create(self, object_type: str, full_name: str) -> str:
+        return f"CREATE TABLE {full_name} (ssn STRING) USING DELTA"
+
+
 def test_export_writes_policy_files(tmp_path: Path):
     volume = tmp_path / "vol"
     workspace = tmp_path / "ws"
     result = ExportService(
-        str(volume), "run1", workspace_root=str(workspace)
+        str(volume), "run1", workspace_root=str(workspace),
+        sql_executor=_TableShowCreate(),
     ).run([_table_with_policies()], dry_run=False)
 
     assert result["policy_files"] == 1

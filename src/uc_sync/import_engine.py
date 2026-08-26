@@ -147,6 +147,27 @@ class RestSqlExecutor:
         self.retry_base_seconds = retry_base_seconds
         self.poll_cap_seconds = poll_cap_seconds
 
+    @classmethod
+    def for_ddl_capture(
+        cls, client: "WorkspaceClient", warehouse_id: str
+    ) -> "RestSqlExecutor":
+        """A ``RestSqlExecutor`` tuned for export-stage ``SHOW CREATE`` capture.
+
+        DDL capture is warehouse-only and has no synthesized fallback (plan P2-A),
+        so it must ride out a cold-warehouse warm-up and transient statement states
+        rather than give up early: more retries, a longer per-statement deadline,
+        and a slightly larger backoff base than the governance-read defaults. SHOW
+        CREATE is an idempotent read, so retrying is always safe.
+        """
+
+        return cls(
+            client,
+            warehouse_id,
+            max_retries=6,
+            retry_base_seconds=2.0,
+            max_wait_seconds=900.0,
+        )
+
     def execute(self, sql: str) -> list[list[Any]]:
         last_err: Optional[Exception] = None
         for attempt in range(self.max_retries + 1):

@@ -66,14 +66,24 @@ give the widget values; you can also run the three stage notebooks directly.
 Common widgets: `output_volume_path` (bundle + reports), `ops_catalog` +
 `ops_schema` (audit/state tables), `run_id` (from Inventory; reuse for Export +
 Import), `mapping_file_path` (storage-cred + location CSV, § configuration.md), and
-`source_warehouse_id` (SQL warehouse for tags + ABAC reads — **required in every mode,
-including airgap**, or ABAC policies export empty; § configuration.md).
+`source_warehouse_id` (SQL warehouse — **required for export in every mode, including
+airgap**; § configuration.md).
+
+**`source_warehouse_id` (stages 01 + 02)** — a SQL warehouse on the **source**
+workspace. **Required for export** in both modes: all full-fidelity DDL capture runs
+on it (`SHOW CREATE` for the table/view family; functions from `information_schema`).
+A classic Spark cluster is flaky on masked/row-filtered tables, and a failed capture
+is a **hard failure** (`DDL_CAPTURE_FAILED`) with no synthesized fallback — re-run
+once the warehouse is warm. It is also what stage 01 uses to read tags + ABAC.
 
 **`import_warehouse_id` (stage 03)** — a SQL warehouse on the **target** workspace.
 `CREATE POLICY` is rejected on a classic Spark cluster, so the ABAC phase runs on
-this warehouse. **Required whenever the bundle has ABAC policies** — if it is unset,
-those policies fail closed and the tables they would have protected are **dropped**
-(this is the fail-closed guarantee, not a bug). Not needed if the bundle has no ABAC.
+this warehouse; the **view-creation phase** runs on it too (classic Spark errors on a
+`CREATE VIEW` over a masked/row-filtered table). **Required whenever the bundle has
+ABAC policies** — if unset, those fail closed and the tables they would have protected
+are **dropped** (the fail-closed guarantee, not a bug) — and strongly recommended
+whenever the bundle has views over masked tables. Not needed if the bundle has no
+ABAC and no masked-table views.
 
 **Fail-closed:** the import applies protection as early as possible and never lets a
 partially-protected table survive. Classic masks / row filters ride **inline** in
@@ -127,8 +137,10 @@ them). Only that subtree is migrated.
 
 ### Scenario 5 — Airgap (no network between regions)
 1. Run **01 + 02** on the **source** workspace (`connectivity_mode=airgap`).
-   **Set `source_warehouse_id`** to a SQL warehouse on the source, or ABAC policies
-   export **empty** (classic job-cluster Spark can't read `abac_policy_definitions`).
+   **`source_warehouse_id` is required** — a SQL warehouse on the source. Export
+   captures all DDL over it (`SHOW CREATE` + functions from `information_schema`); a
+   classic job cluster is unreliable on masked tables and can't read
+   `abac_policy_definitions`. Without it, export fails fast.
 2. Move the whole `run_<id>/` directory to the target (download/upload the volume
    folder). Verify `manifest.json` + `checksums/` are present.
 3. Run **03** on the **target** workspace pointing at the moved `run_<id>/`.

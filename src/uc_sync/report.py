@@ -105,6 +105,36 @@ def _import_index(
     return idx
 
 
+def _tag_op_index(
+    import_results: Iterable[dict[str, Any]],
+) -> dict[str, dict[str, str]]:
+    """Map securable name → its ``APPLY_TAGS`` governance-op result.
+
+    The Tags sheet's status must reflect whether the tag was actually applied, NOT
+    the securable's create outcome: in existing-catalog mode a catalog/schema create
+    is ``SKIP_CREATE_DISABLED`` while its tags are still applied, and keying off the
+    create result wrongly rendered "not created by utility" (plan P2-C). Tag ops are
+    the governance results that carry a ``policies_path`` and are not ABAC
+    (``ABAC_POLICY``) — there is one tag file per securable.
+    """
+    idx: dict[str, dict[str, str]] = {}
+    for r in import_results or []:
+        if not r.get("policies_path"):
+            continue
+        if str(r.get("object_type")) == "ABAC_POLICY":
+            continue
+        entry = {
+            "status": str(r.get("status") or ""),
+            "action": str(r.get("action") or ""),
+            "message": str(r.get("message") or ""),
+        }
+        for key in (r.get("target_full_name"), r.get("full_name")):
+            key = str(key or "")
+            if key and key not in idx:
+                idx[key] = entry
+    return idx
+
+
 def _is_governance_result(r: dict[str, Any]) -> bool:
     """A governance-phase result (tag / ABAC / classic binding), not an object.
 
@@ -406,6 +436,7 @@ def build_report(
 
     export_idx = _export_index(export_results or [])
     idx = _import_index(import_results or [])
+    tag_idx = _tag_op_index(import_results or [])
 
     def _status_headers() -> list[str]:
         headers: list[str] = []
@@ -559,10 +590,30 @@ def build_report(
         entry = next((idx.get(n) for n in names if n and idx.get(n)), None)
         return [_render_import_status(entry)]
 
+    def _tag_gov_status(*names: str) -> list[str]:
+        """Tags sheet status ← the actual APPLY_TAGS op (never the create-skip)."""
+        if stage != "IMPORT":
+            return []
+        entry = next((tag_idx.get(n) for n in names if n and tag_idx.get(n)), None)
+        return [_render_import_status(entry)]
+
+    def _grant_gov_status(*names: str) -> list[str]:
+        """Grants sheet status ← APPLIED whenever the securable exists (grants run
+        inline even when its create was skipped/disabled); FAILED only if the
+        securable's own create failed (plan P2-C). Never the create-skip label."""
+        if stage != "IMPORT":
+            return []
+        entry = next((idx.get(n) for n in names if n and idx.get(n)), None)
+        if not entry:
+            return [""]
+        if entry.get("status") == "FAILURE":
+            return ["FAILED (object not created)"]
+        return ["APPLIED"]
+
     # Tags (object + column grain)
     tags = _sheet("Tags", ["object", "level", "column", "key", "value"] + _gov_status_header())
     for o in objects:
-        st = _gov_status(o["full_name"], str(o.get("target_full_name") or ""))
+        st = _tag_gov_status(o["full_name"], str(o.get("target_full_name") or ""))
         for k, v in (o.get("tags") or {}).items():
             tags.append([o["full_name"], o["object_type"], "", k, v] + st)
         for col, ctags in ((o.get("definition") or {}).get("column_tags") or {}).items():
@@ -668,7 +719,7 @@ def build_report(
         ["object", "level", "principal", "type", "privileges"] + _gov_status_header(),
     )
     for o in objects:
-        st = _gov_status(o["full_name"], str(o.get("target_full_name") or ""))
+        st = _grant_gov_status(o["full_name"], str(o.get("target_full_name") or ""))
         for g in o.get("grants") or []:
             grants.append([
                 o["full_name"], o["object_type"], g.get("principal"),

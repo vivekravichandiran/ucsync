@@ -355,6 +355,12 @@ class PackageImportEngine:
             if (abac_sql_executor is not None and self.catalog_mapping)
             else abac_sql_executor
         )
+        # Views over masked / row-filtered tables are rejected on a classic Spark
+        # cluster but succeed on a SQL warehouse (the mask/filter is bound to the
+        # base table and evaluated on read, including through the view). So the
+        # view-creation phase runs on the warehouse executor when one is supplied
+        # (reuse the ABAC warehouse); otherwise it falls back to the main executor.
+        self.warehouse_sql = self.abac_sql
         # Optional import-time TABLE scope filter (catalog/schema scoping is done
         # upstream at inventory via the `catalogs`/`schemas` selection). Empty =
         # import every table. Only table-like securables are narrowed; the
@@ -367,6 +373,9 @@ class PackageImportEngine:
             self.toggles["apply_grants"] = apply_grants
         self.apply_grants = self.toggles["apply_grants"]
         self._context: tuple[str, str] = ("", "")
+        # The warehouse executor is a SEPARATE SQL session, so it keeps its own
+        # USE CATALOG / USE SCHEMA context independent of the main executor's.
+        self._wh_context: tuple[str, str] = ("", "")
         # Ownership (`ALTER … OWNER TO`) transfers are deferred to a final phase so
         # the run principal keeps CREATE/MODIFY on each securable while it is still
         # building children and applying governance. Each entry is
@@ -545,10 +554,17 @@ class PackageImportEngine:
         self._drop_failed_tables()
 
         # Phase 5 — views / matviews, now that governed tables are settled. A view
-        # on a dropped table fails naturally (its table is gone).
+        # on a dropped table fails naturally (its table is gone). Views run on the
+        # warehouse executor when supplied (a classic Spark cluster errors on a
+        # CREATE VIEW over a masked/row-filtered base table); otherwise on the main
+        # executor. Its DDL, session context, existence probe, and ordinary grants
+        # all route to that executor.
         for path in view_files:
             results.append(
-                self._import_ddl_file(path, len(results) + 1, inventory, by_target)
+                self._import_ddl_file(
+                    path, len(results) + 1, inventory, by_target,
+                    executor=self.warehouse_sql,
+                )
             )
 
         # Phase 6 — governed tags on view-like objects (their securable now exists).
@@ -569,13 +585,21 @@ class PackageImportEngine:
         order: int,
         inventory: dict[str, dict[str, Any]],
         by_target: dict[str, dict[str, Any]],
+        *,
+        executor: Any = None,
     ) -> "PackageImportResult":
         """Create one object from its ``ddl/<name>.sql`` file.
 
         Records tables THIS run actually creates (a fresh ``CREATE_OR_SKIP`` on a
         ``TABLE``/``EXTERNAL_TABLE``) in ``self._created_tables`` so the fail-closed
         drop sweep can undo them if their governance later fails.
+
+        ``executor`` overrides the SQL executor (the view phase passes the warehouse
+        executor so CREATE VIEW over a masked table succeeds); it defaults to the
+        main executor. The object's DDL, ``USE`` context, existence probe, and
+        ordinary grants all run on that executor.
         """
+        exec_sql = executor if executor is not None else self.sql
         object_type, parsed_name = _parse_sql_filename(path.name)
         target_full_name = self._map_name(parsed_name)
         if not self._in_scope(object_type, target_full_name):
@@ -651,7 +675,10 @@ class PackageImportEngine:
                 result.status = "SUCCESS"
                 result.action = "SKIP_CREATE_DISABLED"
                 if not self.dry_run:
-                    grant_warning = self._apply_grants_file(grants_path, object_type, target_full_name)
+                    grant_warning = self._apply_grants_file(
+                        grants_path, object_type, target_full_name,
+                        executor=executor,
+                    )
                     result.message = (
                         "create disabled by toggle; assumed pre-existing"
                         + (f"; grant warning: {grant_warning}" if grant_warning else "")
@@ -692,24 +719,28 @@ class PackageImportEngine:
                 # SHOW CREATE emits two-part names, so without an explicit
                 # context they would resolve against the workspace default
                 # catalog instead of the mapped target.
-                self._apply_context(object_type, target_full_name)
+                self._apply_context(
+                    object_type, target_full_name, executor=executor
+                )
                 skipped_existing = False
                 for statement in statements:
                     try:
-                        self.sql.execute(statement)
+                        exec_sql.execute(statement)
                     except Exception as exec_exc:  # noqa: BLE001
                         if _is_already_exists_error(str(exec_exc)):
                             skipped_existing = True
                             continue
                         raise
                 if skipped_existing and not self._object_exists(
-                    object_type, target_full_name
+                    object_type, target_full_name, executor=executor
                 ):
                     raise RuntimeError(
                         "create reported an existing object but "
                         f"{target_full_name} is not present in the target"
                     )
-                grant_warning = self._apply_grants_file(grants_path, object_type, target_full_name)
+                grant_warning = self._apply_grants_file(
+                    grants_path, object_type, target_full_name, executor=executor
+                )
                 if grant_warning and _is_not_found_error(grant_warning):
                     # Grants cannot resolve an object that was never created.
                     raise RuntimeError(
@@ -728,7 +759,9 @@ class PackageImportEngine:
                     )
         except Exception as exc:  # noqa: BLE001
             message = str(exc)
-            exists = self._object_exists(object_type, target_full_name)
+            exists = self._object_exists(
+                object_type, target_full_name, executor=executor
+            )
             # Idempotent re-runs: if the mapped securable is already present,
             # treat create conflicts (managed-location / overlap) as skips.
             if exists and (
@@ -736,7 +769,9 @@ class PackageImportEngine:
                 or _is_location_conflict_error(message)
                 or _is_already_exists_error(message)
             ):
-                grant_warning = self._apply_grants_file(grants_path, object_type, target_full_name)
+                grant_warning = self._apply_grants_file(
+                    grants_path, object_type, target_full_name, executor=executor
+                )
                 result.status = "SUCCESS"
                 result.action = "SKIP_EXISTING"
                 result.error_code = ""
@@ -1020,19 +1055,27 @@ class PackageImportEngine:
         return results
 
     def _apply_grants_file(
-        self, grants_path: Path, object_type: str = "", target_full_name: str = ""
+        self,
+        grants_path: Path,
+        object_type: str = "",
+        target_full_name: str = "",
+        *,
+        executor: Any = None,
     ) -> str:
         """Run a grants file; return the last warning, if any.
 
-        Ordinary ``GRANT … TO`` statements run inline. ``ALTER … OWNER TO``
-        transfers are **queued** for a final ownership phase instead of running
-        here, so the run principal keeps CREATE/MODIFY on the securable while it is
-        still building children and applying governance (handing an external
-        location or catalog to its source owner mid-run would strip the very
-        privileges the next create/ALTER needs — the CREATE MANAGED STORAGE bug).
+        Ordinary ``GRANT … TO`` statements run inline (on ``executor`` when given —
+        e.g. a view's grants run on the warehouse executor that created it — else on
+        the main executor). ``ALTER … OWNER TO`` transfers are **queued** for a final
+        ownership phase instead of running here, so the run principal keeps
+        CREATE/MODIFY on the securable while it is still building children and
+        applying governance (handing an external location or catalog to its source
+        owner mid-run would strip the very privileges the next create/ALTER needs —
+        the CREATE MANAGED STORAGE bug).
         """
         if not (self.apply_grants and grants_path.exists()):
             return ""
+        exec_sql = executor if executor is not None else self.sql
         warning = ""
         for statement in _split_statements(
             grants_path.read_text(encoding="utf-8")
@@ -1043,7 +1086,7 @@ class PackageImportEngine:
                 )
                 continue
             try:
-                self.sql.execute(statement)
+                exec_sql.execute(statement)
             except Exception as grant_exc:  # noqa: BLE001
                 warning = str(grant_exc)
         return warning
@@ -1195,7 +1238,9 @@ class PackageImportEngine:
             flags=re.IGNORECASE,
         )
 
-    def _apply_context(self, object_type: str, target_full_name: str) -> None:
+    def _apply_context(
+        self, object_type: str, target_full_name: str, *, executor: Any = None
+    ) -> None:
         parts = str(target_full_name or "").split(".")
         catalog = parts[0] if len(parts) > 1 else ""
         schema = parts[1] if len(parts) > 2 else ""
@@ -1207,20 +1252,33 @@ class PackageImportEngine:
             "CATALOG", "STORAGE_CREDENTIAL", "EXTERNAL_LOCATION", "ABAC_POLICY",
         }:
             return
-        if (catalog, schema) == self._context or not catalog:
+        if not catalog:
             return
-        self.sql.execute(f"USE CATALOG `{catalog}`")
+        # The warehouse executor is a distinct SQL session with its own USE context,
+        # so track (and compare against) a separate cache — never the main session's.
+        exec_sql = executor if executor is not None else self.sql
+        on_warehouse = executor is not None and executor is self.warehouse_sql
+        cache = self._wh_context if on_warehouse else self._context
+        if (catalog, schema) == cache:
+            return
+        exec_sql.execute(f"USE CATALOG `{catalog}`")
         if schema:
-            self.sql.execute(f"USE SCHEMA `{schema}`")
-        self._context = (catalog, schema)
+            exec_sql.execute(f"USE SCHEMA `{schema}`")
+        if on_warehouse:
+            self._wh_context = (catalog, schema)
+        else:
+            self._context = (catalog, schema)
 
-    def _object_exists(self, object_type: str, target_full_name: str) -> bool:
+    def _object_exists(
+        self, object_type: str, target_full_name: str, *, executor: Any = None
+    ) -> bool:
         """Best-effort existence probe; only a NOT_FOUND error proves absence."""
         if not target_full_name:
             return True
+        exec_sql = executor if executor is not None else self.sql
         command = _DESCRIBE_COMMANDS.get(object_type, "DESCRIBE TABLE")
         try:
-            self.sql.execute(f"{command} {quote_full_name(target_full_name)}")
+            exec_sql.execute(f"{command} {quote_full_name(target_full_name)}")
             return True
         except Exception as exc:  # noqa: BLE001
             return not _is_not_found_error(str(exc))

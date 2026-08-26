@@ -4,21 +4,22 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="1862a172-d182-46cb-8967-79eb137ce7bc" name="Changes" comment="Handle catalog mapping">
+    <list default="true" id="1862a172-d182-46cb-8967-79eb137ce7bc" name="Changes" comment="Add table drop on gov failure">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/docs/architecture.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/architecture.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/docs/configuration.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/configuration.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/object-support-matrix.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/object-support-matrix.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/docs/runbook.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/runbook.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/jobs/airgap_import_target.json" beforeDir="false" afterPath="$PROJECT_DIR$/jobs/airgap_import_target.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/jobs/e2e_dry_run.json" beforeDir="false" afterPath="$PROJECT_DIR$/jobs/e2e_dry_run.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/jobs/e2e_live.json" beforeDir="false" afterPath="$PROJECT_DIR$/jobs/e2e_live.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/notebooks/00_Install_Jobs.py" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/00_Install_Jobs.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/notebooks/02_Export.py" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/02_Export.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/notebooks/03_Import.py" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/03_Import.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/uc_sync/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/config.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/uc_sync/dependency.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/dependency.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plans/governance-accounting-and-failclosed.md" beforeDir="false" afterPath="$PROJECT_DIR$/plans/governance-accounting-and-failclosed.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/uc_sync/export.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/export.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/uc_sync/import_engine.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/import_engine.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/uc_sync/package_import.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/package_import.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/uc_sync/report.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/report.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/uc_sync/rewrite.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/rewrite.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/uc_sync/sql_ddl.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/sql_ddl.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_export_ddl.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_export_ddl.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_failclosed_governance.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_failclosed_governance.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/tests/test_masks_row_filters.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_masks_row_filters.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/tests/test_report.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_report.py" afterDir="false" />
     </list>
@@ -173,7 +174,15 @@
       <option name="project" value="LOCAL" />
       <updated>1787667634055</updated>
     </task>
-    <option name="localTasksCounter" value="12" />
+    <task id="LOCAL-00012" summary="Add table drop on gov failure">
+      <option name="closed" value="true" />
+      <created>1787712892813</created>
+      <option name="number" value="00012" />
+      <option name="presentableId" value="LOCAL-00012" />
+      <option name="project" value="LOCAL" />
+      <updated>1787712892813</updated>
+    </task>
+    <option name="localTasksCounter" value="13" />
     <servers />
   </component>
   <component name="VcsManagerConfiguration">
@@ -183,6 +192,7 @@
     <MESSAGE value="SC mapping &amp; ABAC listing fix" />
     <MESSAGE value="Updated docs" />
     <MESSAGE value="Handle catalog mapping" />
-    <option name="LAST_COMMIT_MESSAGE" value="Handle catalog mapping" />
+    <MESSAGE value="Add table drop on gov failure" />
+    <option name="LAST_COMMIT_MESSAGE" value="Add table drop on gov failure" />
   </component>
 </project>

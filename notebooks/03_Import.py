@@ -2,11 +2,15 @@
 # MAGIC %md
 # MAGIC # UC Governance Migration — 03 Import
 # MAGIC Replay the migrated bundle on the **target** workspace in dependency order:
-# MAGIC structure + full table definitions (`create_*` gated) → governed tags →
-# MAGIC ABAC policies → classic masks/row filters → grants. Idempotent and additive
-# MAGIC — re-runs skip existing objects and never revoke.
+# MAGIC structure + full table definitions (`create_*` gated, masks/row filters kept
+# MAGIC INLINE → atomic) → governed tags → ABAC policies → drop sweep (fail-closed) →
+# MAGIC views → grants → ownership. Idempotent and additive — re-runs skip existing
+# MAGIC objects and never revoke.
 # MAGIC
 # MAGIC Requires Standard (USER_ISOLATION) or serverless compute for masks/filters.
+# MAGIC `import_warehouse_id` (a SQL warehouse) is used for BOTH the ABAC phase and
+# MAGIC the **view-creation phase** — a classic Spark cluster errors on a `CREATE
+# MAGIC VIEW` over a masked/row-filtered base table, so views build on the warehouse.
 
 # COMMAND ----------
 
@@ -48,11 +52,13 @@ dbutils.widgets.text("catalog_mapping_json", "")
 # mainly when replicating into an existing catalog (its storage credential +
 # external location are prerequisites). Blank = every schema uses the catalog root.
 dbutils.widgets.text("object_locations_path", "")
-# SQL warehouse (this/target workspace) for the ABAC phase. CREATE POLICY is
-# rejected at parse on a classic Spark cluster and only runs on a SQL warehouse,
-# so the ABAC phase is routed here. REQUIRED when the bundle has ABAC policies —
-# otherwise the import fails those policies closed and drops the tables they would
-# have protected. Not needed when the bundle carries no ABAC.
+# SQL warehouse (this/target workspace) for the ABAC phase AND the view-creation
+# phase. CREATE POLICY is rejected at parse on a classic Spark cluster and only
+# runs on a SQL warehouse; likewise a CREATE VIEW over a masked/row-filtered base
+# table errors on classic Spark but succeeds on a warehouse. REQUIRED when the
+# bundle has ABAC policies (otherwise the import fails those closed and drops the
+# tables they protect) and strongly recommended whenever the bundle has views over
+# masked tables. When unset, views fall back to the Spark executor.
 dbutils.widgets.text("import_warehouse_id", "")
 for _t in (*CREATE_TOGGLES, *APPLY_TOGGLES):
     dbutils.widgets.dropdown(_t, "true", ["true", "false"])
@@ -93,8 +99,10 @@ object_locations = (
 # COMMAND ----------
 
 wc = WorkspaceClient(local_workspace_auth(dbutils))
-# ABAC CREATE POLICY runs on a SQL warehouse (this workspace); None when unset, in
-# which case an ABAC-carrying bundle fails those policies closed (fail-fast).
+# The SQL warehouse executor runs BOTH the ABAC CREATE POLICY phase and the view-
+# creation phase (both are rejected / unreliable on a classic Spark cluster). None
+# when unset, in which case an ABAC-carrying bundle fails those policies closed
+# (fail-fast) and views fall back to the Spark executor.
 abac_executor = (
     RestSqlExecutor(wc, cfg.import_warehouse_id) if cfg.import_warehouse_id else None
 )

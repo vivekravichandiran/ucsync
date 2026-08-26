@@ -315,6 +315,64 @@ def test_abac_dry_run_needs_no_warehouse(tmp_path: Path):
     assert abac_row.status == "PENDING"
 
 
+# --- P2-B view-on-warehouse routing -----------------------------------------
+
+
+def test_views_created_on_warehouse_executor_with_its_own_context(tmp_path: Path):
+    """Plan P2-B: with a warehouse executor supplied, CREATE VIEW (and its USE
+    context, existence probe, grants) runs on the WAREHOUSE executor — a classic
+    Spark cluster errors on a view over a masked table. Tables/functions still run
+    on the main executor."""
+    root = tmp_path / "migrated"
+    _write(root, "ddl/CATALOG_c.sql", "CREATE CATALOG `c`;\n")
+    _write(root, "ddl/SCHEMA_c__hr.sql", "CREATE SCHEMA `c`.`hr`;\n")
+    _write(root, "ddl/TABLE_c__hr__emp.sql", "CREATE TABLE `c`.`hr`.`emp` (id INT);\n")
+    _write(root, "ddl/VIEW_c__hr__v.sql",
+           "CREATE VIEW `c`.`hr`.`v` AS SELECT * FROM `c`.`hr`.`emp`;\n")
+    _write(root, "grants/VIEW_c__hr__v.sql",
+           "GRANT SELECT ON VIEW `c`.`hr`.`v` TO `account users`;\n")
+    _write(root, "inventory/objects.json", "[]")
+
+    main = GovSql()
+    wh = GovSql()
+    # The view's base table exists on BOTH executors (same target metastore); model
+    # that so the warehouse can resolve the FROM and the DESCRIBE existence probe.
+    wh.tables.add("c.hr.emp")
+    results = PackageImportEngine(
+        str(root), main, dry_run=False, abac_sql_executor=wh,
+    ).run()
+
+    assert all(r.status == "SUCCESS" for r in results), [
+        (r.object_type, r.status, r.message) for r in results
+    ]
+    # CREATE VIEW ran on the warehouse, not the main executor.
+    assert any("CREATE" in s.upper() and "VIEW" in s.upper() for s in wh.statements)
+    assert not any(
+        "CREATE" in s.upper() and "VIEW" in s.upper() for s in main.statements
+    )
+    # The view's USE context ran on the warehouse (its own session).
+    assert any(s.upper().startswith("USE CATALOG") for s in wh.statements)
+    # The view's ordinary grant ran on the warehouse too.
+    assert any("GRANT SELECT" in s for s in wh.statements)
+    # The table was created on the main executor (not the warehouse).
+    assert any(s.upper().startswith("CREATE TABLE") for s in main.statements)
+
+
+def test_view_on_dropped_table_still_fails_closed_on_warehouse(tmp_path: Path):
+    """A view over a table dropped fail-closed still fails naturally, even when the
+    view phase runs on the warehouse executor (TABLE_NOT_FOUND)."""
+    root = _failclosed_bundle(tmp_path)
+    main = GovSql(known_functions=set(), allowed_tags={"allowed_only"})
+    wh = GovSql()  # empty warehouse table set → the dropped table isn't present
+    results = PackageImportEngine(
+        str(root), main, dry_run=False, abac_sql_executor=wh,
+    ).run()
+    view = next(r for r in results if r.object_type == "VIEW")
+    assert view.status == "FAILURE"
+    # The view creation was attempted on the warehouse executor.
+    assert any("CREATE" in s.upper() and "VIEW" in s.upper() for s in wh.statements)
+
+
 # --- full happy path (from-scratch): everything succeeds, no drops -----------
 
 
