@@ -87,10 +87,17 @@
       "notebook_task": {
         "notebook_path": "${notebook_dir}/02_Export",
         "base_parameters": {
+          "connectivity_mode": "airgap",
           "output_volume_path": "${output_volume_path}",
           "ops_catalog": "${ops_catalog}",
           "ops_schema": "${ops_schema}",
           "mapping_file_path": "${mapping_file_path}",
+          "source_workspace_url": "${source_workspace_url}",
+          "source_client_id": "${source_client_id}",
+          "source_client_secret": "${source_client_secret}",
+          "source_secret_scope": "${source_secret_scope}",
+          "source_secret_key": "${source_secret_key}",
+          "source_warehouse_id": "${source_warehouse_id}",
           "run_id": "{{job.run_id}}"
         }
       }
