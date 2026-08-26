@@ -78,6 +78,43 @@ def test_default_collation_also_stripped_for_schema_ddl():
     assert "COLLATION" not in out.upper()
 
 
+def test_external_table_collation_stripped_but_location_kept():
+    """External tables took an early return that skipped the collation strip,
+    so replayed external DDL failed with PARSE_SYNTAX_ERROR at 'DEFAULT'. The
+    collation clauses must be dropped while the external LOCATION survives."""
+    ddl = (
+        "CREATE TABLE IF NOT EXISTS `ai27_uc_finance`.`ap`.`invoices_ext` (\n"
+        "  invoice_id BIGINT,\n"
+        "  vendor STRING COLLATE UTF8_BINARY,\n"
+        "  amount DECIMAL(18,2),\n"
+        "  status STRING COLLATE UTF8_BINARY)\n"
+        "USING delta\n"
+        "COMMENT 'External invoices fixture (external-table migration test)'\n"
+        "DEFAULT COLLATION UTF8_BINARY\n"
+        "LOCATION 'abfss://data@ai27tgtfine9fc8b.dfs.core.windows.net/ap/invoices_ext'"
+    )
+    out = strip_managed_storage_clauses(ddl, "EXTERNAL_TABLE")
+    assert "COLLATION" not in out.upper()   # table-level clause gone
+    assert "COLLATE" not in out.upper()      # inline column qualifiers gone
+    # The external LOCATION (the reason for the early return) is preserved.
+    assert (
+        "LOCATION 'abfss://data@ai27tgtfine9fc8b.dfs.core.windows.net/ap/invoices_ext'"
+        in out
+    )
+    assert "USING delta" in out
+
+
+def test_external_volume_location_kept_and_collation_stripped():
+    ddl = (
+        "CREATE EXTERNAL VOLUME `c`.`orders`.`archive`\n"
+        "LOCATION 'abfss://data@acct.dfs.core.windows.net/orders/archive'"
+    )
+    out = strip_managed_storage_clauses(ddl, "EXTERNAL_VOLUME")
+    assert (
+        "LOCATION 'abfss://data@acct.dfs.core.windows.net/orders/archive'" in out
+    )
+
+
 def test_column_default_and_generated_by_default_are_preserved():
     """The strip anchors on COLLATION, so column DEFAULT values and identity
     columns using BY DEFAULT must be left intact."""

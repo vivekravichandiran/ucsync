@@ -76,7 +76,13 @@ def strip_managed_storage_clauses(text: str, object_type: str = "") -> str:
 
     upper = str(object_type or "").upper()
     if upper in {"EXTERNAL_TABLE", "EXTERNAL_VOLUME", "EXTERNAL_LOCATION"}:
-        return text
+        # Keep the external LOCATION/URL (rewritten separately) but still strip
+        # collation clauses: a target metastore without collation enabled rejects
+        # the replayed `DEFAULT COLLATION`/inline `COLLATE` with PARSE_SYNTAX_ERROR,
+        # exactly as for managed tables and catalogs/schemas.
+        rewritten = strip_default_collation(str(text or ""))
+        rewritten = strip_inline_collate(rewritten)
+        return strip_reserved_table_properties(rewritten)
     if upper in {"CATALOG", "SCHEMA"}:
         # Keep the (already path-rewritten) MANAGED LOCATION — a target metastore
         # with no default storage root cannot create a catalog without one — but
