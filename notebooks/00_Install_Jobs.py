@@ -57,6 +57,11 @@ dbutils.widgets.text("source_secret_key", "")      # secret key   (option 2)
 # back EMPTY (classic job-cluster Spark cannot serve abac_policy_definitions). Point
 # it at any SQL warehouse on the workspace that owns the objects.
 dbutils.widgets.text("source_warehouse_id", "")
+# SQL warehouse on the TARGET (import) workspace for the ABAC phase. CREATE POLICY
+# is rejected at parse on a classic Spark cluster and only runs on a SQL warehouse.
+# REQUIRED for import/e2e jobs whose bundle carries ABAC policies (otherwise those
+# policies fail closed and their tables are dropped). Blank = no ABAC.
+dbutils.widgets.text("import_warehouse_id", "")
 
 # --- target run-as service principal (import/e2e jobs) ---
 # Application id of a service principal to run the TARGET (import) jobs as, so every
@@ -98,6 +103,7 @@ _simple = (
     "ops_catalog", "ops_schema", "mapping_file_path", "run_id",
     "source_workspace_url", "source_client_id", "source_client_secret",
     "source_secret_scope", "source_secret_key", "source_warehouse_id",
+    "import_warehouse_id",
     "run_as_spn", "filter_tables", "catalog_mapping_json", "object_locations_path",
     "existing_cluster_id", "spark_version", "node_type_id", "job_name_prefix",
 )

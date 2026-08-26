@@ -20,7 +20,7 @@ from uc_sync import __version__
 from uc_sync.config import from_sources, CREATE_TOGGLES, APPLY_TOGGLES, _split_csv
 from uc_sync.package_import import PackageImportEngine
 from uc_sync.location_mapping import load_object_locations_csv
-from uc_sync.import_engine import SparkSqlExecutor
+from uc_sync.import_engine import SparkSqlExecutor, RestSqlExecutor
 from uc_sync.auth import local_workspace_auth
 from uc_sync.workspace_client import WorkspaceClient
 from uc_sync.audit import AuditService, stage_audit_row
@@ -48,6 +48,12 @@ dbutils.widgets.text("catalog_mapping_json", "")
 # mainly when replicating into an existing catalog (its storage credential +
 # external location are prerequisites). Blank = every schema uses the catalog root.
 dbutils.widgets.text("object_locations_path", "")
+# SQL warehouse (this/target workspace) for the ABAC phase. CREATE POLICY is
+# rejected at parse on a classic Spark cluster and only runs on a SQL warehouse,
+# so the ABAC phase is routed here. REQUIRED when the bundle has ABAC policies —
+# otherwise the import fails those policies closed and drops the tables they would
+# have protected. Not needed when the bundle carries no ABAC.
+dbutils.widgets.text("import_warehouse_id", "")
 for _t in (*CREATE_TOGGLES, *APPLY_TOGGLES):
     dbutils.widgets.dropdown(_t, "true", ["true", "false"])
 dbutils.widgets.dropdown("dry_run", "false", ["true", "false"])
@@ -61,6 +67,7 @@ cfg = from_sources({
     "ops_schema": dbutils.widgets.get("ops_schema"),
     "dry_run": dbutils.widgets.get("dry_run"),
     "catalog_mapping_json": dbutils.widgets.get("catalog_mapping_json"),
+    "import_warehouse_id": dbutils.widgets.get("import_warehouse_id"),
     **{t: dbutils.widgets.get(t) for t in (*CREATE_TOGGLES, *APPLY_TOGGLES)},
 })
 run_id = dbutils.widgets.get("run_id").strip()
@@ -85,12 +92,20 @@ object_locations = (
 
 # COMMAND ----------
 
+wc = WorkspaceClient(local_workspace_auth(dbutils))
+# ABAC CREATE POLICY runs on a SQL warehouse (this workspace); None when unset, in
+# which case an ABAC-carrying bundle fails those policies closed (fail-fast).
+abac_executor = (
+    RestSqlExecutor(wc, cfg.import_warehouse_id) if cfg.import_warehouse_id else None
+)
+
 results = PackageImportEngine(
     migrated, SparkSqlExecutor(spark), dry_run=cfg.dry_run, toggles=toggles,
-    workspace_client=WorkspaceClient(local_workspace_auth(dbutils)),
+    workspace_client=wc,
     catalog_mapping=cfg.catalog_mapping,
     select_tables=_split_csv(dbutils.widgets.get("filter_tables")),
     object_locations=object_locations,
+    abac_sql_executor=abac_executor,
 ).run()
 
 # Clean migration report (spine + governance sheets) under reports/. The import

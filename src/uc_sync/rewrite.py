@@ -80,10 +80,9 @@ def strip_managed_storage_clauses(text: str, object_type: str = "") -> str:
     if upper in {"CATALOG", "SCHEMA"}:
         # Keep the (already path-rewritten) MANAGED LOCATION — a target metastore
         # with no default storage root cannot create a catalog without one — but
-        # still strip collation / inline-policy / reserved-property noise.
+        # still strip collation / reserved-property noise.
         rewritten = strip_default_collation(str(text or ""))
         rewritten = strip_inline_collate(rewritten)
-        rewritten = strip_inline_policy_clauses(rewritten)
         return strip_reserved_table_properties(rewritten)
     rewritten = str(text or "")
     rewritten = re.sub(
@@ -115,7 +114,12 @@ def strip_managed_storage_clauses(text: str, object_type: str = "") -> str:
     # Table-level default collation clause — drop it (see strip_default_collation).
     rewritten = strip_default_collation(rewritten)
     rewritten = strip_inline_collate(rewritten)
-    rewritten = strip_inline_policy_clauses(rewritten)
+    # Inline column-mask / row-filter clauses are DELIBERATELY KEPT in the CREATE
+    # TABLE DDL: with functions imported before tables, the clauses resolve, so a
+    # table is created with its protection atomically — and if a mask/filter
+    # function is missing, the CREATE TABLE itself fails (fail-closed) rather than
+    # leaving an unprotected table behind. (strip_inline_policy_clauses is retained
+    # for callers that still need it, but the migrate replay no longer applies it.)
     rewritten = strip_reserved_table_properties(rewritten)
     return rewritten
 
@@ -187,10 +191,10 @@ def strip_inline_policy_clauses(text: str) -> str:
         ...
         WITH ROW FILTER `cat`.`sec`.`hr_dept_filter` ON (dept)
 
-    Replaying that fails when the referenced function does not yet exist in the
-    target (functions import after tables), so the clauses are stripped here and
-    re-applied from the ``policies/*.sql`` artifact in a dedicated phase once every
-    object exists. Mirrors :func:`strip_inline_collate`.
+    Retained as a utility, but **no longer part of the migrate replay pipeline**:
+    functions now import before tables, so the inline clauses resolve and are kept
+    in the CREATE TABLE for atomic fail-closed protection (see
+    :func:`strip_managed_storage_clauses`). Mirrors :func:`strip_inline_collate`.
     """
 
     rewritten = str(text or "")

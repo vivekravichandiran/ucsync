@@ -73,6 +73,11 @@ class SyncConfig:
     # (tags/ABAC) when inventorying a remote source in direct mode. Not needed
     # when the source is the current workspace (local/airgap-on-source).
     source_warehouse_id: str = ""
+    # SQL warehouse on the TARGET (import) workspace. ABAC `CREATE POLICY` is
+    # rejected at parse on a classic Spark cluster and only accepted on a SQL
+    # warehouse, so the import routes the ABAC phase through this warehouse. It is
+    # required only when the bundle contains ABAC policies.
+    import_warehouse_id: str = ""
     target_workspace_url: str = ""
     target_oauth_secret_scope: str = ""
     target_client_id_secret_key: str = ""
@@ -392,6 +397,9 @@ def from_sources(
         source_token=str(pick("source_token", source.get("token"))),
         source_warehouse_id=str(
             pick("source_warehouse_id", source.get("warehouse_id"))
+        ),
+        import_warehouse_id=str(
+            pick("import_warehouse_id", target.get("warehouse_id"))
         ),
         target_workspace_url=str(pick("target_workspace_url", target.get("workspace_url"))),
         target_oauth_secret_scope=str(

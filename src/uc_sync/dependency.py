@@ -14,9 +14,13 @@ _TYPE_RANK = {
     ObjectType.SCHEMA: 40,
     ObjectType.VOLUME: 50,
     ObjectType.EXTERNAL_VOLUME: 51,
+    # Functions rank BEFORE tables: a table's inline column MASK / row-filter
+    # clause (kept in the CREATE TABLE for atomic fail-closed protection)
+    # references a mask/filter function, so that function must already exist when
+    # the table is created. (Mask functions are scalar and do not read tables.)
+    ObjectType.FUNCTION: 55,
     ObjectType.TABLE: 60,
     ObjectType.EXTERNAL_TABLE: 61,
-    ObjectType.FUNCTION: 70,
     ObjectType.MODEL: 80,
     ObjectType.VIEW: 90,
     ObjectType.DYNAMIC_VIEW: 91,

@@ -4,9 +4,23 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="1862a172-d182-46cb-8967-79eb137ce7bc" name="Changes" comment="Updated docs">
+    <list default="true" id="1862a172-d182-46cb-8967-79eb137ce7bc" name="Changes" comment="Handle catalog mapping">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/architecture.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/architecture.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/configuration.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/configuration.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/runbook.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/runbook.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/jobs/airgap_import_target.json" beforeDir="false" afterPath="$PROJECT_DIR$/jobs/airgap_import_target.json" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/jobs/e2e_dry_run.json" beforeDir="false" afterPath="$PROJECT_DIR$/jobs/e2e_dry_run.json" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/jobs/e2e_live.json" beforeDir="false" afterPath="$PROJECT_DIR$/jobs/e2e_live.json" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/notebooks/00_Install_Jobs.py" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/00_Install_Jobs.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/notebooks/03_Import.py" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/03_Import.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/uc_sync/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/config.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/uc_sync/dependency.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/dependency.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/uc_sync/package_import.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/package_import.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/uc_sync/report.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/report.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/uc_sync/rewrite.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/rewrite.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_masks_row_filters.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_masks_row_filters.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_report.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_report.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -151,7 +165,15 @@
       <option name="project" value="LOCAL" />
       <updated>1787664176370</updated>
     </task>
-    <option name="localTasksCounter" value="11" />
+    <task id="LOCAL-00011" summary="Handle catalog mapping">
+      <option name="closed" value="true" />
+      <created>1787667634055</created>
+      <option name="number" value="00011" />
+      <option name="presentableId" value="LOCAL-00011" />
+      <option name="project" value="LOCAL" />
+      <updated>1787667634055</updated>
+    </task>
+    <option name="localTasksCounter" value="12" />
     <servers />
   </component>
   <component name="VcsManagerConfiguration">
@@ -160,6 +182,7 @@
     <MESSAGE value="ABAC listing fix" />
     <MESSAGE value="SC mapping &amp; ABAC listing fix" />
     <MESSAGE value="Updated docs" />
-    <option name="LAST_COMMIT_MESSAGE" value="Updated docs" />
+    <MESSAGE value="Handle catalog mapping" />
+    <option name="LAST_COMMIT_MESSAGE" value="Handle catalog mapping" />
   </component>
 </project>

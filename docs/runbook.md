@@ -69,6 +69,20 @@ Import), `mapping_file_path` (storage-cred + location CSV, § configuration.md),
 `source_warehouse_id` (SQL warehouse for tags + ABAC reads — **required in every mode,
 including airgap**, or ABAC policies export empty; § configuration.md).
 
+**`import_warehouse_id` (stage 03)** — a SQL warehouse on the **target** workspace.
+`CREATE POLICY` is rejected on a classic Spark cluster, so the ABAC phase runs on
+this warehouse. **Required whenever the bundle has ABAC policies** — if it is unset,
+those policies fail closed and the tables they would have protected are **dropped**
+(this is the fail-closed guarantee, not a bug). Not needed if the bundle has no ABAC.
+
+**Fail-closed:** the import applies protection as early as possible and never lets a
+partially-protected table survive. Classic masks / row filters ride **inline** in
+the `CREATE TABLE` (a missing mask function fails the CREATE atomically); a
+governed-tag or ABAC failure **drops** the freshly-created table and marks it
+`FAILURE` (`PROTECTION_FAILED`) — visible in the Tables + Issues sheets, `uc_sync_audit`
+and `uc_sync_state`. Pre-existing tables (`SKIP_EXISTING`) are never dropped. Views
+are created last, so a view on a dropped table simply fails to create.
+
 Import-only extras (all optional): `filter_tables` (import a subset of tables),
 `catalog_mapping_json` (recreate a source catalog under a different target name — or
 replicate into an existing one, Scenario 7b), `object_locations_path` (per-schema /
@@ -86,13 +100,19 @@ target service principal so it owns everything).
 | | `source_warehouse_id` | same warehouse |
 | 03 Import | all `create_*` | `true` |
 | | all `apply_*` | `true` |
+| | `import_warehouse_id` | a target SQL warehouse (**required if the bundle has ABAC**) |
 
 **Success:** Import exit JSON `by_status` is all `SUCCESS`/`SKIP_EXISTING`; read
 `import.xlsx`. Storage credential + external location are created from the mapping.
+Any table dropped fail-closed shows as `FAILURE`/`PROTECTION_FAILED` in the Issues
+sheet — check it if a count looks low.
 
 ### Scenario 2 — Catalog already exists on target
 Same as Scenario 1 but Import: `create_catalogs=false` (± `create_schemas=false`).
-Governance (tags/ABAC/masks/grants) is still applied to the existing catalog.
+Governance (tags/ABAC/masks/grants) is still applied to the existing catalog, and
+tables the run creates inside it are still fail-closed protected (dropped if their
+tag/ABAC fails). Still set `import_warehouse_id` if the bundle has ABAC policies —
+otherwise those policies fail closed and their tables are dropped.
 
 ### Scenario 3 — Creds / external locations pre-created manually
 Import: `create_storage_credentials=false`, `create_external_locations=false`.

@@ -30,10 +30,14 @@ def test_build_report_has_governance_sheets(tmp_path):
     from openpyxl import load_workbook
     wb = load_workbook(out)
     # Per-type sheets appear only for types present; governance sheets always do.
+    # The IMPORT stage adds an Issues sheet (right after Summary).
     assert set(wb.sheetnames) == {
-        "Summary", "Catalogs", "Tables", "Tags", "Column Masks & Row Filters",
+        "Summary", "Issues", "Catalogs", "Tables", "Tags",
+        "Column Masks & Row Filters",
         "ABAC Policies", "Policy Matched Columns", "Grants",
     }
+    # Issues is the second sheet (right after Summary).
+    assert wb.sheetnames[:2] == ["Summary", "Issues"]
     # ABAC sheet carries the policy with its EXCEPT.
     abac_rows = list(wb["ABAC Policies"].iter_rows(values_only=True))
     assert any("svc@x.com" in str(r) for r in abac_rows)
@@ -43,6 +47,74 @@ def test_build_report_has_governance_sheets(tmp_path):
     # The table's per-type sheet carries its import status.
     table_rows = list(wb["Tables"].iter_rows(values_only=True))
     assert any("c.s.t" in str(r) for r in table_rows)
+
+
+def test_issues_sheet_counts_split_and_governance_status(tmp_path):
+    """Plan #D/#6: the Issues sheet lists every non-success op (FAILURE first),
+    the Summary counts objects and governance ops separately, and governance
+    sheets carry an import_status column."""
+    objects = [
+        {"object_type": "TABLE", "full_name": "c.s.t", "owner": "me",
+         "tags": {"cls": "OK"}, "grants": []},
+        {"object_type": "TABLE", "full_name": "c.s.bad", "owner": "me",
+         "tags": {"missing": "x"}, "grants": []},
+        {"object_type": "ABAC_POLICY", "full_name": "c.s.t#policy:p",
+         "definition": {"policy_name": "p", "policy_type": "COLUMN_MASK",
+                        "on_securable": "c.s.t", "function_name": "c.sec.m",
+                        "match_columns": [], "to_principals": [],
+                        "except_principals": []}},
+    ]
+    import_results = [
+        # object creates first (so the per-object index resolves to these).
+        {"object_type": "TABLE", "target_full_name": "c.s.t", "full_name": "c.s.t",
+         "status": "SUCCESS", "action": "CREATE_OR_SKIP"},
+        {"object_type": "TABLE", "target_full_name": "c.s.bad", "full_name": "c.s.bad",
+         "status": "FAILURE", "action": "DROP_PROTECTION_FAILED",
+         "error_code": "PROTECTION_FAILED",
+         "message": "table dropped (fail-closed): a governance step failed"},
+        # governance ops.
+        {"object_type": "TABLE", "target_full_name": "c.s.bad", "full_name": "c.s.bad",
+         "status": "FAILURE", "action": "MANUAL", "error_code": "PROTECTION_FAILED",
+         "policies_path": "/tags/TABLE_c__s__bad.sql", "message": "unknown tag"},
+        {"object_type": "ABAC_POLICY", "target_full_name": "c.s.t#policy:p",
+         "full_name": "c.s.t#policy:p", "status": "SUCCESS", "action": "CREATE_POLICY",
+         "policies_path": "/abac/x.sql"},
+    ]
+    out = tmp_path / "r.xlsx"
+    build_report(objects, str(out), import_results=import_results, run_id="r1")
+    from openpyxl import load_workbook
+    wb = load_workbook(out)
+
+    # Issues sheet is second, header exact, and FAILURE rows present.
+    assert wb.sheetnames[1] == "Issues"
+    issues = list(wb["Issues"].iter_rows(values_only=True))
+    assert issues[0] == (
+        "status", "object_type", "object", "action", "error_code", "message"
+    )
+    assert any(r[0] == "FAILURE" and r[2] == "c.s.bad" for r in issues[1:])
+    # The two non-success ops (dropped table + failed tag), no SUCCESS ones.
+    assert len(issues) - 1 == 2
+
+    # Summary: per-object count (objects only, not governance) + governance block.
+    summary = [tuple(r) for r in wb["Summary"].iter_rows(values_only=True)]
+    flat = [str(c) for row in summary for c in row if c is not None]
+    assert "import_status (per object)" in flat
+    assert "governance operations" in flat
+    # Per-object tally: exactly one SUCCESS + one FAILURE object row.
+    sflat = {summary[i][0]: summary[i][1] for i in range(len(summary))
+             if summary[i][0] in ("SUCCESS", "FAILURE", "APPLIED", "FAILED", "SKIPPED")}
+    assert sflat.get("SUCCESS") == 1 and sflat.get("FAILURE") == 1
+    assert sflat.get("APPLIED") == 1 and sflat.get("FAILED") == 1
+
+    # Tags sheet carries import_status; the bad table's tag reads FAILED.
+    tag_rows = list(wb["Tags"].iter_rows(values_only=True))
+    assert tag_rows[0][-1] == "import_status"
+    bad_tag = next(r for r in tag_rows[1:] if r[0] == "c.s.bad")
+    assert "FAILED" in str(bad_tag[-1])
+
+    # ABAC sheet also carries import_status keyed by the policy full name.
+    abac_rows = list(wb["ABAC Policies"].iter_rows(values_only=True))
+    assert abac_rows[0][-1] == "import_status"
 
 
 def test_policy_matched_columns_derives_from_tags_within_scope(tmp_path):

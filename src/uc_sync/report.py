@@ -105,6 +105,27 @@ def _import_index(
     return idx
 
 
+def _is_governance_result(r: dict[str, Any]) -> bool:
+    """A governance-phase result (tag / ABAC / classic binding), not an object.
+
+    Governance ops set ``policies_path``; ABAC results also carry object_type
+    ``ABAC_POLICY``. Object creation results set ``ddl_path`` instead, so this
+    keeps the per-object count clean.
+    """
+    return bool(r.get("policies_path")) or str(r.get("object_type")) == "ABAC_POLICY"
+
+
+def _governance_bucket(r: dict[str, Any]) -> str:
+    """Bucket a governance result as APPLIED / FAILED / SKIPPED for the Summary."""
+    status = str(r.get("status") or "")
+    action = str(r.get("action") or "")
+    if status in ("FAILURE", "MANUAL_ACTION_REQUIRED"):
+        return "FAILED"
+    if action == "SKIP_EXISTING" or status.startswith("SKIP"):
+        return "SKIPPED"
+    return "APPLIED"
+
+
 def _export_index(
     export_results: Iterable[dict[str, Any]],
 ) -> dict[str, dict[str, str]]:
@@ -440,13 +461,52 @@ def build_report(
         for k in sorted(st):
             ws.append([k, st[k]])
     if stage == "IMPORT" and import_results:
-        st = {}
-        for r in import_results:
+        # Counts are split so export objects and import objects match: the
+        # import_status tally is PER OBJECT (each object's create result, which
+        # already folds in its governance outcome — a table dropped fail-closed
+        # shows FAILURE here). Governance work (tags / ABAC / classic bindings) is
+        # tallied separately as APPLIED / FAILED / SKIPPED so it is visible without
+        # being conflated with the object count.
+        object_results = [r for r in import_results if not _is_governance_result(r)]
+        gov_results = [r for r in import_results if _is_governance_result(r)]
+        st: dict[str, int] = {}
+        for r in object_results:
             st[r.get("status", "")] = st.get(r.get("status", ""), 0) + 1
         ws.append([])
-        ws.append(["import_status", "count"])
+        ws.append(["import_status (per object)", "count"])
         for k in sorted(st):
             ws.append([k, st[k]])
+        if gov_results:
+            gov = {"APPLIED": 0, "FAILED": 0, "SKIPPED": 0}
+            for r in gov_results:
+                gov[_governance_bucket(r)] += 1
+            ws.append([])
+            ws.append(["governance operations", "count"])
+            for k in ("APPLIED", "FAILED", "SKIPPED"):
+                ws.append([k, gov[k]])
+
+    # Issues sheet (right after Summary): every non-success import op — a table
+    # dropped fail-closed (PROTECTION_FAILED), a view that failed on its dropped
+    # table, a failed/manual governance op. Built from raw results so nothing
+    # hides. FAILURE first.
+    if stage == "IMPORT":
+        issues = _sheet(
+            "Issues",
+            ["status", "object_type", "object", "action", "error_code", "message"],
+        )
+        issue_rows = [
+            r for r in (import_results or [])
+            if str(r.get("status") or "")
+            not in ("SUCCESS", "SKIP_EXISTING", "PENDING")
+        ]
+        issue_rows.sort(key=lambda r: 0 if str(r.get("status")) == "FAILURE" else 1)
+        for r in issue_rows:
+            issues.append([
+                r.get("status"), r.get("object_type"),
+                r.get("target_full_name") or r.get("full_name"),
+                r.get("action"), r.get("error_code"),
+                _truncate(r.get("message"), 400),
+            ])
 
     # One sheet per object type, each carrying that type's captured detail plus
     # an import-status column. Only types actually present get a sheet.
@@ -487,14 +547,27 @@ def build_report(
                 o.get("owner") or "",
             ] + _status_cells(o))
 
+    # Governance detail sheets carry a trailing import_status column (IMPORT stage
+    # only) so a reviewer sees, per tag / mask / policy / grant, the import outcome
+    # of the securable it protects — a table dropped fail-closed reads FAILED here.
+    def _gov_status_header() -> list[str]:
+        return ["import_status"] if stage == "IMPORT" else []
+
+    def _gov_status(*names: str) -> list[str]:
+        if stage != "IMPORT":
+            return []
+        entry = next((idx.get(n) for n in names if n and idx.get(n)), None)
+        return [_render_import_status(entry)]
+
     # Tags (object + column grain)
-    tags = _sheet("Tags", ["object", "level", "column", "key", "value"])
+    tags = _sheet("Tags", ["object", "level", "column", "key", "value"] + _gov_status_header())
     for o in objects:
+        st = _gov_status(o["full_name"], str(o.get("target_full_name") or ""))
         for k, v in (o.get("tags") or {}).items():
-            tags.append([o["full_name"], o["object_type"], "", k, v])
+            tags.append([o["full_name"], o["object_type"], "", k, v] + st)
         for col, ctags in ((o.get("definition") or {}).get("column_tags") or {}).items():
             for k, v in ctags.items():
-                tags.append([o["full_name"], "COLUMN", col, k, v])
+                tags.append([o["full_name"], "COLUMN", col, k, v] + st)
 
     # Column masks & row filters (classic, ALTER-applied). These are table-only in
     # UC — the securable is a table, external table, materialized view, or
@@ -503,29 +576,30 @@ def build_report(
     # own definition (see the identity_aware column on the view sheets).
     cm = _sheet(
         "Column Masks & Row Filters",
-        ["object", "kind", "column", "function", "using/on cols"],
+        ["object", "kind", "column", "function", "using/on cols"] + _gov_status_header(),
     )
     for o in objects:
         d = o.get("definition") or {}
+        st = _gov_status(o["full_name"], str(o.get("target_full_name") or ""))
         for mask in d.get("column_masks") or []:
             cm.append([
                 o["full_name"], "CLASSIC MASK", mask.get("column_name"),
                 mask.get("function_name"),
                 ", ".join(mask.get("using_column_names") or []),
-            ])
+            ] + st)
         rf = d.get("row_filter")
         if isinstance(rf, dict) and rf.get("function_name"):
             cm.append([
                 o["full_name"], "CLASSIC ROW FILTER", "",
                 rf.get("function_name"),
                 ", ".join(rf.get("input_column_names") or []),
-            ])
+            ] + st)
 
     # ABAC policies
     abac = _sheet(
         "ABAC Policies",
         ["policy", "type", "on_securable", "function", "match_columns",
-         "to", "except"],
+         "to", "except"] + _gov_status_header(),
     )
     for o in objects:
         if o["object_type"] != "ABAC_POLICY":
@@ -536,7 +610,7 @@ def build_report(
             d.get("function_name"), "; ".join(d.get("match_columns") or []),
             ", ".join(d.get("to_principals") or []),
             ", ".join(d.get("except_principals") or []),
-        ])
+        ] + _gov_status(o["full_name"], str(o.get("target_full_name") or "")))
 
     # Policy → matched columns (DERIVED): resolve each ABAC policy's tag rule
     # against the captured column tags, within the securable it is attached ON.
@@ -548,7 +622,8 @@ def build_report(
     matched = _sheet(
         "Policy Matched Columns",
         ["policy", "type", "on_securable", "function", "match_rule",
-         "matched_table", "matched_column", "tag_key", "tag_value"],
+         "matched_table", "matched_column", "tag_key", "tag_value"]
+        + _gov_status_header(),
     )
     col_tag_index: dict[str, dict[str, Any]] = {}
     for o in objects:
@@ -565,6 +640,7 @@ def build_report(
         rule = "; ".join(d.get("match_columns") or [])
         base = [d.get("policy_name"), d.get("policy_type"), on_securable,
                 d.get("function_name"), rule]
+        pol_st = _gov_status(o["full_name"], str(o.get("target_full_name") or ""))
         hits = 0
         for table_fn, ctags in col_tag_index.items():
             if not _table_in_policy_scope(table_fn, on_type, on_securable):
@@ -573,28 +649,32 @@ def build_report(
                 hit = _column_condition_match(tags, conditions)
                 if hit:
                     key, value = hit
-                    matched.append(base + [table_fn, col, key, value])
+                    matched.append(base + [table_fn, col, key, value] + pol_st)
                     hits += 1
         if hits == 0:
             note = (
                 "(no captured tagged columns match)" if conditions
                 else "(match rule not tag-based / unparsed)"
             )
-            matched.append(base + ["", "", "", note])
+            matched.append(base + ["", "", "", note] + pol_st)
 
     # Grants (explicit privilege assignments captured at each securable level).
     # These are the grants the utility replays; UC re-establishes inheritance on
     # the target automatically once the parent-level (catalog/schema) grants are
     # replayed, so inherited-only effective privileges are intentionally not
     # listed here (they are not migrated as per-object grants).
-    grants = _sheet("Grants", ["object", "level", "principal", "type", "privileges"])
+    grants = _sheet(
+        "Grants",
+        ["object", "level", "principal", "type", "privileges"] + _gov_status_header(),
+    )
     for o in objects:
+        st = _gov_status(o["full_name"], str(o.get("target_full_name") or ""))
         for g in o.get("grants") or []:
             grants.append([
                 o["full_name"], o["object_type"], g.get("principal"),
                 g.get("principal_type"),
                 ", ".join(g.get("privileges") or []),
-            ])
+            ] + st)
 
     # UC Volumes are mounted via FUSE, which only supports sequential writes.
     # openpyxl.save() writes a ZIP archive and needs a seekable target, so it

@@ -11,6 +11,18 @@ from typing import Any, Iterable, Optional
 from uc_sync.dependency import _TYPE_RANK
 from uc_sync.location_mapping import ObjectLocations
 from uc_sync.models import ObjectType
+from uc_sync.report import _table_in_policy_scope
+
+# View-like securables are created AFTER governance + the drop sweep, so a view
+# built on a table that governance failed (and dropped) simply fails to create —
+# no dependency/cascade tracking needed.
+_VIEW_LIKE_TYPES = {
+    "VIEW", "DYNAMIC_VIEW", "METRIC_VIEW", "MATERIALIZED_VIEW", "STREAMING_TABLE",
+}
+# Tables this run creates are empty shells, so dropping one on a governance
+# failure loses no data (fail-closed). Pre-existing tables are SKIP_EXISTING and
+# never recorded, hence never dropped.
+_DROPPABLE_TABLE_TYPES = {"TABLE", "EXTERNAL_TABLE"}
 
 
 @dataclass
@@ -317,6 +329,7 @@ class PackageImportEngine:
         workspace_client: Any = None,
         select_tables: Optional[Iterable[str]] = None,
         object_locations: Optional[ObjectLocations] = None,
+        abac_sql_executor: Any = None,
     ):
         self.root = Path(package_root)
         self.workspace_client = workspace_client
@@ -331,6 +344,16 @@ class PackageImportEngine:
         self.sql = (
             _CatalogRewritingExecutor(sql_executor, self.catalog_mapping)
             if self.catalog_mapping else sql_executor
+        )
+        # ABAC `CREATE POLICY` is rejected at parse on a classic Spark cluster and
+        # only accepted on a SQL warehouse, so the ABAC phase runs on a dedicated
+        # warehouse executor when supplied. Wrapped for catalog rewriting like the
+        # main executor. When absent, an ABAC-carrying bundle fails fast
+        # (ABAC_WAREHOUSE_REQUIRED) rather than leaving matched tables unprotected.
+        self.abac_sql = (
+            _CatalogRewritingExecutor(abac_sql_executor, self.catalog_mapping)
+            if (abac_sql_executor is not None and self.catalog_mapping)
+            else abac_sql_executor
         )
         # Optional import-time TABLE scope filter (catalog/schema scoping is done
         # upstream at inventory via the `catalogs`/`schemas` selection). Empty =
@@ -358,6 +381,15 @@ class PackageImportEngine:
         # exists, so storage-credential / external-location / catalog creation are
         # skipped (they are prerequisites) and only the contents are replicated.
         self._existing_catalog_mode = False
+        # Fail-closed governance bookkeeping (see run()).
+        #  _created_tables: target_full_name -> the create PackageImportResult for
+        #    every table THIS run created (an empty shell — droppable). Pre-existing
+        #    (SKIP_EXISTING) tables are never recorded, so they are never dropped.
+        #  _failed_tables: target_full_name -> the governance feature that failed,
+        #    populated by the tag / ABAC phases; the drop sweep drops each one and
+        #    mutates its create result to FAILURE (PROTECTION_FAILED) in place.
+        self._created_tables: dict[str, PackageImportResult] = {}
+        self._failed_tables: dict[str, str] = {}
 
     # Object type → the create_* toggle that gates its creation.
     _CREATE_TOGGLE_FOR_TYPE = {
@@ -463,205 +495,375 @@ class PackageImportEngine:
             ),
         )
         results: list[PackageImportResult] = []
-        for order, path in enumerate(ddl_files, start=1):
-            object_type, parsed_name = _parse_sql_filename(path.name)
-            target_full_name = self._map_name(parsed_name)
-            if not self._in_scope(object_type, target_full_name):
-                results.append(PackageImportResult(
-                    object_type=object_type,
-                    source_full_name=parsed_name,
-                    target_full_name=target_full_name,
-                    full_name=parsed_name,
-                    action="SKIP_FILTERED",
-                    status="SUCCESS",
-                    message="excluded by import scope filter",
-                    dependency_level=_type_rank(object_type),
-                    import_order=order,
-                ))
-                continue
-            inventory_row = (
-                by_target.get(target_full_name)
-                or inventory.get(parsed_name)
-                or inventory.get(target_full_name)
-                or inventory.get(self._guess_source_name(target_full_name, inventory))
-                or {}
+        self._created_tables = {}
+        self._failed_tables = {}
+        # ABAC scope metadata (file stem -> policy full name + on-securable), so an
+        # ABAC failure can be mapped to the table(s) the policy protects for the
+        # fail-closed drop sweep.
+        abac_meta = self._abac_meta_by_stem(inventory)
+
+        # Views/matviews/streaming tables are created AFTER governance + the drop
+        # sweep. Everything else (creds, locations, catalogs, schemas, volumes,
+        # FUNCTIONS, then tables) is created first — functions before tables (rank),
+        # so a table's inline mask/row-filter clause resolves.
+        structural = [
+            p for p in ddl_files
+            if _parse_sql_filename(p.name)[0] not in _VIEW_LIKE_TYPES
+        ]
+        view_files = [
+            p for p in ddl_files
+            if _parse_sql_filename(p.name)[0] in _VIEW_LIKE_TYPES
+        ]
+
+        # Phase 1 — structure + full table definitions. Inline classic masks / row
+        # filters make protection atomic: a missing mask/filter function fails the
+        # CREATE TABLE itself, so no unprotected table survives.
+        for path in structural:
+            results.append(
+                self._import_ddl_file(path, len(results) + 1, inventory, by_target)
             )
-            source_full_name = str(
-                inventory_row.get("source_full_name")
-                or inventory_row.get("full_name")
-                or parsed_name
-            )
-            rank = _type_rank(object_type)
-            grants_path = self.root / "grants" / path.name
-            result = PackageImportResult(
-                object_type=object_type,
-                source_full_name=source_full_name,
-                target_full_name=target_full_name,
-                full_name=source_full_name,
-                action="DRY_RUN" if self.dry_run else "CREATE",
-                status="PENDING",
-                ddl_path=str(path),
-                grants_path=str(grants_path) if grants_path.exists() else "",
-                dependency_level=rank,
-                import_order=order,
-                source_definition_hash=str(
-                    inventory_row.get("source_definition_hash")
-                    or inventory_row.get("definition_hash")
-                    or ""
-                ),
-                source_object_id=str(inventory_row.get("object_id") or ""),
-                source_last_modified_at=inventory_row.get("last_modified_at"),
-            )
-            try:
-                sql_text = path.read_text(encoding="utf-8")
-                statements = [
-                    _normalize_create_statement(statement)
-                    for statement in _split_statements(sql_text)
-                ]
-                # Apply explicit target locations from the object-locations config
-                # (schema MANAGED LOCATION / external LOCATION). An external
-                # table/volume with no configured location in existing-catalog mode
-                # cannot be placed — skip it with actionable guidance.
-                statements, manual_reason = self._apply_object_locations(
-                    object_type, parsed_name, statements
-                )
-                if manual_reason and not self.dry_run and self._create_enabled(
-                    object_type
-                ):
-                    result.status = "MANUAL_ACTION_REQUIRED"
-                    result.action = "MANUAL"
-                    result.error_code = "EXTERNAL_LOCATION_MISSING"
-                    result.message = manual_reason
-                    results.append(result)
-                    continue
-                if not self._create_enabled(object_type):
-                    # create_*=false: the object is assumed to already exist on
-                    # target; skip creation but still (later) govern it. Grants
-                    # are still applied so existing objects get their ACLs.
-                    result.status = "SUCCESS"
-                    result.action = "SKIP_CREATE_DISABLED"
-                    if not self.dry_run:
-                        grant_warning = self._apply_grants_file(grants_path, object_type, target_full_name)
-                        result.message = (
-                            "create disabled by toggle; assumed pre-existing"
-                            + (f"; grant warning: {grant_warning}" if grant_warning else "")
-                        )
-                    else:
-                        result.message = "create disabled by toggle (dry run)"
-                    results.append(result)
-                    continue
-                # MI-based storage credentials carry no secret and can be created
-                # from the access-connector id — but CREATE STORAGE CREDENTIAL is
-                # not valid SQL, so they go through the UC REST API when a
-                # workspace client is available.
-                mi_credential = object_type == "STORAGE_CREDENTIAL" and any(
-                    "AZURE_MANAGED_IDENTITY" in s.upper()
-                    and "ACCESS_CONNECTOR_ID" in s.upper()
-                    for s in statements
-                )
-                if mi_credential and not self.dry_run and self.workspace_client:
-                    status, msg = self._create_storage_credential_via_rest(statements)
-                    result.status = status
-                    result.action = "CREATE" if status == "SUCCESS" else "MANUAL"
-                    result.message = msg
-                    if status != "SUCCESS":
-                        result.error_code = "STORAGE_CREDENTIAL_REST"
-                elif object_type in _MANUAL_OBJECT_TYPES and not self.dry_run:
-                    # Credential/share DDL is not executable via Spark SQL; without
-                    # a REST client it is a manual step.
-                    result.status = "MANUAL_ACTION_REQUIRED"
-                    result.action = "MANUAL"
-                    result.error_code = "MANUAL_SQL_OBJECT"
-                    result.message = (
-                        "Object type requires REST/API or admin SQL console; "
-                        "DDL retained in migrated package for review."
-                    )
-                elif self.dry_run:
-                    result.status = "PENDING"
-                    result.message = f"dry_run statements={len(statements)}"
-                else:
-                    # SHOW CREATE emits two-part names, so without an explicit
-                    # context they would resolve against the workspace default
-                    # catalog instead of the mapped target.
-                    self._apply_context(object_type, target_full_name)
-                    skipped_existing = False
-                    for statement in statements:
-                        try:
-                            self.sql.execute(statement)
-                        except Exception as exec_exc:  # noqa: BLE001
-                            if _is_already_exists_error(str(exec_exc)):
-                                skipped_existing = True
-                                continue
-                            raise
-                    if skipped_existing and not self._object_exists(
-                        object_type, target_full_name
-                    ):
-                        raise RuntimeError(
-                            "create reported an existing object but "
-                            f"{target_full_name} is not present in the target"
-                        )
-                    grant_warning = self._apply_grants_file(grants_path, object_type, target_full_name)
-                    if grant_warning and _is_not_found_error(grant_warning):
-                        # Grants cannot resolve an object that was never created.
-                        raise RuntimeError(
-                            f"object missing after create: {grant_warning}"
-                        )
-                    if grant_warning:
-                        result.message = f"created; grant warning: {grant_warning}"
-                    result.status = "SUCCESS"
-                    result.action = (
-                        "SKIP_EXISTING" if skipped_existing else "CREATE_OR_SKIP"
-                    )
-                    if not result.message:
-                        prefix = "already exists; " if skipped_existing else ""
-                        result.message = (
-                            prefix + (statements[0][:1000] if statements else "")
-                        )
-            except Exception as exc:  # noqa: BLE001
-                message = str(exc)
-                exists = self._object_exists(object_type, target_full_name)
-                # Idempotent re-runs: if the mapped securable is already present,
-                # treat create conflicts (managed-location / overlap) as skips.
-                if exists and (
-                    object_type in {"CATALOG", "SCHEMA", "EXTERNAL_LOCATION"}
-                    or _is_location_conflict_error(message)
-                    or _is_already_exists_error(message)
-                ):
-                    grant_warning = self._apply_grants_file(grants_path, object_type, target_full_name)
-                    result.status = "SUCCESS"
-                    result.action = "SKIP_EXISTING"
-                    result.error_code = ""
-                    result.message = (
-                        "already exists; ignored create conflict on re-run"
-                        + (f"; grant warning: {grant_warning}" if grant_warning else "")
-                    )
-                else:
-                    result.status = "FAILURE"
-                    result.error_code = type(exc).__name__
-                    result.message = message
-                    if _is_location_conflict_error(message):
-                        result.error_code = "LOCATION_OVERLAP"
-                        result.message = (
-                            "target storage path is already claimed by another "
-                            "securable; supply location_mapping_csv_path so the "
-                            f"target uses a distinct path. {message[:1200]}"
-                        )
-            results.append(result)
-        # Governance phases (after every object exists): governed tags, then ABAC
-        # policies, then classic mask / row-filter bindings — each toggle-gated.
+
+        # Phase 2 — governed tags on non-view objects. A tag failure on a TABLE
+        # records that table for the drop sweep (fail-closed).
         if self.toggles.get("apply_tags", True):
             results.extend(self._apply_governance_dir(
-                "tags", "APPLY_TAGS", inventory, by_target, len(results)))
+                "tags", "APPLY_TAGS", inventory, by_target, len(results),
+                type_predicate=lambda ot: ot not in _VIEW_LIKE_TYPES))
+
+        # Phase 3 — ABAC policies, run on the SQL warehouse executor. A failure
+        # (including "no warehouse configured" → ABAC_WAREHOUSE_REQUIRED) records
+        # every created table the policy matches for the drop sweep.
         if self.toggles.get("create_abac_policies", True):
             results.extend(self._apply_governance_dir(
-                "abac", "CREATE_POLICY", inventory, by_target, len(results)))
-        if self.toggles.get("apply_masks_row_filters", True):
-            results.extend(self._apply_policy_files(inventory, by_target, len(results)))
+                "abac", "CREATE_POLICY", inventory, by_target, len(results),
+                executor=self.abac_sql, abac_meta=abac_meta))
+
+        # Phase 4 — drop sweep: every table a governance step failed on is dropped
+        # and its create result is mutated to FAILURE (PROTECTION_FAILED) in place,
+        # so the FAILURE shows in the Tables sheet, Issues sheet, uc_sync_audit and
+        # uc_sync_state (all read from this same result list).
+        self._drop_failed_tables()
+
+        # Phase 5 — views / matviews, now that governed tables are settled. A view
+        # on a dropped table fails naturally (its table is gone).
+        for path in view_files:
+            results.append(
+                self._import_ddl_file(path, len(results) + 1, inventory, by_target)
+            )
+
+        # Phase 6 — governed tags on view-like objects (their securable now exists).
+        if self.toggles.get("apply_tags", True):
+            results.extend(self._apply_governance_dir(
+                "tags", "APPLY_TAGS", inventory, by_target, len(results),
+                type_predicate=lambda ot: ot in _VIEW_LIKE_TYPES))
+
         # Ownership transfers run dead last, once every object exists and all
         # governance is applied, so the run principal never loses privileges it
         # still needs mid-run.
         self._apply_deferred_ownership()
         return results
+
+    def _import_ddl_file(
+        self,
+        path: Path,
+        order: int,
+        inventory: dict[str, dict[str, Any]],
+        by_target: dict[str, dict[str, Any]],
+    ) -> "PackageImportResult":
+        """Create one object from its ``ddl/<name>.sql`` file.
+
+        Records tables THIS run actually creates (a fresh ``CREATE_OR_SKIP`` on a
+        ``TABLE``/``EXTERNAL_TABLE``) in ``self._created_tables`` so the fail-closed
+        drop sweep can undo them if their governance later fails.
+        """
+        object_type, parsed_name = _parse_sql_filename(path.name)
+        target_full_name = self._map_name(parsed_name)
+        if not self._in_scope(object_type, target_full_name):
+            return PackageImportResult(
+                object_type=object_type,
+                source_full_name=parsed_name,
+                target_full_name=target_full_name,
+                full_name=parsed_name,
+                action="SKIP_FILTERED",
+                status="SUCCESS",
+                message="excluded by import scope filter",
+                dependency_level=_type_rank(object_type),
+                import_order=order,
+            )
+        inventory_row = (
+            by_target.get(target_full_name)
+            or inventory.get(parsed_name)
+            or inventory.get(target_full_name)
+            or inventory.get(self._guess_source_name(target_full_name, inventory))
+            or {}
+        )
+        source_full_name = str(
+            inventory_row.get("source_full_name")
+            or inventory_row.get("full_name")
+            or parsed_name
+        )
+        rank = _type_rank(object_type)
+        grants_path = self.root / "grants" / path.name
+        result = PackageImportResult(
+            object_type=object_type,
+            source_full_name=source_full_name,
+            target_full_name=target_full_name,
+            full_name=source_full_name,
+            action="DRY_RUN" if self.dry_run else "CREATE",
+            status="PENDING",
+            ddl_path=str(path),
+            grants_path=str(grants_path) if grants_path.exists() else "",
+            dependency_level=rank,
+            import_order=order,
+            source_definition_hash=str(
+                inventory_row.get("source_definition_hash")
+                or inventory_row.get("definition_hash")
+                or ""
+            ),
+            source_object_id=str(inventory_row.get("object_id") or ""),
+            source_last_modified_at=inventory_row.get("last_modified_at"),
+        )
+        try:
+            sql_text = path.read_text(encoding="utf-8")
+            statements = [
+                _normalize_create_statement(statement)
+                for statement in _split_statements(sql_text)
+            ]
+            # Apply explicit target locations from the object-locations config
+            # (schema MANAGED LOCATION / external LOCATION). An external
+            # table/volume with no configured location in existing-catalog mode
+            # cannot be placed — skip it with actionable guidance.
+            statements, manual_reason = self._apply_object_locations(
+                object_type, parsed_name, statements
+            )
+            if manual_reason and not self.dry_run and self._create_enabled(
+                object_type
+            ):
+                result.status = "MANUAL_ACTION_REQUIRED"
+                result.action = "MANUAL"
+                result.error_code = "EXTERNAL_LOCATION_MISSING"
+                result.message = manual_reason
+                return result
+            if not self._create_enabled(object_type):
+                # create_*=false: the object is assumed to already exist on
+                # target; skip creation but still (later) govern it. Grants
+                # are still applied so existing objects get their ACLs.
+                result.status = "SUCCESS"
+                result.action = "SKIP_CREATE_DISABLED"
+                if not self.dry_run:
+                    grant_warning = self._apply_grants_file(grants_path, object_type, target_full_name)
+                    result.message = (
+                        "create disabled by toggle; assumed pre-existing"
+                        + (f"; grant warning: {grant_warning}" if grant_warning else "")
+                    )
+                else:
+                    result.message = "create disabled by toggle (dry run)"
+                return result
+            # MI-based storage credentials carry no secret and can be created
+            # from the access-connector id — but CREATE STORAGE CREDENTIAL is
+            # not valid SQL, so they go through the UC REST API when a
+            # workspace client is available.
+            mi_credential = object_type == "STORAGE_CREDENTIAL" and any(
+                "AZURE_MANAGED_IDENTITY" in s.upper()
+                and "ACCESS_CONNECTOR_ID" in s.upper()
+                for s in statements
+            )
+            if mi_credential and not self.dry_run and self.workspace_client:
+                status, msg = self._create_storage_credential_via_rest(statements)
+                result.status = status
+                result.action = "CREATE" if status == "SUCCESS" else "MANUAL"
+                result.message = msg
+                if status != "SUCCESS":
+                    result.error_code = "STORAGE_CREDENTIAL_REST"
+            elif object_type in _MANUAL_OBJECT_TYPES and not self.dry_run:
+                # Credential/share DDL is not executable via Spark SQL; without
+                # a REST client it is a manual step.
+                result.status = "MANUAL_ACTION_REQUIRED"
+                result.action = "MANUAL"
+                result.error_code = "MANUAL_SQL_OBJECT"
+                result.message = (
+                    "Object type requires REST/API or admin SQL console; "
+                    "DDL retained in migrated package for review."
+                )
+            elif self.dry_run:
+                result.status = "PENDING"
+                result.message = f"dry_run statements={len(statements)}"
+            else:
+                # SHOW CREATE emits two-part names, so without an explicit
+                # context they would resolve against the workspace default
+                # catalog instead of the mapped target.
+                self._apply_context(object_type, target_full_name)
+                skipped_existing = False
+                for statement in statements:
+                    try:
+                        self.sql.execute(statement)
+                    except Exception as exec_exc:  # noqa: BLE001
+                        if _is_already_exists_error(str(exec_exc)):
+                            skipped_existing = True
+                            continue
+                        raise
+                if skipped_existing and not self._object_exists(
+                    object_type, target_full_name
+                ):
+                    raise RuntimeError(
+                        "create reported an existing object but "
+                        f"{target_full_name} is not present in the target"
+                    )
+                grant_warning = self._apply_grants_file(grants_path, object_type, target_full_name)
+                if grant_warning and _is_not_found_error(grant_warning):
+                    # Grants cannot resolve an object that was never created.
+                    raise RuntimeError(
+                        f"object missing after create: {grant_warning}"
+                    )
+                if grant_warning:
+                    result.message = f"created; grant warning: {grant_warning}"
+                result.status = "SUCCESS"
+                result.action = (
+                    "SKIP_EXISTING" if skipped_existing else "CREATE_OR_SKIP"
+                )
+                if not result.message:
+                    prefix = "already exists; " if skipped_existing else ""
+                    result.message = (
+                        prefix + (statements[0][:1000] if statements else "")
+                    )
+        except Exception as exc:  # noqa: BLE001
+            message = str(exc)
+            exists = self._object_exists(object_type, target_full_name)
+            # Idempotent re-runs: if the mapped securable is already present,
+            # treat create conflicts (managed-location / overlap) as skips.
+            if exists and (
+                object_type in {"CATALOG", "SCHEMA", "EXTERNAL_LOCATION"}
+                or _is_location_conflict_error(message)
+                or _is_already_exists_error(message)
+            ):
+                grant_warning = self._apply_grants_file(grants_path, object_type, target_full_name)
+                result.status = "SUCCESS"
+                result.action = "SKIP_EXISTING"
+                result.error_code = ""
+                result.message = (
+                    "already exists; ignored create conflict on re-run"
+                    + (f"; grant warning: {grant_warning}" if grant_warning else "")
+                )
+            else:
+                result.status = "FAILURE"
+                result.error_code = type(exc).__name__
+                result.message = message
+                if _is_location_conflict_error(message):
+                    result.error_code = "LOCATION_OVERLAP"
+                    result.message = (
+                        "target storage path is already claimed by another "
+                        "securable; supply location_mapping_csv_path so the "
+                        f"target uses a distinct path. {message[:1200]}"
+                    )
+        # Record tables THIS run created (fresh, empty shells) so the fail-closed
+        # drop sweep can undo them. A pre-existing (SKIP_EXISTING) table is left
+        # untouched — never dropped.
+        if (
+            object_type in _DROPPABLE_TABLE_TYPES
+            and result.status == "SUCCESS"
+            and result.action == "CREATE_OR_SKIP"
+        ):
+            self._created_tables[target_full_name] = result
+        return result
+
+    def _abac_meta_by_stem(
+        self, inventory: dict[str, dict[str, Any]]
+    ) -> dict[str, dict[str, str]]:
+        """Map each ``abac/<stem>.sql`` file stem to its policy identity + scope.
+
+        Lets an ABAC failure be mapped to the table(s) it protects (drop sweep) and
+        gives the ABAC result its real policy full name (``…#policy:name``) so the
+        report/audit can key it. Built from the inventory's ABAC_POLICY rows.
+        """
+        from uc_sync.export import _safe_filename
+
+        meta: dict[str, dict[str, str]] = {}
+        for row in inventory.values():
+            if row.get("object_type") != ObjectType.ABAC_POLICY.value:
+                continue
+            full_name = str(row.get("full_name") or row.get("source_full_name") or "")
+            if not full_name:
+                continue
+            stem = _safe_filename(ObjectType.ABAC_POLICY.value, full_name)
+            if stem in meta:
+                continue
+            d = row.get("definition") or {}
+            meta[stem] = {
+                "full_name": full_name,
+                "on_type": str(d.get("on_securable_type") or "").upper(),
+                "on_securable": str(d.get("on_securable") or ""),
+            }
+        return meta
+
+    def _abac_matched_tables(self, meta: Optional[dict[str, str]]) -> list[str]:
+        """Created tables the ABAC policy in ``meta`` protects (target-named)."""
+        if not meta or not meta.get("on_securable"):
+            return []
+        on_type = meta.get("on_type", "")
+        on_securable = self._map_name(meta["on_securable"])
+        return [
+            tbl for tbl in self._created_tables
+            if _table_in_policy_scope(tbl, on_type, on_securable)
+        ]
+
+    def _record_governance_failure(
+        self,
+        object_type: str,
+        target_full_name: str,
+        action_label: str,
+        meta: Optional[dict[str, str]],
+        feature: str,
+    ) -> bool:
+        """Record the table(s) a failed governance op leaves unprotected.
+
+        Returns True if ≥1 table was recorded for the drop sweep — i.e. the failure
+        is on a table (classic/governed tag) or an ABAC policy that matches created
+        tables. A failure on a non-table securable (catalog/schema/volume/view)
+        records nothing and returns False.
+        """
+        recorded = False
+        if action_label == "CREATE_POLICY":
+            policy = (meta or {}).get("full_name", "policy")
+            for tbl in self._abac_matched_tables(meta):
+                self._failed_tables.setdefault(tbl, f"ABAC {policy} ({feature})")
+                recorded = True
+            return recorded
+        if object_type in _DROPPABLE_TABLE_TYPES:
+            self._failed_tables.setdefault(target_full_name, f"governed tag ({feature})")
+            recorded = True
+        return recorded
+
+    def _drop_failed_tables(self) -> None:
+        """Drop every table a governance step failed on and flip its create result.
+
+        Fail-closed: a governed table that could not be fully protected must not
+        survive. The create ``PackageImportResult`` is mutated to FAILURE in place
+        so the outcome reaches the report, audit, and state (all read this list).
+        """
+        if self.dry_run or not self._failed_tables:
+            return
+        for target_full_name, feature in self._failed_tables.items():
+            create_result = self._created_tables.get(target_full_name)
+            if create_result is None:
+                # Not a shell this run created (pre-existing, or its own CREATE
+                # already failed) — nothing to drop.
+                continue
+            try:
+                self.sql.execute(
+                    f"DROP TABLE IF EXISTS {quote_full_name(target_full_name)}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[import] fail-closed drop of {target_full_name} raised: "
+                    f"{str(exc)[:200]}"
+                )
+            create_result.status = "FAILURE"
+            create_result.action = "DROP_PROTECTION_FAILED"
+            create_result.error_code = "PROTECTION_FAILED"
+            create_result.message = (
+                "table dropped (fail-closed): a governance step failed — "
+                f"{feature}"
+            )
 
     def _apply_governance_dir(
         self,
@@ -670,12 +872,25 @@ class PackageImportEngine:
         inventory: dict[str, dict[str, Any]],
         by_target: dict[str, dict[str, Any]],
         start_order: int,
+        *,
+        executor: Any = None,
+        type_predicate: Any = None,
+        abac_meta: Optional[dict[str, dict[str, str]]] = None,
     ) -> list["PackageImportResult"]:
         """Apply governed-tag (``tags/``) or ABAC (``abac/``) SQL files.
 
         Idempotent: an already-assigned tag or already-existing policy is a skip.
-        A missing governed-tag definition or referenced function surfaces as
-        MANUAL_ACTION_REQUIRED (the infosec prerequisite is owned elsewhere).
+
+        Fail-closed: a failure applying a governed tag to a **table**, or an ABAC
+        policy that matches created tables, records those table(s) for the drop
+        sweep and marks the op FAILURE (``PROTECTION_FAILED``). A failure on a
+        non-table securable whose prerequisite is simply missing keeps the softer
+        ``MANUAL_ACTION_REQUIRED`` (the infosec prerequisite is owned elsewhere).
+
+        ``executor`` overrides the SQL executor (ABAC runs on the SQL warehouse);
+        ``type_predicate`` filters which object types are processed (views are
+        tagged in a later pass, after they are created); ``abac_meta`` marks the
+        ABAC phase and carries per-file policy scope for the drop mapping.
         """
 
         governance_dir = self.root / dirname
@@ -685,24 +900,45 @@ class PackageImportEngine:
             path for path in governance_dir.glob("*.sql")
             if path.is_file() and not path.name.startswith("all_")
         )
+        is_abac = abac_meta is not None
+        # ABAC runs ONLY on its dedicated warehouse executor and never falls back
+        # to the Spark executor (which rejects CREATE POLICY at parse); without one
+        # the bundle fails closed (matched tables dropped), never silently skipped.
+        # Tag / classic phases use the main executor when none is supplied.
+        exec_sql = executor if is_abac else (
+            executor if executor is not None else self.sql
+        )
+        abac_no_warehouse = is_abac and exec_sql is None
         results: list[PackageImportResult] = []
-        for offset, path in enumerate(files, start=1):
+        offset = 0
+        for path in files:
             object_type, parsed_name = _parse_sql_filename(path.name)
+            if type_predicate is not None and not type_predicate(object_type):
+                continue
             target_full_name = self._map_name(parsed_name)
             if not self._in_scope(object_type, target_full_name):
                 continue  # object excluded by the import scope filter
-            inventory_row = (
-                by_target.get(target_full_name) or inventory.get(parsed_name) or {}
-            )
-            source_full_name = str(
-                inventory_row.get("source_full_name")
-                or inventory_row.get("full_name")
-                or parsed_name
-            )
+            offset += 1
+            meta = abac_meta.get(path.stem) if is_abac else None
+            if meta:
+                # Key the ABAC result by the real policy full name so the report /
+                # audit can resolve it (…on_securable#policy:name).
+                source_full_name = meta["full_name"]
+                display_name = meta["full_name"]
+            else:
+                inventory_row = (
+                    by_target.get(target_full_name) or inventory.get(parsed_name) or {}
+                )
+                source_full_name = str(
+                    inventory_row.get("source_full_name")
+                    or inventory_row.get("full_name")
+                    or parsed_name
+                )
+                display_name = target_full_name
             result = PackageImportResult(
                 object_type=object_type,
                 source_full_name=source_full_name,
-                target_full_name=target_full_name,
+                target_full_name=display_name,
                 full_name=source_full_name,
                 action="DRY_RUN" if self.dry_run else action_label,
                 status="PENDING",
@@ -715,130 +951,66 @@ class PackageImportEngine:
                 if self.dry_run:
                     result.status = "PENDING"
                     result.message = f"dry_run statements={len(statements)}"
+                elif abac_no_warehouse:
+                    result.status = "FAILURE"
+                    result.action = "MANUAL"
+                    result.error_code = "ABAC_WAREHOUSE_REQUIRED"
+                    result.message = (
+                        "ABAC CREATE POLICY requires a SQL warehouse "
+                        "(import_warehouse_id); it is rejected on a classic Spark "
+                        "cluster. Matched table(s) are dropped fail-closed. Set "
+                        "import_warehouse_id and re-run."
+                    )
+                    self._record_governance_failure(
+                        object_type, target_full_name, action_label, meta,
+                        "ABAC_WAREHOUSE_REQUIRED",
+                    )
                 else:
-                    # tags/ALTER need session context; abac CREATE POLICY is fully
-                    # qualified but context is harmless.
+                    # tags/ALTER need session context; ABAC CREATE POLICY is fully
+                    # qualified (context is skipped for ABAC_POLICY).
                     self._apply_context(object_type, target_full_name)
                     skipped = False
-                    manual = ""
+                    failed = ""
                     for statement in statements:
                         try:
-                            self.sql.execute(statement)
+                            exec_sql.execute(statement)
                         except Exception as exec_exc:  # noqa: BLE001
                             message = str(exec_exc)
                             if _is_policy_exists_error(message) or _is_already_exists_error(message):
                                 skipped = True
                                 continue
-                            if _is_governance_prereq_error(message):
-                                manual = message
-                                break
-                            raise
-                    if manual:
-                        result.status = "MANUAL_ACTION_REQUIRED"
-                        result.action = "MANUAL"
-                        result.error_code = "GOVERNANCE_PREREQ_MISSING"
-                        result.message = (
-                            "Governed-tag definition or referenced function is "
-                            f"missing on the target: {manual[:400]}"
+                            failed = message
+                            break
+                    if failed:
+                        dropped = self._record_governance_failure(
+                            object_type, target_full_name, action_label, meta, failed
                         )
+                        if dropped:
+                            result.status = "FAILURE"
+                            result.action = "MANUAL"
+                            result.error_code = "PROTECTION_FAILED"
+                            result.message = (
+                                "governance failed; protected table(s) dropped "
+                                f"fail-closed: {failed[:400]}"
+                            )
+                        elif _is_governance_prereq_error(failed):
+                            result.status = "MANUAL_ACTION_REQUIRED"
+                            result.action = "MANUAL"
+                            result.error_code = "GOVERNANCE_PREREQ_MISSING"
+                            result.message = (
+                                "Governed-tag definition or referenced function is "
+                                f"missing on the target: {failed[:400]}"
+                            )
+                        else:
+                            result.status = "FAILURE"
+                            result.error_code = "GOVERNANCE_FAILED"
+                            result.message = failed[:600]
                     else:
                         result.status = "SUCCESS"
                         result.action = "SKIP_EXISTING" if skipped else action_label
                         result.message = (
                             ("already applied; " if skipped else "")
                             + (statements[0][:500] if statements else "")
-                        )
-            except Exception as exc:  # noqa: BLE001
-                result.status = "FAILURE"
-                result.error_code = type(exc).__name__
-                result.message = str(exc)
-            results.append(result)
-        return results
-
-    def _apply_policy_files(
-        self,
-        inventory: dict[str, dict[str, Any]],
-        by_target: dict[str, dict[str, Any]],
-        start_order: int,
-    ) -> list["PackageImportResult"]:
-        """Apply column masks / row filters after every object is created.
-
-        Runs as a dedicated late phase so the referenced mask/filter functions
-        (created after tables) and the tables themselves already exist. Each
-        ``policies/<name>.sql`` holds ``ALTER TABLE`` binding statements; re-runs
-        treat an already-bound policy as a skip.
-        """
-
-        policy_dir = self.root / "policies"
-        if not policy_dir.exists():
-            return []
-        policy_files = sorted(
-            path
-            for path in policy_dir.glob("*.sql")
-            if path.is_file() and not path.name.startswith("all_")
-        )
-        results: list[PackageImportResult] = []
-        for offset, path in enumerate(policy_files, start=1):
-            object_type, parsed_name = _parse_sql_filename(path.name)
-            target_full_name = self._map_name(parsed_name)
-            if not self._in_scope(object_type, target_full_name):
-                continue  # object excluded by the import scope filter
-            inventory_row = (
-                by_target.get(target_full_name)
-                or inventory.get(parsed_name)
-                or inventory.get(target_full_name)
-                or {}
-            )
-            source_full_name = str(
-                inventory_row.get("source_full_name")
-                or inventory_row.get("full_name")
-                or parsed_name
-            )
-            result = PackageImportResult(
-                object_type=object_type,
-                source_full_name=source_full_name,
-                target_full_name=target_full_name,
-                full_name=source_full_name,
-                action="DRY_RUN" if self.dry_run else "APPLY_POLICY",
-                status="PENDING",
-                policies_path=str(path),
-                dependency_level=_type_rank(object_type),
-                import_order=start_order + offset,
-            )
-            try:
-                statements = _split_statements(path.read_text(encoding="utf-8"))
-                if self.dry_run:
-                    result.status = "PENDING"
-                    result.message = f"dry_run policy statements={len(statements)}"
-                else:
-                    self._apply_context(object_type, target_full_name)
-                    skipped_existing = False
-                    unsupported = ""
-                    for statement in statements:
-                        try:
-                            self.sql.execute(statement)
-                        except Exception as exec_exc:  # noqa: BLE001
-                            message = str(exec_exc)
-                            if _is_policy_exists_error(message):
-                                skipped_existing = True
-                                continue
-                            if _is_policy_unsupported_error(message):
-                                unsupported = message
-                                break
-                            raise
-                    if unsupported:
-                        result.status = "MANUAL_ACTION_REQUIRED"
-                        result.action = "MANUAL"
-                        result.error_code = "POLICY_COMPUTE_UNSUPPORTED"
-                        result.message = f"{_POLICY_COMPUTE_HINT} {unsupported[:400]}"
-                    else:
-                        result.status = "SUCCESS"
-                        result.action = (
-                            "SKIP_EXISTING" if skipped_existing else "APPLY_POLICY"
-                        )
-                        prefix = "already applied; " if skipped_existing else ""
-                        result.message = prefix + (
-                            statements[0][:1000] if statements else ""
                         )
             except Exception as exc:  # noqa: BLE001
                 result.status = "FAILURE"
@@ -1027,7 +1199,13 @@ class PackageImportEngine:
         parts = str(target_full_name or "").split(".")
         catalog = parts[0] if len(parts) > 1 else ""
         schema = parts[1] if len(parts) > 2 else ""
-        if object_type in {"CATALOG", "STORAGE_CREDENTIAL", "EXTERNAL_LOCATION"}:
+        # ABAC CREATE POLICY is fully qualified, so it needs no USE context. Worse,
+        # its target_full_name is the policy full name (…#policy:name), whose
+        # decoded middle segment is a literal ``policy`` — USE SCHEMA on it raised
+        # SCHEMA_NOT_FOUND. Skip context for ABAC entirely.
+        if object_type in {
+            "CATALOG", "STORAGE_CREDENTIAL", "EXTERNAL_LOCATION", "ABAC_POLICY",
+        }:
             return
         if (catalog, schema) == self._context or not catalog:
             return
