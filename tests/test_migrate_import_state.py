@@ -281,7 +281,8 @@ def test_import_applies_catalog_mapping(tmp_path: Path):
     ).run()
 
     assert any("CATALOG" in s.upper() and "tgt_cat" in s for s in sql.statements)
-    assert any("tgt_cat.s.t" in s for s in sql.statements)
+    # The table create carries the fully-qualified 3-level target name.
+    assert any("`tgt_cat`.`s`.`t`" in s for s in sql.statements)
     # source catalog name never reaches the executor
     assert not any("src_cat" in s for s in sql.statements)
     by = {r.object_type: r for r in results}
@@ -485,8 +486,10 @@ def test_already_exists_treated_as_success(tmp_path: Path):
     assert result.action == "SKIP_EXISTING"
 
 
-def test_unqualified_create_runs_under_target_context(tmp_path: Path):
-    """SHOW CREATE emits `schema.view`, which must not hit the default catalog."""
+def test_unqualified_create_is_rewritten_to_three_level_name(tmp_path: Path):
+    """SHOW CREATE emits `schema.view`; replay rewrites it to the fully-qualified
+    3-level name and issues NO USE CATALOG/SCHEMA — so it resolves correctly on any
+    (stateless) executor, never against a default catalog."""
     root = _package_with(
         tmp_path,
         "VIEW_tgt__s__v.sql",
@@ -495,9 +498,13 @@ def test_unqualified_create_runs_under_target_context(tmp_path: Path):
     sql = FakeSql()
     result = PackageImportEngine(str(root), sql, dry_run=False).run()[0]
     assert result.status == "SUCCESS"
-    assert sql.statements[0] == "USE CATALOG `tgt`"
-    assert sql.statements[1] == "USE SCHEMA `s`"
-    assert sql.statements[2].startswith("CREATE OR REPLACE VIEW")
+    # No USE context statements at all.
+    assert not any(s.upper().startswith("USE ") for s in sql.statements)
+    # The create carries its own 3-level namespace.
+    create = next(
+        s for s in sql.statements if s.upper().lstrip().startswith("CREATE")
+    )
+    assert create.startswith("CREATE OR REPLACE VIEW `tgt`.`s`.`v`")
 
 
 def test_location_overlap_is_a_failure_not_a_skip(tmp_path: Path):

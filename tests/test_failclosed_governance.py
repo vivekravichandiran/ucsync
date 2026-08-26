@@ -346,11 +346,12 @@ def test_governed_tag_failure_fails_the_catalog_object_without_drop(tmp_path: Pa
 # --- P2-B view-on-warehouse routing -----------------------------------------
 
 
-def test_views_created_on_warehouse_executor_with_its_own_context(tmp_path: Path):
-    """Plan P2-B: with a warehouse executor supplied, CREATE VIEW (and its USE
-    context, existence probe, grants) runs on the WAREHOUSE executor — a classic
-    Spark cluster errors on a view over a masked table. Tables/functions still run
-    on the main executor."""
+def test_views_created_on_warehouse_executor_fully_qualified(tmp_path: Path):
+    """Plan P2-B: with a warehouse executor supplied, CREATE VIEW (+ existence probe,
+    grants) runs on the WAREHOUSE executor — a classic Spark cluster errors on a view
+    over a masked table. The view is fully 3-level qualified with NO USE context (the
+    warehouse runs each statement statelessly). Tables/functions run on the main
+    executor."""
     root = tmp_path / "migrated"
     _write(root, "ddl/CATALOG_c.sql", "CREATE CATALOG `c`;\n")
     _write(root, "ddl/SCHEMA_c__hr.sql", "CREATE SCHEMA `c`.`hr`;\n")
@@ -373,13 +374,14 @@ def test_views_created_on_warehouse_executor_with_its_own_context(tmp_path: Path
     assert all(r.status == "SUCCESS" for r in results), [
         (r.object_type, r.status, r.message) for r in results
     ]
-    # CREATE VIEW ran on the warehouse, not the main executor.
+    # CREATE VIEW ran on the warehouse, not the main executor, fully 3-level
+    # qualified with NO USE context.
     assert any("CREATE" in s.upper() and "VIEW" in s.upper() for s in wh.statements)
     assert not any(
         "CREATE" in s.upper() and "VIEW" in s.upper() for s in main.statements
     )
-    # The view's USE context ran on the warehouse (its own session).
-    assert any(s.upper().startswith("USE CATALOG") for s in wh.statements)
+    assert any("`c`.`hr`.`v`" in s for s in wh.statements)
+    assert not any(s.upper().startswith("USE ") for s in wh.statements)
     # The view's ordinary grant ran on the warehouse too.
     assert any("GRANT SELECT" in s for s in wh.statements)
     # The table was created on the main executor (not the warehouse).

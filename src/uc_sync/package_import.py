@@ -205,6 +205,44 @@ def quote_full_name(full_name: str) -> str:
     return ".".join(f"`{part}`" for part in str(full_name).split(".") if part)
 
 
+# The object name that follows ``CREATE <type> [IF NOT EXISTS]``. Captures the
+# CREATE head (group 1) and the object name (group 2), whether the name is 1-, 2-,
+# or 3-part and backtick-quoted or bare. ``STORAGE CREDENTIAL`` is intentionally not
+# matched — it is created over REST, never executed as SQL.
+_CREATE_NAME_RE = re.compile(
+    r"^(\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMPORARY\s+)?"
+    r"(?:EXTERNAL\s+|MATERIALIZED\s+|STREAMING\s+)?"
+    r"(?:TABLE|VIEW|FUNCTION|VOLUME|SCHEMA|CATALOG|LOCATION)\s+"
+    r"(?:IF\s+NOT\s+EXISTS\s+)?)"
+    r"(`[^`]+`(?:\s*\.\s*`[^`]+`)*|[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _qualify_create_name(statement: str, target_full_name: str) -> str:
+    """Force the object name after ``CREATE <type>`` to the fully-qualified 3-level
+    target name.
+
+    The utility replays every statement with an explicit namespace and never relies
+    on ``USE CATALOG`` / ``USE SCHEMA`` session context — the SQL warehouse
+    (``RestSqlExecutor``) runs each statement in a fresh, stateless session, so a
+    2-part name (``SHOW CREATE VIEW`` emits ``schema.view``) would otherwise resolve
+    against the warehouse's default catalog. Idempotent for names already fully
+    qualified; non-CREATE / unmatched statements pass through unchanged. Catalog
+    (1-part) and schema (2-part) targets qualify to their own correct depth.
+    """
+    if not target_full_name:
+        return statement
+    match = _CREATE_NAME_RE.match(statement)
+    if not match:
+        return statement
+    return (
+        statement[: match.start(2)]
+        + quote_full_name(target_full_name)
+        + statement[match.end(2) :]
+    )
+
+
 def _normalize_create_statement(statement: str) -> str:
     """Inject IF NOT EXISTS / OR REPLACE for idempotent CREATE_OR_SKIP imports."""
 
@@ -372,10 +410,6 @@ class PackageImportEngine:
         if "apply_grants" not in self.toggles:
             self.toggles["apply_grants"] = apply_grants
         self.apply_grants = self.toggles["apply_grants"]
-        self._context: tuple[str, str] = ("", "")
-        # The warehouse executor is a SEPARATE SQL session, so it keeps its own
-        # USE CATALOG / USE SCHEMA context independent of the main executor's.
-        self._wh_context: tuple[str, str] = ("", "")
         # Ownership (`ALTER … OWNER TO`) transfers are deferred to a final phase so
         # the run principal keeps CREATE/MODIFY on each securable while it is still
         # building children and applying governance. Each entry is
@@ -681,6 +715,11 @@ class PackageImportEngine:
             statements, manual_reason = self._apply_object_locations(
                 object_type, parsed_name, statements
             )
+            # Replay with an explicit 3-level namespace — never depend on session
+            # USE context (the warehouse runs each statement statelessly).
+            statements = [
+                _qualify_create_name(s, target_full_name) for s in statements
+            ]
             if manual_reason and not self.dry_run and self._create_enabled(
                 object_type
             ):
@@ -737,12 +776,10 @@ class PackageImportEngine:
                 result.status = "PENDING"
                 result.message = f"dry_run statements={len(statements)}"
             else:
-                # SHOW CREATE emits two-part names, so without an explicit
-                # context they would resolve against the workspace default
-                # catalog instead of the mapped target.
-                self._apply_context(
-                    object_type, target_full_name, executor=executor
-                )
+                # Names are fully qualified above (_qualify_create_name), so no
+                # USE CATALOG / USE SCHEMA context is issued — the statement carries
+                # its own 3-level namespace and runs correctly on any (stateless)
+                # executor.
                 skipped_existing = False
                 for statement in statements:
                     try:
@@ -1067,9 +1104,8 @@ class PackageImportEngine:
                         "ABAC_WAREHOUSE_REQUIRED",
                     )
                 else:
-                    # tags/ALTER need session context; ABAC CREATE POLICY is fully
-                    # qualified (context is skipped for ABAC_POLICY).
-                    self._apply_context(object_type, target_full_name)
+                    # Governed-tag ALTER statements and ABAC CREATE POLICY are both
+                    # fully qualified (3-level), so no USE context is needed.
                     skipped = False
                     failed = ""
                     for statement in statements:
@@ -1303,37 +1339,6 @@ class PackageImportEngine:
             count=1,
             flags=re.IGNORECASE,
         )
-
-    def _apply_context(
-        self, object_type: str, target_full_name: str, *, executor: Any = None
-    ) -> None:
-        parts = str(target_full_name or "").split(".")
-        catalog = parts[0] if len(parts) > 1 else ""
-        schema = parts[1] if len(parts) > 2 else ""
-        # ABAC CREATE POLICY is fully qualified, so it needs no USE context. Worse,
-        # its target_full_name is the policy full name (…#policy:name), whose
-        # decoded middle segment is a literal ``policy`` — USE SCHEMA on it raised
-        # SCHEMA_NOT_FOUND. Skip context for ABAC entirely.
-        if object_type in {
-            "CATALOG", "STORAGE_CREDENTIAL", "EXTERNAL_LOCATION", "ABAC_POLICY",
-        }:
-            return
-        if not catalog:
-            return
-        # The warehouse executor is a distinct SQL session with its own USE context,
-        # so track (and compare against) a separate cache — never the main session's.
-        exec_sql = executor if executor is not None else self.sql
-        on_warehouse = executor is not None and executor is self.warehouse_sql
-        cache = self._wh_context if on_warehouse else self._context
-        if (catalog, schema) == cache:
-            return
-        exec_sql.execute(f"USE CATALOG `{catalog}`")
-        if schema:
-            exec_sql.execute(f"USE SCHEMA `{schema}`")
-        if on_warehouse:
-            self._wh_context = (catalog, schema)
-        else:
-            self._context = (catalog, schema)
 
     def _object_exists(
         self, object_type: str, target_full_name: str, *, executor: Any = None
