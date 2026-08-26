@@ -4,7 +4,11 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="1862a172-d182-46cb-8967-79eb137ce7bc" name="Changes" comment="Add table drop on gov failure" />
+    <list default="true" id="1862a172-d182-46cb-8967-79eb137ce7bc" name="Changes" comment="Job param updated">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/runbook.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/runbook.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plans/incremental-updates.md" beforeDir="false" afterPath="$PROJECT_DIR$/plans/incremental-updates.md" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -204,7 +208,15 @@
       <option name="project" value="LOCAL" />
       <updated>1787747318849</updated>
     </task>
-    <option name="localTasksCounter" value="18" />
+    <task id="LOCAL-00018" summary="Job param updated">
+      <option name="closed" value="true" />
+      <created>1787748802723</created>
+      <option name="number" value="00018" />
+      <option name="presentableId" value="LOCAL-00018" />
+      <option name="project" value="LOCAL" />
+      <updated>1787748802723</updated>
+    </task>
+    <option name="localTasksCounter" value="19" />
     <servers />
   </component>
   <component name="VcsManagerConfiguration">
@@ -215,6 +227,7 @@
     <MESSAGE value="Updated docs" />
     <MESSAGE value="Handle catalog mapping" />
     <MESSAGE value="Add table drop on gov failure" />
-    <option name="LAST_COMMIT_MESSAGE" value="Add table drop on gov failure" />
+    <MESSAGE value="Job param updated" />
+    <option name="LAST_COMMIT_MESSAGE" value="Job param updated" />
   </component>
 </project>

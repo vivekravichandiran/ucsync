@@ -136,14 +136,46 @@ location + credential auto-created if `create_*` are on and the mapping provides
 them). Only that subtree is migrated.
 
 ### Scenario 5 — Airgap (no network between regions)
-1. Run **01 + 02** on the **source** workspace (`connectivity_mode=airgap`).
-   **`source_warehouse_id` is required** — a SQL warehouse on the source. Export
-   captures all DDL over it (`SHOW CREATE` + functions from `information_schema`); a
-   classic job cluster is unreliable on masked tables and can't read
-   `abac_policy_definitions`. Without it, export fails fast.
-2. Move the whole `run_<id>/` directory to the target (download/upload the volume
-   folder). Verify `manifest.json` + `checksums/` are present.
-3. Run **03** on the **target** workspace pointing at the moved `run_<id>/`.
+Two separate jobs, one per workspace. Fill the widgets exactly as below.
+
+**Job A — Airgap Inventory+Export (source workspace).** Runs 01 → 02; `run_id`
+chains automatically (`{{job.run_id}}`) — note it from the run for step 2.
+
+| Stage | Widget | Value |
+|---|---|---|
+| 01 Inventory | `connectivity_mode` | `airgap` |
+| | `catalogs` | `<catalog>` (comma-separated; blank = whole metastore) |
+| | `schemas` | blank (= all) or a subset |
+| | `source_warehouse_id` | a **source** SQL warehouse — **required** (DDL capture + ABAC read) |
+| | `output_volume_path` | `/Volumes/<src_ops>/uc_export` (bundle lands here) |
+| | `ops_catalog` / `ops_schema` | source audit/state location |
+| | `source_workspace_url` / SP creds | blank (job runs *on* the source → local auth) |
+| 02 Export | `source_warehouse_id` | **same source warehouse** (required — no synth fallback) |
+| | `mapping_file_path` | blank (mapping is an **import**-stage input, not export) |
+| | `output_volume_path` / `ops_*` | same as 01 |
+
+**Step 2 — move the bundle.** Copy the whole `run_<id>/` directory from the source
+`output_volume_path` to the target volume (download/upload). Verify `manifest.json` +
+`checksums/` are present. `<id>` is the source run's `run_id`.
+
+**Job B — Airgap Import (target workspace).** Runs 03 against the moved bundle.
+
+| Widget | Value |
+|---|---|
+| `run_id` | the source bundle's `run_<id>` id — **set this per run** (it's a job parameter, not chained) |
+| `output_volume_path` | the target path holding the moved `run_<id>/` |
+| `ops_catalog` / `ops_schema` | target audit/state location |
+| `import_warehouse_id` | a **target** SQL warehouse — **required** if the bundle has ABAC and/or views over masked tables |
+| `mapping_file_path` | **Mode A** (create SC+EL+catalog): target mapping CSV. **Mode B** (catalog pre-exists): blank |
+| `catalog_mapping_json` | `{"<source>":"<target>"}` to rename; blank = identity (same name) |
+| `object_locations_path` | CSV for external tables/volumes + per-schema managed locations; blank if none |
+| all `create_*` / `apply_*` | `true` (defaults) |
+| `run_as_spn` | optional **target** service principal to own everything (see note) |
+
+> **run_as note:** `run_as_spn` is applied to the **target/import** job only (and the
+> e2e jobs) — the source Inventory+Export job currently always runs as the deploying
+> user. To run the source job as a source-side service principal, set the job's
+> run-as in the workspace UI after install (tracked in `plans/incremental-updates.md`).
 
 ### Scenario 6 — Direct (job runs on target, reads source over a warehouse)
 `connectivity_mode=direct`; set `source_workspace_url` + source SP creds +
