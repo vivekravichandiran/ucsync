@@ -4,10 +4,9 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="1862a172-d182-46cb-8967-79eb137ce7bc" name="Changes" comment="Job param updated">
+    <list default="true" id="1862a172-d182-46cb-8967-79eb137ce7bc" name="Changes" comment="Docs updated">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/docs/runbook.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/runbook.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/plans/incremental-updates.md" beforeDir="false" afterPath="$PROJECT_DIR$/plans/incremental-updates.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.isaac/config.json" beforeDir="false" afterPath="$PROJECT_DIR$/.isaac/config.json" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -216,7 +215,23 @@
       <option name="project" value="LOCAL" />
       <updated>1787748802723</updated>
     </task>
-    <option name="localTasksCounter" value="19" />
+    <task id="LOCAL-00019" summary="Docs updated">
+      <option name="closed" value="true" />
+      <created>1787752583665</created>
+      <option name="number" value="00019" />
+      <option name="presentableId" value="LOCAL-00019" />
+      <option name="project" value="LOCAL" />
+      <updated>1787752583665</updated>
+    </task>
+    <task id="LOCAL-00020" summary="Docs updated">
+      <option name="closed" value="true" />
+      <created>1787755875899</created>
+      <option name="number" value="00020" />
+      <option name="presentableId" value="LOCAL-00020" />
+      <option name="project" value="LOCAL" />
+      <updated>1787755875899</updated>
+    </task>
+    <option name="localTasksCounter" value="21" />
     <servers />
   </component>
   <component name="VcsManagerConfiguration">
@@ -228,6 +243,7 @@
     <MESSAGE value="Handle catalog mapping" />
     <MESSAGE value="Add table drop on gov failure" />
     <MESSAGE value="Job param updated" />
-    <option name="LAST_COMMIT_MESSAGE" value="Job param updated" />
+    <MESSAGE value="Docs updated" />
+    <option name="LAST_COMMIT_MESSAGE" value="Docs updated" />
   </component>
 </project>

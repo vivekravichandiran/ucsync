@@ -1,0 +1,1198 @@
+{
+  "catalogs": {
+    "ai27_uc_gov_src": {
+      "comment": null,
+      "tags": [
+        [
+          "ai27_uc_classification",
+          "INTERNAL"
+        ]
+      ],
+      "schemas": {
+        "analytics": {
+          "tables": {},
+          "views": {
+            "emp_dynamic": {
+              "ddl": "CREATE VIEW analytics.emp_dynamic (\n  id COMMENT 'Surrogate identity key',\n  emp_name COMMENT 'Employee full name',\n  dept COMMENT 'Department (partition + row-filtered)',\n  viewer)\nCOMMENT 'Identity-aware dynamic view'\nDEFAULT COLLATION UTF8_BINARY\nWITH SCHEMA COMPENSATION\nAS SELECT id, emp_name, dept, current_user() AS viewer FROM ai27_uc_gov_src.hr.employees\n",
+              "grants": [
+                [
+                  "sanket.kelkar@databricks.com",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_gov_src"
+                ],
+                [
+                  "71b85805-84f2-4185-86ae-bfadf34b6621",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_gov_src"
+                ],
+                [
+                  "idris.chakera@databricks.com",
+                  "SELECT",
+                  "SCHEMA",
+                  "ai27_uc_gov_src.analytics"
+                ],
+                [
+                  "tanveer.singh@databricks.com",
+                  "SELECT",
+                  "TABLE",
+                  "ai27_uc_gov_src.analytics.emp_dynamic"
+                ],
+                [
+                  "jonghwa.yoon@databricks.com",
+                  "READ METADATA",
+                  "METASTORE",
+                  "fevm-shared-sandbox-eastus"
+                ]
+              ],
+              "abac_policies": []
+            },
+            "emp_fn_masked": {
+              "ddl": "CREATE VIEW analytics.emp_fn_masked (\n  id COMMENT 'Surrogate identity key',\n  emp_name_masked,\n  dept COMMENT 'Department (partition + row-filtered)')\nDEFAULT COLLATION UTF8_BINARY\nWITH SCHEMA COMPENSATION\nAS SELECT id, ai27_uc_gov_src.sec.mask_email(emp_name) AS emp_name_masked, dept FROM ai27_uc_gov_src.hr.employees\n",
+              "grants": [
+                [
+                  "sanket.kelkar@databricks.com",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_gov_src"
+                ],
+                [
+                  "71b85805-84f2-4185-86ae-bfadf34b6621",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_gov_src"
+                ],
+                [
+                  "idris.chakera@databricks.com",
+                  "SELECT",
+                  "SCHEMA",
+                  "ai27_uc_gov_src.analytics"
+                ],
+                [
+                  "jonghwa.yoon@databricks.com",
+                  "READ METADATA",
+                  "METASTORE",
+                  "fevm-shared-sandbox-eastus"
+                ]
+              ],
+              "abac_policies": []
+            },
+            "emp_secure_dynamic": {
+              "ddl": "CREATE VIEW analytics.emp_secure_dynamic (\n  id COMMENT 'Surrogate identity key',\n  emp_name,\n  dept COMMENT 'Department (partition + row-filtered)',\n  accessed_by)\nDEFAULT COLLATION UTF8_BINARY\nWITH SCHEMA COMPENSATION\nAS SELECT id, CASE WHEN is_account_group_member('hr_admins') THEN emp_name ELSE '***' END AS emp_name, dept, current_user() AS accessed_by FROM ai27_uc_gov_src.hr.employees WHERE is_account_group_member('hr_admins') OR dept IN ('ENG','FIN')\n",
+              "grants": [
+                [
+                  "sanket.kelkar@databricks.com",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_gov_src"
+                ],
+                [
+                  "71b85805-84f2-4185-86ae-bfadf34b6621",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_gov_src"
+                ],
+                [
+                  "idris.chakera@databricks.com",
+                  "SELECT",
+                  "SCHEMA",
+                  "ai27_uc_gov_src.analytics"
+                ],
+                [
+                  "jonghwa.yoon@databricks.com",
+                  "READ METADATA",
+                  "METASTORE",
+                  "fevm-shared-sandbox-eastus"
+                ]
+              ],
+              "abac_policies": []
+            },
+            "emp_summary": {
+              "ddl": "CREATE VIEW analytics.emp_summary (\n  id COMMENT 'Surrogate identity key',\n  emp_name COMMENT 'Employee full name',\n  dept COMMENT 'Department (partition + row-filtered)')\nCOMMENT 'Standard view over employees'\nDEFAULT COLLATION UTF8_BINARY\nWITH SCHEMA COMPENSATION\nAS SELECT id, emp_name, dept FROM ai27_uc_gov_src.hr.employees\n",
+              "grants": [
+                [
+                  "sanket.kelkar@databricks.com",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_gov_src"
+                ],
+                [
+                  "71b85805-84f2-4185-86ae-bfadf34b6621",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_gov_src"
+                ],
+                [
+                  "account users",
+                  "SELECT",
+                  "TABLE",
+                  "ai27_uc_gov_src.analytics.emp_summary"
+                ],
+                [
+                  "idris.chakera@databricks.com",
+                  "SELECT",
+                  "SCHEMA",
+                  "ai27_uc_gov_src.analytics"
+                ],
+                [
+                  "jonghwa.yoon@databricks.com",
+                  "READ METADATA",
+                  "METASTORE",
+                  "fevm-shared-sandbox-eastus"
+                ],
+                [
+                  "aman.bansal@databricks.com",
+                  "SELECT",
+                  "TABLE",
+                  "ai27_uc_gov_src.analytics.emp_summary"
+                ]
+              ],
+              "abac_policies": []
+            }
+          },
+          "functions": {},
+          "volumes": {},
+          "tags": [],
+          "grants": [
+            [
+              "sanket.kelkar@databricks.com",
+              "SELECT",
+              "CATALOG",
+              "ai27_uc_gov_src"
+            ],
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "SELECT",
+              "CATALOG",
+              "ai27_uc_gov_src"
+            ],
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "USE SCHEMA",
+              "CATALOG",
+              "ai27_uc_gov_src"
+            ],
+            [
+              "idris.chakera@databricks.com",
+              "SELECT",
+              "SCHEMA",
+              "ai27_uc_gov_src.analytics"
+            ],
+            [
+              "jonghwa.yoon@databricks.com",
+              "READ METADATA",
+              "METASTORE",
+              "fevm-shared-sandbox-eastus"
+            ]
+          ],
+          "abac_policies": []
+        },
+        "default": {
+          "tables": {},
+          "views": {},
+          "functions": {},
+          "volumes": {},
+          "tags": [],
+          "grants": [
+            [
+              "sanket.kelkar@databricks.com",
+              "SELECT",
+              "CATALOG",
+              "ai27_uc_gov_src"
+            ],
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "SELECT",
+              "CATALOG",
+              "ai27_uc_gov_src"
+            ],
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "USE SCHEMA",
+              "CATALOG",
+              "ai27_uc_gov_src"
+            ],
+            [
+              "jonghwa.yoon@databricks.com",
+              "READ METADATA",
+              "METASTORE",
+              "fevm-shared-sandbox-eastus"
+            ]
+          ],
+          "abac_policies": []
+        },
+        "finance": {
+          "tables": {
+            "accounts": {
+              "ddl": "CREATE TABLE ai27_uc_gov_src.finance.accounts (\n  account_id BIGINT COMMENT 'Account id',\n  customer_name STRING COLLATE UTF8_BINARY COMMENT 'Customer name',\n  account_number STRING COLLATE UTF8_BINARY COMMENT 'Bank account number (ABAC-masked via governed tag)' MASK `ai27_uc_gov_src`.`sec`.`mask_account`,\n  balance DECIMAL(18,2) COMMENT 'Balance',\n  routing_number STRING COLLATE UTF8_BINARY MASK `ai27_uc_gov_src`.`sec`.`mask_account`,\n  contact_phone STRING COLLATE UTF8_BINARY MASK `ai27_uc_gov_src`.`sec`.`mask_phone`)\nUSING delta\nCOMMENT 'Finance accounts fixture (ABAC column mask target)'\nDEFAULT COLLATION UTF8_BINARY\nTBLPROPERTIES (\n  'ai27_uc.domain' = 'finance',\n  'ai27_uc.fixture' = 'true',\n  'delta.checkpoint.writeStatsAsJson' = 'false',\n  'delta.checkpoint.writeStatsAsStruct' = 'true',\n  'delta.enableDeletionVectors' = 'true',\n  'delta.enableRowTracking' = 'true',\n  'delta.feature.appendOnly' = 'supported',\n  'delta.feature.deletionVectors' = 'supported',\n  'delta.feature.domainMetadata' = 'supported',\n  'delta.feature.invariants' = 'supported',\n  'delta.feature.rowTracking' = 'supported',\n  'delta.minReaderVersion' = '3',\n  'delta.minWriterVersion' = '7',\n  'delta.parquet.compression.codec' = 'zstd')\n",
+              "grants": [
+                [
+                  "sanket.kelkar@databricks.com",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_gov_src"
+                ],
+                [
+                  "71b85805-84f2-4185-86ae-bfadf34b6621",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_gov_src"
+                ],
+                [
+                  "abhishek.iyer@databricks.com",
+                  "MODIFY",
+                  "TABLE",
+                  "ai27_uc_gov_src.finance.accounts"
+                ],
+                [
+                  "abhishek.iyer@databricks.com",
+                  "SELECT",
+                  "TABLE",
+                  "ai27_uc_gov_src.finance.accounts"
+                ],
+                [
+                  "idris.chakera@databricks.com",
+                  "MODIFY",
+                  "TABLE",
+                  "ai27_uc_gov_src.finance.accounts"
+                ],
+                [
+                  "idris.chakera@databricks.com",
+                  "SELECT",
+                  "TABLE",
+                  "ai27_uc_gov_src.finance.accounts"
+                ],
+                [
+                  "jonghwa.yoon@databricks.com",
+                  "READ METADATA",
+                  "METASTORE",
+                  "fevm-shared-sandbox-eastus"
+                ]
+              ],
+              "abac_policies": []
+            },
+            "ledger": {
+              "ddl": "CREATE TABLE ai27_uc_gov_src.finance.ledger (\n  entry_id BIGINT NOT NULL COMMENT 'Entry id',\n  amount DECIMAL(18,2) COMMENT 'Amount',\n  entry_type STRING COLLATE UTF8_BINARY COMMENT 'Type',\n  counterparty_account STRING COLLATE UTF8_BINARY,\n  settlement_account STRING COLLATE UTF8_BINARY,\n  CONSTRAINT `pk_ledger` PRIMARY KEY (`entry_id`))\nUSING delta\nCOMMENT 'Ledger fixture (PK + CHECK)'\nDEFAULT COLLATION UTF8_BINARY\nTBLPROPERTIES (\n  'ai27_uc.fixture' = 'true',\n  'delta.checkpoint.writeStatsAsJson' = 'false',\n  'delta.checkpoint.writeStatsAsStruct' = 'true',\n  'delta.constraints.chk_amount' = 'amount >= 0',\n  'delta.enableDeletionVectors' = 'true',\n  'delta.enableRowTracking' = 'true',\n  'delta.feature.appendOnly' = 'supported',\n  'delta.feature.checkConstraints' = 'supported',\n  'delta.feature.deletionVectors' = 'supported',\n  'delta.feature.domainMetadata' = 'supported',\n  'delta.feature.invariants' = 'supported',\n  'delta.feature.rowTracking' = 'supported',\n  'delta.minReaderVersion' = '3',\n  'delta.minWriterVersion' = '7',\n  'delta.parquet.compression.codec' = 'zstd')\n",
+              "grants": [
+                [
+                  "sanket.kelkar@databricks.com",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_gov_src"
+                ],
+                [
+                  "71b85805-84f2-4185-86ae-bfadf34b6621",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_gov_src"
+                ],
+                [
+                  "account users",
+                  "SELECT",
+                  "TABLE",
+                  "ai27_uc_gov_src.finance.ledger"
+                ],
+                [
+                  "jonghwa.yoon@databricks.com",
+                  "READ METADATA",
+                  "METASTORE",
+                  "fevm-shared-sandbox-eastus"
+                ]
+              ],
+              "abac_policies": []
+            }
+          },
+          "views": {},
+          "functions": {},
+          "volumes": {},
+          "tags": [
+            [
+              "ai27_uc_classification",
+              "CONFIDENTIAL"
+            ]
+          ],
+          "grants": [
+            [
+              "sanket.kelkar@databricks.com",
+              "SELECT",
+              "CATALOG",
+              "ai27_uc_gov_src"
+            ],
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "SELECT",
+              "CATALOG",
+              "ai27_uc_gov_src"
+            ],
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "USE SCHEMA",
+              "CATALOG",
+              "ai27_uc_gov_src"
+            ],
+            [
+              "account users",
+              "USE SCHEMA",
+              "SCHEMA",
+              "ai27_uc_gov_src.finance"
+            ],
+            [
+              "tanveer.singh@databricks.com",
+              "CREATE TABLE",
+              "SCHEMA",
+              "ai27_uc_gov_src.finance"
+            ],
+            [
+              "tanveer.singh@databricks.com",
+              "USE SCHEMA",
+              "SCHEMA",
+              "ai27_uc_gov_src.finance"
+            ],
+            [
+              "jonghwa.yoon@databricks.com",
+              "READ METADATA",
+              "METASTORE",
+              "fevm-shared-sandbox-eastus"
+            ]
+          ],
+          "abac_policies": [
+            [
+              "ai27_uc_mask_bank",
+              "COLUMN_MASK",
+              "ai27_uc_gov_src",
+              "finance",
+              null,
+              "Mask bank accounts via governed tag"
+            ]
+          ]
+        },
+        "hr": {
+          "tables": {
+            "abac_ext": {
+              "ddl": "CREATE TABLE ai27_uc_gov_src.hr.abac_ext (\n  id INT COMMENT 'id',\n  email STRING COLLATE UTF8_BINARY COMMENT 'email')\nUSING delta\nCOMMENT 'NEGATIVE TEST: ABAC policy masks via ai_27 (NOT migrated) -> created then DROPPED fail-closed on target'\nDEFAULT COLLATION UTF8_BINARY\nTBLPROPERTIES (\n  'delta.checkpoint.writeStatsAsJson' = 'false',\n  'delta.checkpoint.writeStatsAsStruct' = 'true',\n  'delta.enableDeletionVectors' = 'true',\n  'delta.enableRowTracking' = 'true',\n  'delta.feature.appendOnly' = 'supported',\n  'delta.feature.deletionVectors' = 'supported',\n  'delta.feature.domainMetadata' = 'supported',\n  'delta.feature.invariants' = 'supported',\n  'delta.feature.rowTracking' = 'supported',\n  'delta.minReaderVersion' = '3',\n  'delta.minWriterVersion' = '7',\n  'delta.parquet.compression.codec' = 'zstd')\n",
+              "grants": [
+                [
+                  "sanket.kelkar@databricks.com",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_gov_src"
+                ],
+                [
+                  "71b85805-84f2-4185-86ae-bfadf34b6621",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_gov_src"
+                ],
+                [
+                  "jonghwa.yoon@databricks.com",
+                  "READ METADATA",
+                  "METASTORE",
+                  "fevm-shared-sandbox-eastus"
+                ]
+              ],
+              "abac_policies": [
+                [
+                  "ai27_uc_mask_ext_neg",
+                  "COLUMN_MASK",
+                  "ai27_uc_gov_src",
+                  "hr",
+                  "abac_ext",
+                  null
+                ]
+              ]
+            },
+            "employees": {
+              "ddl": "CREATE TABLE ai27_uc_gov_src.hr.employees (\n  id BIGINT NOT NULL GENERATED ALWAYS AS IDENTITY (START WITH 1 INCREMENT BY 1) COMMENT 'Surrogate identity key',\n  emp_name STRING COLLATE UTF8_BINARY NOT NULL COMMENT 'Employee full name',\n  ssn STRING COLLATE UTF8_BINARY COMMENT 'Social security number (classic-masked)' MASK `ai27_uc_gov_src`.`sec`.`mask_ssn`,\n  email STRING COLLATE UTF8_BINARY COMMENT 'Work email' MASK `ai27_uc_gov_src`.`sec`.`mask_email`,\n  salary DECIMAL(12,2) COMMENT 'Annual salary',\n  hire_date DATE COMMENT 'Hire date',\n  hire_year INT GENERATED ALWAYS AS ( year(hire_date) ) COMMENT 'Derived hire year',\n  dept STRING COLLATE UTF8_BINARY COMMENT 'Department (partition + row-filtered)',\n  phone STRING COLLATE UTF8_BINARY MASK `ai27_uc_gov_src`.`sec`.`mask_phone`,\n  CONSTRAINT `pk_employees` PRIMARY KEY (`id`))\nUSING delta\nPARTITIONED BY (dept)\nCOMMENT 'Employee master fixture (identity, generated col, PK, partition, user props)'\nDEFAULT COLLATION UTF8_BINARY\nWITH ROW FILTER `ai27_uc_gov_src`.`sec`.`dept_filter` ON (dept)\nTBLPROPERTIES (\n  'ai27_uc.domain' = 'hr',\n  'ai27_uc.fixture' = 'true',\n  'delta.checkpoint.writeStatsAsJson' = 'false',\n  'delta.checkpoint.writeStatsAsStruct' = 'true',\n  'delta.enableDeletionVectors' = 'true',\n  'delta.enableRowTracking' = 'true',\n  'delta.feature.appendOnly' = 'supported',\n  'delta.feature.deletionVectors' = 'supported',\n  'delta.feature.domainMetadata' = 'supported',\n  'delta.feature.generatedColumns' = 'supported',\n  'delta.feature.identityColumns' = 'supported',\n  'delta.feature.invariants' = 'supported',\n  'delta.feature.rowTracking' = 'supported',\n  'delta.minReaderVersion' = '3',\n  'delta.minWriterVersion' = '7',\n  'delta.parquet.compression.codec' = 'zstd')\n",
+              "grants": [
+                [
+                  "sanket.kelkar@databricks.com",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_gov_src"
+                ],
+                [
+                  "71b85805-84f2-4185-86ae-bfadf34b6621",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_gov_src"
+                ],
+                [
+                  "account users",
+                  "SELECT",
+                  "TABLE",
+                  "ai27_uc_gov_src.hr.employees"
+                ],
+                [
+                  "jonghwa.yoon@databricks.com",
+                  "READ METADATA",
+                  "METASTORE",
+                  "fevm-shared-sandbox-eastus"
+                ],
+                [
+                  "aman.bansal@databricks.com",
+                  "SELECT",
+                  "TABLE",
+                  "ai27_uc_gov_src.hr.employees"
+                ]
+              ],
+              "abac_policies": []
+            },
+            "employees_secure": {
+              "ddl": "CREATE TABLE ai27_uc_gov_src.hr.employees_secure (\n  id BIGINT COMMENT 'Id',\n  emp_name STRING COLLATE UTF8_BINARY COMMENT 'Name',\n  email STRING COLLATE UTF8_BINARY COMMENT 'Email (ABAC-masked)' MASK `ai27_uc_gov_src`.`sec`.`mask_email`,\n  region STRING COLLATE UTF8_BINARY COMMENT 'Region (ABAC row-filtered)',\n  phone STRING COLLATE UTF8_BINARY MASK `ai27_uc_gov_src`.`sec`.`mask_phone`)\nUSING delta\nCOMMENT 'Secure employees fixture (ABAC mask + ABAC row filter with EXCEPT)'\nDEFAULT COLLATION UTF8_BINARY\nWITH ROW FILTER `ai27_uc_gov_src`.`sec`.`region_filter` ON (region)\nCLUSTER BY (region)\nTBLPROPERTIES (\n  'ai27_uc.fixture' = 'true',\n  'databricks.delta.expressionStats.selectedColumns' = 'upper(region),lower(region)',\n  'delta.checkpoint.writeStatsAsJson' = 'false',\n  'delta.checkpoint.writeStatsAsStruct' = 'true',\n  'delta.checkpointPolicy' = 'v2',\n  'delta.enableDeletionVectors' = 'true',\n  'delta.enableRowTracking' = 'true',\n  'delta.feature.appendOnly' = 'supported',\n  'delta.feature.deletionVectors' = 'supported',\n  'delta.feature.invariants' = 'supported',\n  'delta.feature.rowTracking' = 'supported',\n  'delta.feature.v2Checkpoint' = 'supported',\n  'delta.parquet.compression.codec' = 'zstd')\n",
+              "grants": [
+                [
+                  "sanket.kelkar@databricks.com",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_gov_src"
+                ],
+                [
+                  "71b85805-84f2-4185-86ae-bfadf34b6621",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_gov_src"
+                ],
+                [
+                  "account users",
+                  "SELECT",
+                  "TABLE",
+                  "ai27_uc_gov_src.hr.employees_secure"
+                ],
+                [
+                  "jonghwa.yoon@databricks.com",
+                  "READ METADATA",
+                  "METASTORE",
+                  "fevm-shared-sandbox-eastus"
+                ]
+              ],
+              "abac_policies": [
+                [
+                  "ai27_uc_mask_email",
+                  "COLUMN_MASK",
+                  "ai27_uc_gov_src",
+                  "hr",
+                  "employees_secure",
+                  "Mask email except exempt principal"
+                ],
+                [
+                  "ai27_uc_rowfilter_region",
+                  "ROW_FILTER",
+                  "ai27_uc_gov_src",
+                  "hr",
+                  "employees_secure",
+                  "Row filter by region governed tag"
+                ]
+              ]
+            },
+            "ext_masked": {
+              "ddl": "CREATE TABLE ai27_uc_gov_src.hr.ext_masked (\n  id INT COMMENT 'id',\n  secret STRING COLLATE UTF8_BINARY COMMENT 'secret masked by an out-of-scope catalog function' MASK `ai_27`.`sec`.`mask_ext`)\nUSING delta\nCOMMENT 'NEGATIVE TEST: inline MASK references ai_27 (NOT migrated) -> target CREATE TABLE must fail'\nDEFAULT COLLATION UTF8_BINARY\nTBLPROPERTIES (\n  'delta.checkpoint.writeStatsAsJson' = 'false',\n  'delta.checkpoint.writeStatsAsStruct' = 'true',\n  'delta.enableDeletionVectors' = 'true',\n  'delta.enableRowTracking' = 'true',\n  'delta.feature.appendOnly' = 'supported',\n  'delta.feature.deletionVectors' = 'supported',\n  'delta.feature.domainMetadata' = 'supported',\n  'delta.feature.invariants' = 'supported',\n  'delta.feature.rowTracking' = 'supported',\n  'delta.minReaderVersion' = '3',\n  'delta.minWriterVersion' = '7',\n  'delta.parquet.compression.codec' = 'zstd')\n",
+              "grants": [
+                [
+                  "sanket.kelkar@databricks.com",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_gov_src"
+                ],
+                [
+                  "71b85805-84f2-4185-86ae-bfadf34b6621",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_gov_src"
+                ],
+                [
+                  "jonghwa.yoon@databricks.com",
+                  "READ METADATA",
+                  "METASTORE",
+                  "fevm-shared-sandbox-eastus"
+                ]
+              ],
+              "abac_policies": []
+            }
+          },
+          "views": {},
+          "functions": {},
+          "volumes": {
+            "emp_files": {
+              "info": [
+                "hr",
+                "emp_files"
+              ]
+            }
+          },
+          "tags": [],
+          "grants": [
+            [
+              "sanket.kelkar@databricks.com",
+              "SELECT",
+              "CATALOG",
+              "ai27_uc_gov_src"
+            ],
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "SELECT",
+              "CATALOG",
+              "ai27_uc_gov_src"
+            ],
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "USE SCHEMA",
+              "CATALOG",
+              "ai27_uc_gov_src"
+            ],
+            [
+              "account users",
+              "USE SCHEMA",
+              "SCHEMA",
+              "ai27_uc_gov_src.hr"
+            ],
+            [
+              "idris.chakera@databricks.com",
+              "USE SCHEMA",
+              "SCHEMA",
+              "ai27_uc_gov_src.hr"
+            ],
+            [
+              "jonghwa.yoon@databricks.com",
+              "READ METADATA",
+              "METASTORE",
+              "fevm-shared-sandbox-eastus"
+            ]
+          ],
+          "abac_policies": []
+        },
+        "sec": {
+          "tables": {},
+          "views": {},
+          "functions": {
+            "dept_filter": {
+              "ddl": "-- ERROR: \n[PARSE_SYNTAX_ERROR] Syntax error at or near 'FUNCTION'. SQLSTATE: 42601 (line 1, pos 12)\n\n== SQL ==\nSHOW CREATE FUNCTION `ai27_uc_gov_src`.`sec`.`dept_filter`\n------------^^^\n"
+            },
+            "mask_account": {
+              "ddl": "-- ERROR: \n[PARSE_SYNTAX_ERROR] Syntax error at or near 'FUNCTION'. SQLSTATE: 42601 (line 1, pos 12)\n\n== SQL ==\nSHOW CREATE FUNCTION `ai27_uc_gov_src`.`sec`.`mask_account`\n------------^^^\n"
+            },
+            "mask_email": {
+              "ddl": "-- ERROR: \n[PARSE_SYNTAX_ERROR] Syntax error at or near 'FUNCTION'. SQLSTATE: 42601 (line 1, pos 12)\n\n== SQL ==\nSHOW CREATE FUNCTION `ai27_uc_gov_src`.`sec`.`mask_email`\n------------^^^\n"
+            },
+            "mask_phone": {
+              "ddl": "-- ERROR: \n[PARSE_SYNTAX_ERROR] Syntax error at or near 'FUNCTION'. SQLSTATE: 42601 (line 1, pos 12)\n\n== SQL ==\nSHOW CREATE FUNCTION `ai27_uc_gov_src`.`sec`.`mask_phone`\n------------^^^\n"
+            },
+            "mask_ssn": {
+              "ddl": "-- ERROR: \n[PARSE_SYNTAX_ERROR] Syntax error at or near 'FUNCTION'. SQLSTATE: 42601 (line 1, pos 12)\n\n== SQL ==\nSHOW CREATE FUNCTION `ai27_uc_gov_src`.`sec`.`mask_ssn`\n------------^^^\n"
+            },
+            "region_filter": {
+              "ddl": "-- ERROR: \n[PARSE_SYNTAX_ERROR] Syntax error at or near 'FUNCTION'. SQLSTATE: 42601 (line 1, pos 12)\n\n== SQL ==\nSHOW CREATE FUNCTION `ai27_uc_gov_src`.`sec`.`region_filter`\n------------^^^\n"
+            }
+          },
+          "volumes": {},
+          "tags": [],
+          "grants": [
+            [
+              "sanket.kelkar@databricks.com",
+              "SELECT",
+              "CATALOG",
+              "ai27_uc_gov_src"
+            ],
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "SELECT",
+              "CATALOG",
+              "ai27_uc_gov_src"
+            ],
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "USE SCHEMA",
+              "CATALOG",
+              "ai27_uc_gov_src"
+            ],
+            [
+              "jonghwa.yoon@databricks.com",
+              "READ METADATA",
+              "METASTORE",
+              "fevm-shared-sandbox-eastus"
+            ]
+          ],
+          "abac_policies": []
+        }
+      },
+      "abac_policies": [
+        [
+          "CATALOG",
+          "ai27_uc_gov_src",
+          "ai27_uc_mask_phone_cat",
+          "COLUMN_MASK",
+          "ai27_uc_gov_src",
+          null,
+          null,
+          "Mask phone numbers catalog-wide via governed tag"
+        ]
+      ],
+      "grants": [
+        [
+          "sanket.kelkar@databricks.com",
+          "BROWSE",
+          "CATALOG",
+          "ai27_uc_gov_src"
+        ],
+        [
+          "sanket.kelkar@databricks.com",
+          "SELECT",
+          "CATALOG",
+          "ai27_uc_gov_src"
+        ],
+        [
+          "sanket.kelkar@databricks.com",
+          "USE CATALOG",
+          "CATALOG",
+          "ai27_uc_gov_src"
+        ],
+        [
+          "71b85805-84f2-4185-86ae-bfadf34b6621",
+          "SELECT",
+          "CATALOG",
+          "ai27_uc_gov_src"
+        ],
+        [
+          "71b85805-84f2-4185-86ae-bfadf34b6621",
+          "USE CATALOG",
+          "CATALOG",
+          "ai27_uc_gov_src"
+        ],
+        [
+          "71b85805-84f2-4185-86ae-bfadf34b6621",
+          "USE SCHEMA",
+          "CATALOG",
+          "ai27_uc_gov_src"
+        ],
+        [
+          "account users",
+          "USE CATALOG",
+          "CATALOG",
+          "ai27_uc_gov_src"
+        ],
+        [
+          "jonghwa.yoon@databricks.com",
+          "READ METADATA",
+          "METASTORE",
+          "fevm-shared-sandbox-eastus"
+        ]
+      ]
+    },
+    "ai27_uc_finance": {
+      "comment": null,
+      "tags": [
+        [
+          "ai27_uc_classification",
+          "CONFIDENTIAL"
+        ]
+      ],
+      "schemas": {
+        "ap": {
+          "tables": {
+            "invoices": {
+              "ddl": "CREATE TABLE ai27_uc_finance.ap.invoices (\n  invoice_id BIGINT COMMENT 'id',\n  vendor STRING COLLATE UTF8_BINARY COMMENT 'vendor',\n  amount DECIMAL(12,2) COMMENT 'amount',\n  due_date DATE COMMENT 'due')\nUSING delta\nCOMMENT 'AP invoices (managed)'\nDEFAULT COLLATION UTF8_BINARY\nTBLPROPERTIES (\n  'ai27_uc.fixture' = 'true',\n  'delta.checkpoint.writeStatsAsJson' = 'false',\n  'delta.checkpoint.writeStatsAsStruct' = 'true',\n  'delta.enableDeletionVectors' = 'true',\n  'delta.enableRowTracking' = 'true',\n  'delta.feature.appendOnly' = 'supported',\n  'delta.feature.deletionVectors' = 'supported',\n  'delta.feature.domainMetadata' = 'supported',\n  'delta.feature.invariants' = 'supported',\n  'delta.feature.rowTracking' = 'supported',\n  'delta.minReaderVersion' = '3',\n  'delta.minWriterVersion' = '7',\n  'delta.parquet.compression.codec' = 'zstd')\n",
+              "grants": [
+                [
+                  "71b85805-84f2-4185-86ae-bfadf34b6621",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_finance"
+                ],
+                [
+                  "account users",
+                  "SELECT",
+                  "TABLE",
+                  "ai27_uc_finance.ap.invoices"
+                ],
+                [
+                  "jonghwa.yoon@databricks.com",
+                  "READ METADATA",
+                  "METASTORE",
+                  "fevm-shared-sandbox-eastus"
+                ]
+              ],
+              "abac_policies": []
+            },
+            "invoices_ext": {
+              "ddl": "CREATE TABLE ai27_uc_finance.ap.invoices_ext (\n  invoice_id BIGINT,\n  vendor STRING COLLATE UTF8_BINARY MASK `ai27_uc_finance`.`sec`.`mask_account`,\n  amount DECIMAL(18,2),\n  status STRING COLLATE UTF8_BINARY)\nUSING delta\nCOMMENT 'External invoices fixture (external-table migration test)'\nDEFAULT COLLATION UTF8_BINARY\nLOCATION 'abfss://data@ai27find1a1e8.dfs.core.windows.net/ap/invoices_ext'\nTBLPROPERTIES (\n  'delta.checkpoint.writeStatsAsJson' = 'false',\n  'delta.checkpoint.writeStatsAsStruct' = 'true',\n  'delta.enableDeletionVectors' = 'true',\n  'delta.feature.appendOnly' = 'supported',\n  'delta.feature.deletionVectors' = 'supported',\n  'delta.feature.invariants' = 'supported',\n  'delta.minReaderVersion' = '3',\n  'delta.minWriterVersion' = '7')\n",
+              "grants": [
+                [
+                  "71b85805-84f2-4185-86ae-bfadf34b6621",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_finance"
+                ],
+                [
+                  "jonghwa.yoon@databricks.com",
+                  "READ METADATA",
+                  "METASTORE",
+                  "fevm-shared-sandbox-eastus"
+                ]
+              ],
+              "abac_policies": []
+            }
+          },
+          "views": {},
+          "functions": {},
+          "volumes": {},
+          "tags": [],
+          "grants": [
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "SELECT",
+              "CATALOG",
+              "ai27_uc_finance"
+            ],
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "USE SCHEMA",
+              "CATALOG",
+              "ai27_uc_finance"
+            ],
+            [
+              "jonghwa.yoon@databricks.com",
+              "READ METADATA",
+              "METASTORE",
+              "fevm-shared-sandbox-eastus"
+            ]
+          ],
+          "abac_policies": []
+        },
+        "default": {
+          "tables": {},
+          "views": {},
+          "functions": {},
+          "volumes": {},
+          "tags": [],
+          "grants": [
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "SELECT",
+              "CATALOG",
+              "ai27_uc_finance"
+            ],
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "USE SCHEMA",
+              "CATALOG",
+              "ai27_uc_finance"
+            ],
+            [
+              "jonghwa.yoon@databricks.com",
+              "READ METADATA",
+              "METASTORE",
+              "fevm-shared-sandbox-eastus"
+            ]
+          ],
+          "abac_policies": []
+        },
+        "gl": {
+          "tables": {
+            "accounts": {
+              "ddl": "CREATE TABLE ai27_uc_finance.gl.accounts (\n  account_id BIGINT COMMENT 'id',\n  name STRING COLLATE UTF8_BINARY COMMENT 'name',\n  account_number STRING COLLATE UTF8_BINARY COMMENT 'acct # (ABAC-masked)',\n  balance DECIMAL(18,2) COMMENT 'balance')\nUSING delta\nCOMMENT 'GL accounts (managed)'\nDEFAULT COLLATION UTF8_BINARY\nTBLPROPERTIES (\n  'ai27_uc.fixture' = 'true',\n  'delta.checkpoint.writeStatsAsJson' = 'false',\n  'delta.checkpoint.writeStatsAsStruct' = 'true',\n  'delta.enableDeletionVectors' = 'true',\n  'delta.enableRowTracking' = 'true',\n  'delta.feature.appendOnly' = 'supported',\n  'delta.feature.deletionVectors' = 'supported',\n  'delta.feature.domainMetadata' = 'supported',\n  'delta.feature.invariants' = 'supported',\n  'delta.feature.rowTracking' = 'supported',\n  'delta.minReaderVersion' = '3',\n  'delta.minWriterVersion' = '7',\n  'delta.parquet.compression.codec' = 'zstd')\n",
+              "grants": [
+                [
+                  "71b85805-84f2-4185-86ae-bfadf34b6621",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_finance"
+                ],
+                [
+                  "account users",
+                  "SELECT",
+                  "TABLE",
+                  "ai27_uc_finance.gl.accounts"
+                ],
+                [
+                  "jonghwa.yoon@databricks.com",
+                  "READ METADATA",
+                  "METASTORE",
+                  "fevm-shared-sandbox-eastus"
+                ]
+              ],
+              "abac_policies": []
+            },
+            "accounts_ext": {
+              "ddl": "CREATE TABLE ai27_uc_finance.gl.accounts_ext (\n  gl_account STRING COLLATE UTF8_BINARY,\n  period STRING COLLATE UTF8_BINARY,\n  debit DECIMAL(18,2),\n  credit DECIMAL(18,2))\nUSING delta\nCOMMENT 'External GL accounts fixture'\nDEFAULT COLLATION UTF8_BINARY\nLOCATION 'abfss://data@ai27find1a1e8.dfs.core.windows.net/gl/accounts_ext'\nTBLPROPERTIES (\n  'delta.checkpoint.writeStatsAsJson' = 'false',\n  'delta.checkpoint.writeStatsAsStruct' = 'true',\n  'delta.enableDeletionVectors' = 'true',\n  'delta.feature.appendOnly' = 'supported',\n  'delta.feature.deletionVectors' = 'supported',\n  'delta.feature.invariants' = 'supported',\n  'delta.minReaderVersion' = '3',\n  'delta.minWriterVersion' = '7')\n",
+              "grants": [
+                [
+                  "71b85805-84f2-4185-86ae-bfadf34b6621",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_finance"
+                ],
+                [
+                  "jonghwa.yoon@databricks.com",
+                  "READ METADATA",
+                  "METASTORE",
+                  "fevm-shared-sandbox-eastus"
+                ]
+              ],
+              "abac_policies": []
+            }
+          },
+          "views": {},
+          "functions": {},
+          "volumes": {
+            "archive_ext": {
+              "info": [
+                "gl",
+                "archive_ext"
+              ]
+            },
+            "statements": {
+              "info": [
+                "gl",
+                "statements"
+              ]
+            }
+          },
+          "tags": [],
+          "grants": [
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "SELECT",
+              "CATALOG",
+              "ai27_uc_finance"
+            ],
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "USE SCHEMA",
+              "CATALOG",
+              "ai27_uc_finance"
+            ],
+            [
+              "account users",
+              "USE SCHEMA",
+              "SCHEMA",
+              "ai27_uc_finance.gl"
+            ],
+            [
+              "jonghwa.yoon@databricks.com",
+              "READ METADATA",
+              "METASTORE",
+              "fevm-shared-sandbox-eastus"
+            ]
+          ],
+          "abac_policies": [
+            [
+              "ai27_uc_fin_mask_acct",
+              "COLUMN_MASK",
+              "ai27_uc_finance",
+              "gl",
+              null,
+              "Mask account numbers"
+            ]
+          ]
+        },
+        "sec": {
+          "tables": {},
+          "views": {},
+          "functions": {
+            "mask_account": {
+              "ddl": "-- ERROR: \n[PARSE_SYNTAX_ERROR] Syntax error at or near 'FUNCTION'. SQLSTATE: 42601 (line 1, pos 12)\n\n== SQL ==\nSHOW CREATE FUNCTION `ai27_uc_finance`.`sec`.`mask_account`\n------------^^^\n"
+            }
+          },
+          "volumes": {},
+          "tags": [],
+          "grants": [
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "SELECT",
+              "CATALOG",
+              "ai27_uc_finance"
+            ],
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "USE SCHEMA",
+              "CATALOG",
+              "ai27_uc_finance"
+            ],
+            [
+              "jonghwa.yoon@databricks.com",
+              "READ METADATA",
+              "METASTORE",
+              "fevm-shared-sandbox-eastus"
+            ]
+          ],
+          "abac_policies": []
+        }
+      },
+      "abac_policies": [],
+      "grants": [
+        [
+          "71b85805-84f2-4185-86ae-bfadf34b6621",
+          "SELECT",
+          "CATALOG",
+          "ai27_uc_finance"
+        ],
+        [
+          "71b85805-84f2-4185-86ae-bfadf34b6621",
+          "USE CATALOG",
+          "CATALOG",
+          "ai27_uc_finance"
+        ],
+        [
+          "71b85805-84f2-4185-86ae-bfadf34b6621",
+          "USE SCHEMA",
+          "CATALOG",
+          "ai27_uc_finance"
+        ],
+        [
+          "account users",
+          "USE CATALOG",
+          "CATALOG",
+          "ai27_uc_finance"
+        ],
+        [
+          "jonghwa.yoon@databricks.com",
+          "READ METADATA",
+          "METASTORE",
+          "fevm-shared-sandbox-eastus"
+        ]
+      ]
+    },
+    "ai27_uc_sales": {
+      "comment": null,
+      "tags": [
+        [
+          "ai27_uc_classification",
+          "INTERNAL"
+        ]
+      ],
+      "schemas": {
+        "crm": {
+          "tables": {
+            "customers": {
+              "ddl": "CREATE TABLE ai27_uc_sales.crm.customers (\n  customer_id BIGINT COMMENT 'id',\n  name STRING COLLATE UTF8_BINARY COMMENT 'name',\n  email STRING COLLATE UTF8_BINARY COMMENT 'email (masked)' MASK `ai27_uc_sales`.`sec`.`mask_email`,\n  region STRING COLLATE UTF8_BINARY COMMENT 'region')\nUSING delta\nCOMMENT 'Customers (managed, in schema EL)'\nDEFAULT COLLATION UTF8_BINARY\nTBLPROPERTIES (\n  'ai27_uc.fixture' = 'true',\n  'delta.checkpoint.writeStatsAsJson' = 'false',\n  'delta.checkpoint.writeStatsAsStruct' = 'true',\n  'delta.enableDeletionVectors' = 'true',\n  'delta.enableRowTracking' = 'true',\n  'delta.feature.appendOnly' = 'supported',\n  'delta.feature.deletionVectors' = 'supported',\n  'delta.feature.domainMetadata' = 'supported',\n  'delta.feature.invariants' = 'supported',\n  'delta.feature.rowTracking' = 'supported',\n  'delta.minReaderVersion' = '3',\n  'delta.minWriterVersion' = '7',\n  'delta.parquet.compression.codec' = 'zstd')\n",
+              "grants": [
+                [
+                  "71b85805-84f2-4185-86ae-bfadf34b6621",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_sales"
+                ],
+                [
+                  "account users",
+                  "SELECT",
+                  "TABLE",
+                  "ai27_uc_sales.crm.customers"
+                ],
+                [
+                  "jonghwa.yoon@databricks.com",
+                  "READ METADATA",
+                  "METASTORE",
+                  "fevm-shared-sandbox-eastus"
+                ]
+              ],
+              "abac_policies": []
+            }
+          },
+          "views": {},
+          "functions": {},
+          "volumes": {},
+          "tags": [],
+          "grants": [
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "SELECT",
+              "CATALOG",
+              "ai27_uc_sales"
+            ],
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "USE SCHEMA",
+              "CATALOG",
+              "ai27_uc_sales"
+            ],
+            [
+              "account users",
+              "USE SCHEMA",
+              "SCHEMA",
+              "ai27_uc_sales.crm"
+            ],
+            [
+              "jonghwa.yoon@databricks.com",
+              "READ METADATA",
+              "METASTORE",
+              "fevm-shared-sandbox-eastus"
+            ]
+          ],
+          "abac_policies": []
+        },
+        "default": {
+          "tables": {},
+          "views": {},
+          "functions": {},
+          "volumes": {},
+          "tags": [],
+          "grants": [
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "SELECT",
+              "CATALOG",
+              "ai27_uc_sales"
+            ],
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "USE SCHEMA",
+              "CATALOG",
+              "ai27_uc_sales"
+            ],
+            [
+              "jonghwa.yoon@databricks.com",
+              "READ METADATA",
+              "METASTORE",
+              "fevm-shared-sandbox-eastus"
+            ]
+          ],
+          "abac_policies": []
+        },
+        "orders": {
+          "tables": {
+            "orders": {
+              "ddl": "CREATE TABLE ai27_uc_sales.orders.orders (\n  order_id BIGINT COMMENT 'id',\n  customer_id BIGINT COMMENT 'fk',\n  amount DECIMAL(12,2) COMMENT 'amount',\n  status STRING COLLATE UTF8_BINARY COMMENT 'status')\nUSING delta\nPARTITIONED BY (status)\nCOMMENT 'Orders (managed, partitioned)'\nDEFAULT COLLATION UTF8_BINARY\nTBLPROPERTIES (\n  'ai27_uc.fixture' = 'true',\n  'delta.checkpoint.writeStatsAsJson' = 'false',\n  'delta.checkpoint.writeStatsAsStruct' = 'true',\n  'delta.enableDeletionVectors' = 'true',\n  'delta.enableRowTracking' = 'true',\n  'delta.feature.appendOnly' = 'supported',\n  'delta.feature.deletionVectors' = 'supported',\n  'delta.feature.domainMetadata' = 'supported',\n  'delta.feature.invariants' = 'supported',\n  'delta.feature.rowTracking' = 'supported',\n  'delta.minReaderVersion' = '3',\n  'delta.minWriterVersion' = '7',\n  'delta.parquet.compression.codec' = 'zstd')\n",
+              "grants": [
+                [
+                  "71b85805-84f2-4185-86ae-bfadf34b6621",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_sales"
+                ],
+                [
+                  "account users",
+                  "SELECT",
+                  "TABLE",
+                  "ai27_uc_sales.orders.orders"
+                ],
+                [
+                  "jonghwa.yoon@databricks.com",
+                  "READ METADATA",
+                  "METASTORE",
+                  "fevm-shared-sandbox-eastus"
+                ]
+              ],
+              "abac_policies": []
+            }
+          },
+          "views": {
+            "order_summary": {
+              "ddl": "CREATE VIEW orders.order_summary (\n  status COMMENT 'status',\n  n,\n  total)\nCOMMENT 'Orders by status'\nDEFAULT COLLATION UTF8_BINARY\nWITH SCHEMA COMPENSATION\nAS SELECT status, count(*) n, sum(amount) total FROM ai27_uc_sales.orders.orders GROUP BY status\n",
+              "grants": [
+                [
+                  "71b85805-84f2-4185-86ae-bfadf34b6621",
+                  "SELECT",
+                  "CATALOG",
+                  "ai27_uc_sales"
+                ],
+                [
+                  "jonghwa.yoon@databricks.com",
+                  "READ METADATA",
+                  "METASTORE",
+                  "fevm-shared-sandbox-eastus"
+                ]
+              ],
+              "abac_policies": []
+            }
+          },
+          "functions": {},
+          "volumes": {
+            "archive": {
+              "info": [
+                "orders",
+                "archive"
+              ]
+            }
+          },
+          "tags": [],
+          "grants": [
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "SELECT",
+              "CATALOG",
+              "ai27_uc_sales"
+            ],
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "USE SCHEMA",
+              "CATALOG",
+              "ai27_uc_sales"
+            ],
+            [
+              "jonghwa.yoon@databricks.com",
+              "READ METADATA",
+              "METASTORE",
+              "fevm-shared-sandbox-eastus"
+            ]
+          ],
+          "abac_policies": []
+        },
+        "sec": {
+          "tables": {},
+          "views": {},
+          "functions": {
+            "mask_email": {
+              "ddl": "-- ERROR: \n[PARSE_SYNTAX_ERROR] Syntax error at or near 'FUNCTION'. SQLSTATE: 42601 (line 1, pos 12)\n\n== SQL ==\nSHOW CREATE FUNCTION `ai27_uc_sales`.`sec`.`mask_email`\n------------^^^\n"
+            }
+          },
+          "volumes": {},
+          "tags": [],
+          "grants": [
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "SELECT",
+              "CATALOG",
+              "ai27_uc_sales"
+            ],
+            [
+              "71b85805-84f2-4185-86ae-bfadf34b6621",
+              "USE SCHEMA",
+              "CATALOG",
+              "ai27_uc_sales"
+            ],
+            [
+              "jonghwa.yoon@databricks.com",
+              "READ METADATA",
+              "METASTORE",
+              "fevm-shared-sandbox-eastus"
+            ]
+          ],
+          "abac_policies": []
+        }
+      },
+      "abac_policies": [],
+      "grants": [
+        [
+          "71b85805-84f2-4185-86ae-bfadf34b6621",
+          "SELECT",
+          "CATALOG",
+          "ai27_uc_sales"
+        ],
+        [
+          "71b85805-84f2-4185-86ae-bfadf34b6621",
+          "USE CATALOG",
+          "CATALOG",
+          "ai27_uc_sales"
+        ],
+        [
+          "71b85805-84f2-4185-86ae-bfadf34b6621",
+          "USE SCHEMA",
+          "CATALOG",
+          "ai27_uc_sales"
+        ],
+        [
+          "account users",
+          "USE CATALOG",
+          "CATALOG",
+          "ai27_uc_sales"
+        ],
+        [
+          "jonghwa.yoon@databricks.com",
+          "READ METADATA",
+          "METASTORE",
+          "fevm-shared-sandbox-eastus"
+        ]
+      ]
+    }
+  }
+}
