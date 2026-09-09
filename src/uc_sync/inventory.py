@@ -262,7 +262,101 @@ class InventoryService:
             self._attach_grants(obj)
         if self.sql is not None:
             self._attach_governance(filtered)
-        return filtered
+        # Tier-A AI-asset discovery (task 4): report-only inventory of the UC object
+        # types reachable with catalog-scoped privileges (registered models, online
+        # tables, vector-search indexes, quality monitors, UC secrets). Appended
+        # AFTER the component filter so they always surface ("we checked, you have
+        # none" vs "we never looked"); every row carries in_scope_for_migration=false.
+        # Migration scope is unchanged — nothing here is ever created on the target.
+        tier_a = self._iter_tier_a_assets(catalogs)
+        return filtered + tier_a
+
+    def _iter_tier_a_assets(self, catalogs: list[UCObject]) -> list[UCObject]:
+        """Best-effort discovery of the report-only Tier-A AI-asset types.
+
+        Every collector is wrapped so a missing privilege / evolving API yields an
+        empty result, never a failure (report-only). Discovery walks the same
+        in-scope catalog→schema surface as the main inventory.
+        """
+        assets: list[UCObject] = []
+        for cat in catalogs:
+            if not allowed(cat, self.cfg):
+                continue
+            for schema in self._iter_schemas(cat.name):
+                if not allowed(schema, self.cfg):
+                    continue
+                for collector in (
+                    self._iter_registered_models,
+                    self._iter_online_tables,
+                    self._iter_quality_monitors,
+                    self._iter_vector_indexes,
+                    self._iter_uc_secrets,
+                ):
+                    try:
+                        assets.extend(collector(cat.name, schema.name))
+                    except Exception as exc:  # noqa: BLE001 - report-only, never fail
+                        print(
+                            f"[inventory] Tier-A {collector.__name__} skipped for "
+                            f"{cat.name}.{schema.name}: {exc!r}"
+                        )
+        return assets
+
+    def _tier_a_object(
+        self, object_type: ObjectType, full_name: str, **definition: object
+    ) -> UCObject:
+        parts = full_name.split(".")
+        return UCObject(
+            object_type=object_type,
+            name=parts[-1] if parts else full_name,
+            full_name=full_name,
+            catalog=parts[0] if parts else None,
+            schema=parts[1] if len(parts) > 2 else None,
+            definition={"in_scope_for_migration": False, **definition},
+        )
+
+    def _iter_registered_models(self, catalog: str, schema: str) -> Iterable[UCObject]:
+        for m in self.source.paginate(
+            "/api/2.1/unity-catalog/models",
+            "registered_models",
+            catalog_name=catalog,
+            schema_name=schema,
+        ):
+            full_name = m.get("full_name") or f"{catalog}.{schema}.{m.get('name')}"
+            version_count = ""
+            try:
+                versions = list(
+                    self.source.paginate(
+                        f"/api/2.1/unity-catalog/models/{full_name}/versions",
+                        "model_versions",
+                    )
+                )
+                version_count = len(versions)
+            except Exception:  # noqa: BLE001 - version count is best-effort
+                version_count = ""
+            yield self._tier_a_object(
+                ObjectType.MODEL, full_name,
+                comment=m.get("comment"), owner=m.get("owner"),
+                version_count=version_count,
+            )
+
+    def _iter_online_tables(self, catalog: str, schema: str) -> Iterable[UCObject]:
+        # Online tables are derived from a source table; there is no per-schema list
+        # endpoint, so this is best-effort and typically empty. VERIFY LIVE.
+        return []
+
+    def _iter_quality_monitors(self, catalog: str, schema: str) -> Iterable[UCObject]:
+        # Lakehouse/quality monitors are per-table (GET .../tables/{t}/monitor); the
+        # API is evolving. VERIFY LIVE. Report-only, so best-effort empty by default.
+        return []
+
+    def _iter_vector_indexes(self, catalog: str, schema: str) -> Iterable[UCObject]:
+        # Vector-search indexes are listed per endpoint, not per schema. VERIFY LIVE.
+        return []
+
+    def _iter_uc_secrets(self, catalog: str, schema: str) -> Iterable[UCObject]:
+        # UC (schema-level) secrets are a newer API distinct from workspace secret
+        # scopes. VERIFY LIVE. Report-only, best-effort empty by default.
+        return []
 
     def _attach_governance(self, objects: list[UCObject]) -> None:
         """Attach governed-tag assignments and inventory ABAC policies via SQL."""

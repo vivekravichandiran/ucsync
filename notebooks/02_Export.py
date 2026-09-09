@@ -37,7 +37,11 @@ dbutils.widgets.text("output_volume_path", "")
 dbutils.widgets.text("ops_catalog", "")
 dbutils.widgets.text("ops_schema", "")
 dbutils.widgets.text("run_id", "")
-dbutils.widgets.text("mapping_file_path", "")   # storage-cred + location mapping CSV
+dbutils.widgets.text("mapping_file_path", "")   # legacy storage-cred + location mapping CSV
+# The single external-storage mapping file (task 2). Drives the export-time path
+# rewrite (source→target external LOCATIONs + external-location URLs). 2-col = BYO,
+# 3-col = create SC/EL on import. Blank = none.
+dbutils.widgets.text("external_locations_path", "")
 # Remote source (direct mode): the export stage captures full-fidelity SHOW CREATE
 # DDL from the SOURCE. In direct mode this job runs on the TARGET, where the source
 # objects do not exist yet, so — exactly like 01_Inventory — SHOW CREATE must run
@@ -49,6 +53,8 @@ dbutils.widgets.text("source_client_secret", "")   # plaintext secret (option 1)
 dbutils.widgets.text("source_secret_scope", "")    # secret scope (option 2)
 dbutils.widgets.text("source_secret_key", "")      # secret key   (option 2)
 dbutils.widgets.text("source_warehouse_id", "")    # source SQL warehouse (direct)
+# Graded environment preflight (task 9): enforced by default.
+dbutils.widgets.dropdown("preflight_enforce", "true", ["true", "false"])
 
 # COMMAND ----------
 
@@ -59,13 +65,20 @@ cfg = from_sources({
     "ops_catalog": dbutils.widgets.get("ops_catalog"),
     "ops_schema": dbutils.widgets.get("ops_schema"),
     "mapping_file_path": dbutils.widgets.get("mapping_file_path"),
+    "external_locations_path": dbutils.widgets.get("external_locations_path"),
     "source_workspace_url": dbutils.widgets.get("source_workspace_url"),
     "source_client_id": dbutils.widgets.get("source_client_id"),
     "source_client_secret": dbutils.widgets.get("source_client_secret"),
     "source_secret_scope": dbutils.widgets.get("source_secret_scope"),
     "source_secret_key": dbutils.widgets.get("source_secret_key"),
     "source_warehouse_id": dbutils.widgets.get("source_warehouse_id"),
+    "preflight_enforce": dbutils.widgets.get("preflight_enforce"),
 })
+
+# Graded environment preflight — required libraries importable, before any work.
+from uc_sync.preflight import run_preflight, enforce_preflight
+enforce_preflight(run_preflight(check_libs=True), enforce=cfg.preflight_enforce)
+
 run_id = dbutils.widgets.get("run_id").strip()
 if not run_id:
     raise ValueError("run_id from the Inventory stage is required")

@@ -79,6 +79,27 @@ def test_run_as_omitted_when_blank():
         assert "run_as" not in load_job_spec(key, _values(run_as_spn=""))
 
 
+def test_source_run_as_spn_applied_to_airgap_source_only():
+    """Task 7: the source Inventory+Export job honors a distinct source-side run-as
+    SPN, independent of the target run_as_spn."""
+    src = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    tgt = "11111111-2222-3333-4444-555555555555"
+    spec = load_job_spec(
+        "airgap_source", _values(source_run_as_spn=src, run_as_spn=tgt)
+    )
+    assert spec["run_as"] == {"service_principal_name": src}
+    # The target run-as does NOT leak onto the source job, and vice versa.
+    assert "run_as" not in load_job_spec("airgap_source", _values(run_as_spn=tgt))
+    tgt_spec = load_job_spec(
+        "airgap_import_target", _values(source_run_as_spn=src, run_as_spn=tgt)
+    )
+    assert tgt_spec["run_as"] == {"service_principal_name": tgt}
+
+
+def test_source_run_as_omitted_when_blank():
+    assert "run_as" not in load_job_spec("airgap_source", _values(source_run_as_spn=""))
+
+
 def test_import_table_filter_and_catalog_mapping_substituted():
     spec = load_job_spec(
         "e2e_live",

@@ -119,6 +119,51 @@ def test_issues_sheet_counts_split_and_governance_status(tmp_path):
     assert abac_rows[0][-1] == "import_status"
 
 
+def test_governance_rows_read_rolled_back_when_object_dropped_failclosed(tmp_path):
+    """Task 6: a table dropped in the fail-closed sweep (DROP_PROTECTION_FAILED)
+    had its tag / mask / grant ops applied at exec time, but they are gone now — so
+    those governance rows read 'ROLLED BACK (object dropped)', not the exec-time
+    SUCCESS the op result still carries. A distinct table whose CREATE failed
+    atomically (bad inline mask) still reads FAILED (never applied, not rolled
+    back)."""
+    objects = [
+        {"object_type": "TABLE", "full_name": "c.s.dropped", "owner": "me",
+         "tags": {"cls": "SECRET"}, "grants": [
+             {"principal": "u@x.com", "principal_type": "USER",
+              "privileges": ["SELECT"]}],
+         "definition": {"column_masks": [
+             {"column_name": "ssn", "function_name": "c.sec.m",
+              "using_column_names": []}]}},
+    ]
+    import_results = [
+        # The table was created then dropped fail-closed (a governed tag failed).
+        {"object_type": "TABLE", "target_full_name": "c.s.dropped",
+         "full_name": "c.s.dropped", "status": "FAILURE",
+         "action": "DROP_PROTECTION_FAILED", "error_code": "PROTECTION_FAILED",
+         "message": "table dropped (fail-closed)"},
+        # The APPLY_TAGS op recorded SUCCESS at exec time (before the drop).
+        {"object_type": "TABLE", "target_full_name": "c.s.dropped",
+         "full_name": "c.s.dropped", "status": "SUCCESS", "action": "APPLY_TAGS",
+         "policies_path": "/tags/TABLE_c__s__dropped.sql"},
+    ]
+    out = tmp_path / "r.xlsx"
+    build_report(objects, str(out), import_results=import_results, run_id="r1")
+    from openpyxl import load_workbook
+    wb = load_workbook(out)
+
+    tag_rows = list(wb["Tags"].iter_rows(values_only=True))
+    tag = next(r for r in tag_rows[1:] if r[0] == "c.s.dropped")
+    assert tag[-1] == "ROLLED BACK (object dropped)"
+
+    mask_rows = list(wb["Column Masks & Row Filters"].iter_rows(values_only=True))
+    mask = next(r for r in mask_rows[1:] if r[0] == "c.s.dropped")
+    assert mask[-1] == "ROLLED BACK (object dropped)"
+
+    grant_rows = list(wb["Grants"].iter_rows(values_only=True))
+    grant = next(r for r in grant_rows[1:] if r[0] == "c.s.dropped")
+    assert grant[-1] == "ROLLED BACK (object dropped)"
+
+
 def test_abac_counts_as_object_so_export_and_import_totals_match(tmp_path):
     """Parity: an ABAC policy is an object on BOTH sides, so the export-object total
     equals the import per-object total. Tags stay in the supplementary block (they

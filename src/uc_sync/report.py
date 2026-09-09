@@ -382,16 +382,18 @@ _TYPE_SHEETS: list[tuple[str, str, list]] = [
     ("METRIC_VIEW", "Metric Views", _VIEW_COLS),
 ]
 
-# Objects the utility inventories but never creates (recreate-by-hand); each gets
-# a lean sheet flagged as inventory-only.
+# Tier-A AI-asset types the utility inventories but never migrates (report-only,
+# task 4); each gets a lean inventory-only sheet flagged in_scope_for_migration=false.
+# Tier-B / Tier-C metastore-scoped objects (connections, service credentials, foreign
+# catalogs, shares, recipients, providers, clean rooms) are OUT of both migration AND
+# inventory — the catalog-scoped run principal cannot even list them — so they get NO
+# sheet (an empty one would imply a coverage we don't provide). See Out-of-scope §C.
 _INVENTORY_ONLY = [
     ("MODEL", "Models"),
-    ("CONNECTION", "Connections"),
-    ("SERVICE_CREDENTIAL", "Service Credentials"),
-    ("FOREIGN_CATALOG", "Foreign Catalogs"),
-    ("SHARE", "Shares"),
-    ("RECIPIENT", "Recipients"),
-    ("PROVIDER", "Providers"),
+    ("ONLINE_TABLE", "Online Tables"),
+    ("VECTOR_INDEX", "Vector Search Indexes"),
+    ("MONITOR", "Monitors"),
+    ("UC_SECRET", "UC Secrets"),
 ]
 
 
@@ -402,6 +404,7 @@ def build_report(
     stage: Optional[str] = None,
     export_results: Optional[list[dict[str, Any]]] = None,
     import_results: Optional[list[dict[str, Any]]] = None,
+    delta_rows: Optional[list[dict[str, Any]]] = None,
     run_id: str = "",
 ) -> str:
     """Write the migration workbook to ``out_path`` (.xlsx). Returns the path.
@@ -529,6 +532,44 @@ def build_report(
                 _truncate(r.get("message"), 400),
             ])
 
+    # Delta sheet (incremental sync, task 1): only the objects / grants where a
+    # change was detected this run — one row each with its action. UNCHANGED objects
+    # are summarised as a count, not listed, so this stays a focused "what changed"
+    # view. GRANT_REMOVED and SOURCE_ABSENT are informational ("reported, not
+    # actioned"); a governance failure adds a GOVERNANCE_FAILED row.
+    if stage == "IMPORT" and delta_rows is not None:
+        delta = _sheet("Delta", ["action", "object_type", "object", "detail"])
+        rows = [r for r in delta_rows if r.get("action") != "UNCHANGED_COUNT"]
+        # Fold governance failures (task 10) into the Delta sheet as GOVERNANCE_FAILED.
+        for r in import_results or []:
+            if str(r.get("error_code") or "") in (
+                "PROTECTION_FAILED", "GOVERNANCE_FAILED", "ABAC_WAREHOUSE_REQUIRED"
+            ):
+                rows.append({
+                    "action": "GOVERNANCE_FAILED",
+                    "object_type": r.get("object_type"),
+                    "object": r.get("target_full_name") or r.get("full_name"),
+                    "detail": _truncate(r.get("message"), 300),
+                })
+        # GOVERNANCE_FAILED first, then the rest in the order supplied.
+        rows.sort(key=lambda r: 0 if r.get("action") == "GOVERNANCE_FAILED" else 1)
+        for r in rows:
+            delta.append([
+                r.get("action"), r.get("object_type"), r.get("object"),
+                _truncate(r.get("detail"), 400),
+            ])
+        # UNCHANGED objects are not listed row-by-row — only a count line (the caller
+        # supplies it as an UNCHANGED_COUNT pseudo-row so the sheet stays a focused
+        # "what changed" view).
+        count_row = next(
+            (r for r in delta_rows if r.get("action") == "UNCHANGED_COUNT"), None
+        )
+        if count_row is not None:
+            delta.append([
+                "UNCHANGED", "", f"{count_row.get('detail') or 0} objects unchanged",
+                "not listed (summarised)",
+            ])
+
     # One sheet per object type, each carrying that type's captured detail plus
     # an import-status column. Only types actually present get a sheet.
     by_type: dict[str, list[dict[str, Any]]] = {}
@@ -549,11 +590,15 @@ def build_report(
         rows = by_type.get(obj_type)
         if not rows:
             continue
-        ws_t = _sheet(title, ["object", "comment", "owner", "note"] + status_headers)
+        ws_t = _sheet(
+            title,
+            ["object", "in_scope_for_migration", "comment", "owner", "note"]
+            + status_headers,
+        )
         for o in sorted(rows, key=lambda x: x["full_name"]):
             ws_t.append([
-                o["full_name"], _cell(o, "comment"), o.get("owner") or "",
-                "inventory-only — recreate manually (out of utility scope)",
+                o["full_name"], "false", _cell(o, "comment"), o.get("owner") or "",
+                "inventory-only — report-only Tier-A AI asset (not migrated)",
             ] + _status_cells(o))
 
     # Catch-all for any present type not explicitly modeled above (never drop an
@@ -574,17 +619,43 @@ def build_report(
     def _gov_status_header() -> list[str]:
         return ["import_status"] if stage == "IMPORT" else []
 
+    # A table dropped in the fail-closed sweep (action DROP_PROTECTION_FAILED) had
+    # its tag / mask / grant ops applied at exec time, but they no longer exist on
+    # target. Those governance rows must therefore read ROLLED BACK — not the
+    # exec-time SUCCESS the op result still carries (task 6). A genuine create
+    # FAILURE (e.g. a bad inline mask fails CREATE TABLE atomically — a different
+    # action) is NOT a rollback: the governance never applied, so it reads FAILED.
+    _ROLLED_BACK = "ROLLED BACK (object dropped)"
+
+    def _object_rolled_back(*names: str) -> bool:
+        entry = next((idx.get(n) for n in names if n and idx.get(n)), None)
+        return bool(
+            entry
+            and entry.get("status") == "FAILURE"
+            and entry.get("action") == "DROP_PROTECTION_FAILED"
+        )
+
     def _gov_status(*names: str) -> list[str]:
         if stage != "IMPORT":
             return []
+        if _object_rolled_back(*names):
+            return [_ROLLED_BACK]
         entry = next((idx.get(n) for n in names if n and idx.get(n)), None)
         return [_render_import_status(entry)]
 
     def _tag_gov_status(*names: str) -> list[str]:
-        """Tags sheet status ← the actual APPLY_TAGS op (never the create-skip)."""
+        """Tags sheet status ← the actual APPLY_TAGS op (never the create-skip).
+
+        If the tag op itself succeeded but the owning table was then dropped
+        fail-closed (some *other* governance step failed), the tag no longer exists
+        → ROLLED BACK. A tag op that itself FAILED keeps its FAILED render (it is the
+        actual cause, not a casualty of another failure)."""
         if stage != "IMPORT":
             return []
         entry = next((tag_idx.get(n) for n in names if n and tag_idx.get(n)), None)
+        op_failed = bool(entry and str(entry.get("status")) == "FAILURE")
+        if _object_rolled_back(*names) and not op_failed:
+            return [_ROLLED_BACK]
         return [_render_import_status(entry)]
 
     def _grant_gov_status(*names: str) -> list[str]:
@@ -595,6 +666,8 @@ def build_report(
         other sheet."""
         if stage != "IMPORT":
             return []
+        if _object_rolled_back(*names):
+            return [_ROLLED_BACK]
         entry = next((idx.get(n) for n in names if n and idx.get(n)), None)
         if not entry:
             return [""]

@@ -41,7 +41,14 @@ dbutils.widgets.text("schemas", "")             # csv catalog.schema; blank = al
 dbutils.widgets.text("output_volume_path", "")  # /Volumes/<c>/<s>/<vol>
 dbutils.widgets.text("ops_catalog", "")
 dbutils.widgets.text("ops_schema", "")
-dbutils.widgets.text("mapping_file_path", "")   # storage-cred + location mapping CSV
+dbutils.widgets.text("mapping_file_path", "")   # legacy storage-cred + location mapping CSV (back-compat)
+# The single external-storage mapping file (task 2). Column shape auto-selects:
+# 2 cols (source_base_path,target_base_path) → BYO (storage credential + external
+# location are prerequisites; only prefix-swap external LOCATIONs); 3 cols
+# (+access_connector_id) → the utility creates the storage credential + external
+# location. Supersedes mapping_file_path; drives export path-rewrite AND the
+# import-time base-path swap. Blank = none.
+dbutils.widgets.text("external_locations_path", "")
 dbutils.widgets.text("run_id", "")              # Airgap Import: source bundle id (job param default)
 
 # --- remote source (direct remote / airgap read); blank = current workspace ---
@@ -69,6 +76,12 @@ dbutils.widgets.text("import_warehouse_id", "")
 # used. Blank = run as the installing user. The SP must be a workspace member with
 # the needed UC privileges. (The source-only Inventory+Export job is unaffected.)
 dbutils.widgets.text("run_as_spn", "")
+# --- source run-as service principal (Airgap Inventory+Export job) ---
+# Application id of a service principal to run the SOURCE (inventory+export) job as,
+# so source discovery + DDL capture run as that read-only SP. Blank = run as the
+# installing user. (The end-to-end jobs run all stages as a single job, so they use
+# run_as_spn above, not this.)
+dbutils.widgets.text("source_run_as_spn", "")
 
 # --- import table filter (import/e2e jobs; blank = import every table).
 #     Catalog/schema scoping is set above via `catalogs`/`schemas`. ---
@@ -90,6 +103,19 @@ dbutils.widgets.text("node_type_id", "Standard_DS3_v2")
 for _t in (*CREATE_TOGGLES, *APPLY_TOGGLES):
     dbutils.widgets.dropdown(_t, "true", ["true", "false"])
 
+# --- incremental (delta) sync (import/e2e jobs): run mode is auto-detected from
+#     uc_sync_state; force_full re-seeds a full reconcile on demand (default off). ---
+dbutils.widgets.dropdown("force_full", "false", ["true", "false"])
+# --- report-only Tier-A handling (import/e2e jobs): streaming tables & materialized
+#     views are DLT/SDP-managed and report-only; set true to migrate materialized
+#     views (streaming tables stay report-only). ---
+dbutils.widgets.dropdown("migrate_materialized_views", "false", ["true", "false"])
+# --- graded preflight (all jobs): NO-GO on a bad environment (missing report lib,
+#     unreachable warehouse) is enforced by default; allow_missing_report makes the
+#     import report non-best-effort. ---
+dbutils.widgets.dropdown("preflight_enforce", "true", ["true", "false"])
+dbutils.widgets.dropdown("allow_missing_report", "false", ["true", "false"])
+
 dbutils.widgets.dropdown("run_now", "false", ["true", "false"])
 
 # COMMAND ----------
@@ -100,15 +126,21 @@ notebook_dir = dirname(ctx.notebookPath().get())
 
 _simple = (
     "connectivity_mode", "catalogs", "schemas", "output_volume_path",
-    "ops_catalog", "ops_schema", "mapping_file_path", "run_id",
+    "ops_catalog", "ops_schema", "mapping_file_path", "external_locations_path",
+    "run_id",
     "source_workspace_url", "source_client_id", "source_client_secret",
     "source_secret_scope", "source_secret_key", "source_warehouse_id",
     "import_warehouse_id",
-    "run_as_spn", "filter_tables", "catalog_mapping_json", "object_locations_path",
+    "run_as_spn", "source_run_as_spn", "filter_tables", "catalog_mapping_json",
+    "object_locations_path",
     "existing_cluster_id", "spark_version", "node_type_id", "job_name_prefix",
 )
 values = {k: dbutils.widgets.get(k).strip() for k in _simple}
 values["notebook_dir"] = notebook_dir
+values["force_full"] = dbutils.widgets.get("force_full")
+values["migrate_materialized_views"] = dbutils.widgets.get("migrate_materialized_views")
+values["preflight_enforce"] = dbutils.widgets.get("preflight_enforce")
+values["allow_missing_report"] = dbutils.widgets.get("allow_missing_report")
 for _t in (*CREATE_TOGGLES, *APPLY_TOGGLES):
     values[_t] = dbutils.widgets.get(_t)
 

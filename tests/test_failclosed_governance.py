@@ -15,7 +15,7 @@ import re
 from pathlib import Path
 
 from uc_sync.audit import stage_audit_row
-from uc_sync.package_import import PackageImportEngine
+from uc_sync.package_import import PackageImportEngine, governance_failures
 from uc_sync.sync_state import state_row_from_import
 
 
@@ -193,6 +193,32 @@ def test_failclosed_drops_and_propagates(tmp_path: Path):
         assert state["last_sync_status"] == "FAILURE"
 
 
+def test_governance_failures_helper_drives_the_hard_fail(tmp_path: Path):
+    """Task 10: the import notebook hard-fails when governance_failures() is
+    non-empty. The dropped new table (PROTECTION_FAILED) is captured, and a fully
+    clean run yields an empty list (green job)."""
+    # Fail-closed bundle → the bad-tag table is dropped (PROTECTION_FAILED).
+    root = _failclosed_bundle(tmp_path)
+    sql = GovSql(known_functions=set(), allowed_tags={"allowed_only"})
+    results = PackageImportEngine(str(root), sql, dry_run=False).run()
+    failed = governance_failures(results)
+    assert failed, "a dropped/failed governance object must trigger the hard-fail"
+    assert all(
+        r.error_code in ("PROTECTION_FAILED", "GOVERNANCE_FAILED",
+                         "ABAC_WAREHOUSE_REQUIRED")
+        for r in failed
+    )
+    assert any(r.target_full_name == "c.hr.t_bad_tag" for r in failed)
+
+    # A fully clean run → no governance failures (the job stays green).
+    clean = tmp_path / "clean"
+    _write(clean, "ddl/CATALOG_c.sql", "CREATE CATALOG `c`;\n")
+    _write(clean, "ddl/TABLE_c__s__t.sql", "CREATE TABLE `c`.`s`.`t` (id INT);\n")
+    _write(clean, "inventory/objects.json", "[]")
+    clean_results = PackageImportEngine(str(clean), GovSql(), dry_run=False).run()
+    assert governance_failures(clean_results) == []
+
+
 def test_failclosed_preexisting_table_marked_failed_not_dropped(tmp_path: Path):
     """A pre-existing (SKIP_EXISTING) table whose tag fails is NEVER dropped (it may
     hold data — only empty shells this run created are droppable), but its own status
@@ -223,6 +249,99 @@ def test_failclosed_preexisting_table_marked_failed_not_dropped(tmp_path: Path):
     # ...but its status reflects the governance failure (not success).
     assert table_row.status == "FAILURE"
     assert table_row.error_code == "PROTECTION_FAILED"
+
+
+def test_run_as_spn_excluded_as_grantee(tmp_path: Path):
+    """Task 8: the utility never re-grants to the run-as SPN — that grantee is
+    skipped when replicating ACLs; every other grant still applies."""
+    root = tmp_path / "migrated"
+    _write(root, "ddl/TABLE_c__s__t.sql", "CREATE TABLE `c`.`s`.`t` (id INT);\n")
+    _write(root, "grants/TABLE_c__s__t.sql",
+           "GRANT SELECT ON TABLE `c`.`s`.`t` TO `svc-runas`;\n"
+           "GRANT SELECT ON TABLE `c`.`s`.`t` TO `analyst@x.com`;\n")
+    _write(root, "inventory/objects.json", "[]")
+
+    sql = GovSql()
+    PackageImportEngine(
+        str(root), sql, dry_run=False, run_as_spn="svc-runas"
+    ).run()
+    grants = [s for s in sql.statements if s.upper().startswith("GRANT")]
+    # The run-as SPN's grant is skipped; the analyst grant is applied.
+    assert not any("svc-runas" in g for g in grants)
+    assert any("analyst@x.com" in g for g in grants)
+
+
+def test_external_create_failure_reported_with_reason_run_continues(tmp_path: Path):
+    """Task 3: no preflight. An external table whose create fails (path not under
+    any external location) is reported as a per-object FAILURE with a stable
+    error_code + the attempted target path + the underlying reason, and the rest of
+    the run still completes (other objects created)."""
+    root = tmp_path / "migrated"
+    _write(root, "ddl/CATALOG_c.sql", "CREATE CATALOG `c`;\n")
+    _write(root, "ddl/SCHEMA_c__hr.sql", "CREATE SCHEMA `c`.`hr`;\n")
+    _write(root, "ddl/EXTERNAL_TABLE_c__hr__ext.sql",
+           "CREATE EXTERNAL TABLE `c`.`hr`.`ext` (id INT) "
+           "LOCATION 'abfss://data@tgt.dfs.core.windows.net/ap/ext';\n")
+    _write(root, "ddl/TABLE_c__hr__ok.sql", "CREATE TABLE `c`.`hr`.`ok` (id INT);\n")
+    _write(root, "inventory/objects.json", "[]")
+
+    class ELSql(GovSql):
+        def execute(self, sql: str):
+            u = sql.strip().upper()
+            if u.startswith("CREATE EXTERNAL TABLE"):
+                self.statements.append(sql)
+                raise RuntimeError(
+                    "[NO PARENT EXTERNAL LOCATION] No parent external location "
+                    "found for path abfss://data@tgt.dfs.core.windows.net/ap/ext"
+                )
+            return super().execute(sql)
+
+    sql = ELSql()
+    results = PackageImportEngine(str(root), sql, dry_run=False).run()
+    by = {(r.object_type, r.target_full_name): r for r in results}
+
+    ext = by[("EXTERNAL_TABLE", "c.hr.ext")]
+    assert ext.status == "FAILURE"
+    assert ext.error_code == "EXTERNAL_LOCATION_NOT_COVERED"
+    # The attempted target path is surfaced in the message.
+    assert "abfss://data@tgt.dfs.core.windows.net/ap/ext" in ext.message
+    # The run continued: the plain table was still created.
+    assert by[("TABLE", "c.hr.ok")].status == "SUCCESS"
+    assert "c.hr.ok" in sql.tables
+
+
+def test_skipped_external_object_not_double_counted_as_failclosed(tmp_path: Path):
+    """Task 5: an external object skipped for a missing location (MANUAL_ACTION_
+    REQUIRED) that also carries a governed tag must keep a SINGLE status — the
+    governance phase must not act on it and mark it a second time PROTECTION_FAILED,
+    because nothing was created or dropped."""
+    root = tmp_path / "migrated"
+    _write(root, "ddl/CATALOG_c.sql", "CREATE CATALOG `c`;\n")
+    _write(root, "ddl/SCHEMA_c__hr.sql", "CREATE SCHEMA `c`.`hr`;\n")
+    _write(root, "ddl/EXTERNAL_TABLE_c__hr__accounts_ext.sql",
+           "CREATE EXTERNAL TABLE `c`.`hr`.`accounts_ext` (id INT) "
+           "LOCATION 'abfss://src@acct.dfs.core.windows.net/p';\n")
+    # Governed tag on the never-placed external table.
+    _write(root, "tags/EXTERNAL_TABLE_c__hr__accounts_ext.sql",
+           "ALTER TABLE `c`.`hr`.`accounts_ext` SET TAGS ('pii' = 'BANK');\n")
+    _write(root, "inventory/objects.json", "[]")
+
+    sql = GovSql(allowed_tags=set())  # 'pii' would FAIL if the tag phase acted
+    engine = PackageImportEngine(str(root), sql, dry_run=False)
+    # Existing-catalog mode: an external object with no configured location cannot
+    # be placed → MANUAL_ACTION_REQUIRED (the repro condition).
+    engine._existing_catalog_mode = True
+    results = engine.run()
+
+    ext_rows = [r for r in results if "accounts_ext" in r.target_full_name]
+    # Exactly ONE row for the external object, and it is the MANUAL skip — no
+    # second PROTECTION_FAILED row from the governance phase.
+    assert len(ext_rows) == 1, [(r.action, r.status) for r in ext_rows]
+    assert ext_rows[0].status == "MANUAL_ACTION_REQUIRED"
+    assert ext_rows[0].error_code == "EXTERNAL_LOCATION_MISSING"
+    # The tag phase never touched it (no SET TAGS executed, nothing dropped).
+    assert not any("SET TAGS" in s and "accounts_ext" in s for s in sql.statements)
+    assert not any("DROP TABLE" in s for s in sql.statements)
 
 
 # --- #4 + #5 ABAC context + warehouse enforcement ---------------------------

@@ -8,8 +8,14 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from uc_sync.delta import DeltaPlan
 from uc_sync.dependency import _TYPE_RANK
-from uc_sync.location_mapping import ObjectLocations
+from uc_sync.fingerprints import (
+    ddl_fingerprint,
+    governance_fingerprint,
+    grant_fingerprint_set,
+)
+from uc_sync.location_mapping import ExternalLocationMapping, ObjectLocations
 from uc_sync.models import ObjectType
 from uc_sync.report import _table_in_policy_scope
 
@@ -43,6 +49,13 @@ class PackageImportResult:
     source_definition_hash: str = ""
     source_object_id: str = ""
     source_last_modified_at: Any = None
+    # Incremental-sync fingerprints of the CURRENT source object (task 1). Written to
+    # uc_sync_state so the next run can diff against them; also the delta action label
+    # for this run (CREATED_NEW / REPLACED / CHANGED / UNCHANGED / GOVERNANCE_UPDATED).
+    ddl_hash: str = ""
+    governance_hash: str = ""
+    grants_json: str = ""
+    delta_action: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -78,6 +91,18 @@ def _is_owner_statement(statement: str) -> bool:
     """True for an ``ALTER … OWNER TO …`` ownership transfer."""
 
     return bool(_OWNER_TO_RE.search(statement or ""))
+
+
+# The grantee that follows the final ``TO`` in a ``GRANT … TO <principal>`` — used
+# to exclude the run-as SPN as a grantee (task 8). Captures a backtick-quoted or
+# bare principal at end of statement.
+_GRANT_TO_RE = re.compile(r"\bTO\s+`?([^`;]+?)`?\s*;?\s*$", re.IGNORECASE | re.DOTALL)
+
+
+def _grant_grantee(statement: str) -> str:
+    """The (unquoted, lower-cased) grantee of a ``GRANT … TO`` statement, or ''."""
+    match = _GRANT_TO_RE.search(statement or "")
+    return match.group(1).strip().strip("`").lower() if match else ""
 
 
 def _owner_statement_target(statement: str) -> tuple[str, str]:
@@ -201,6 +226,34 @@ _DESCRIBE_COMMANDS = {
 }
 
 
+# Error codes that mark a governance protection failure. A run that produced ANY of
+# these must NOT exit green (task 10): a fresh table shell was dropped fail-closed; a
+# pre-existing (possibly deep-cloned) table is NEVER dropped but is flagged here so
+# Ops sees it and the import job hard-fails. GOVERNANCE_PREREQ_MISSING is deliberately
+# excluded on its own — the object it protects is still flagged PROTECTION_FAILED
+# separately, so the hard-fail still fires without treating the prereq note itself as
+# the trigger.
+GOVERNANCE_FAILURE_CODES = frozenset(
+    {"PROTECTION_FAILED", "ABAC_WAREHOUSE_REQUIRED", "GOVERNANCE_FAILED"}
+)
+
+
+def governance_failures(
+    results: Iterable["PackageImportResult"],
+) -> list["PackageImportResult"]:
+    """Import results that represent a governance protection failure (task 10).
+
+    The import notebook completes the run (writing the report + audit/state) and then
+    hard-fails (exits non-zero) when this is non-empty — so a governance failure is
+    never a silently green run, for the dropped-new-table case AND the flagged
+    pre-existing-table case.
+    """
+    return [
+        r for r in results
+        if str(getattr(r, "error_code", "") or "") in GOVERNANCE_FAILURE_CODES
+    ]
+
+
 def quote_full_name(full_name: str) -> str:
     return ".".join(f"`{part}`" for part in str(full_name).split(".") if part)
 
@@ -314,6 +367,72 @@ def _is_governance_prereq_error(message: str) -> bool:
     return any(marker in upper for marker in _GOVERNANCE_PREREQ_MARKERS)
 
 
+_EXTERNAL_OBJECT_TYPES = {"EXTERNAL_TABLE", "EXTERNAL_VOLUME"}
+
+# Reason classification for a FAILED external-object create (task 3). We never
+# preflight external placement — we attempt the create and, on failure, report a
+# stable error_code + the underlying reason, then continue with the rest of the run.
+_EL_NOT_COVERED_MARKERS = (
+    "NO PARENT EXTERNAL LOCATION",
+    "NOT COVERED BY AN EXTERNAL LOCATION",
+    "NO EXTERNAL LOCATION",
+    "PATH_NOT_COVERED",
+    "IS NOT UNDER ANY EXTERNAL LOCATION",
+)
+_PERMISSION_DENIED_MARKERS = (
+    "PERMISSION_DENIED",
+    "PERMISSION DENIED",
+    "DOES NOT HAVE PERMISSION",
+    "NOT AUTHORIZED",
+    "UNAUTHORIZED",
+    "IS NOT AUTHORIZED",
+    "FORBIDDEN",
+    "REQUIRES CREATE EXTERNAL",
+)
+_BAD_PATH_MARKERS = (
+    "INVALID PATH",
+    "MALFORMED",
+    "UNSUPPORTED URI",
+    "INVALID URI",
+    "INVALID_PATH",
+    "COULD NOT PARSE",
+    "SCHEME",
+)
+
+
+def classify_external_create_failure(message: str) -> tuple[str, str]:
+    """Map an external-object create error to ``(error_code, human hint)``.
+
+    Order matters: a location overlap is a distinct, common re-run case; then the
+    EL-coverage / permission / bad-path buckets; otherwise a generic code so the
+    reason still reaches the report verbatim.
+    """
+    upper = str(message or "").upper()
+    if any(marker in upper for marker in _LOCATION_CONFLICT_MARKERS):
+        return "LOCATION_OVERLAP", (
+            "target storage path is already claimed by another securable; supply a "
+            "distinct target path via external_locations.csv / "
+            "location_mapping_csv_path"
+        )
+    if any(marker in upper for marker in _EL_NOT_COVERED_MARKERS):
+        return "EXTERNAL_LOCATION_NOT_COVERED", (
+            "the target path is not under any external location on the target "
+            "metastore; create/extend the external location (its owner) so it "
+            "covers this path, then re-run"
+        )
+    if any(marker in upper for marker in _PERMISSION_DENIED_MARKERS):
+        return "EXTERNAL_CREATE_PERMISSION_DENIED", (
+            "the run principal lacks CREATE EXTERNAL TABLE / CREATE EXTERNAL "
+            "VOLUME on the covering external location; grant it (EL owner)"
+        )
+    if any(marker in upper for marker in _BAD_PATH_MARKERS):
+        return "EXTERNAL_PATH_INVALID", (
+            "the target LOCATION is not a valid storage URI; fix the mapped path "
+            "(external_locations.csv / object_locations.csv)"
+        )
+    return "EXTERNAL_CREATE_FAILED", "external object create failed"
+
+
 def rewrite_catalog_references(sql: str, mapping: dict[str, str]) -> str:
     """Rewrite catalog references source->target in a SQL statement.
 
@@ -367,6 +486,11 @@ class PackageImportEngine:
         workspace_client: Any = None,
         select_tables: Optional[Iterable[str]] = None,
         object_locations: Optional[ObjectLocations] = None,
+        external_locations: Optional[ExternalLocationMapping] = None,
+        prior_state: Optional[dict[str, dict[str, Any]]] = None,
+        force_full: bool = False,
+        migrate_materialized_views: bool = False,
+        run_as_spn: str = "",
         abac_sql_executor: Any = None,
     ):
         self.root = Path(package_root)
@@ -420,6 +544,11 @@ class PackageImportEngine:
         # Explicit per-object target locations (schema MANAGED LOCATION / external
         # table+volume LOCATION) from the optional object-locations config.
         self.object_locations = object_locations
+        # The single external-storage mapping (external_locations.csv, task 2): a
+        # base-path prefix swap used to re-point external LOCATIONs when there is no
+        # exact object-locations override. Precedence per object is: exact override →
+        # base-path swap → skip.
+        self.external_locations = external_locations
         # Existing-catalog (Mode B): set when the mapped target catalog already
         # exists, so storage-credential / external-location / catalog creation are
         # skipped (they are prerequisites) and only the contents are replicated.
@@ -443,6 +572,34 @@ class PackageImportEngine:
         #    for those non-table securables.
         self._created_objects: dict[str, PackageImportResult] = {}
         self._failed_objects: dict[str, str] = {}
+        # Incremental (delta) sync (task 1). ``prior_state`` is the last-run baseline
+        # read from uc_sync_state ({source_full_name: {ddl_hash, governance_hash,
+        # grants}}); ``force_full`` forces a full re-seed. When a baseline is present
+        # and force_full is off the run is INCREMENTAL: unchanged objects are skipped
+        # entirely (zero writes) and only changed governance / grants are touched. The
+        # DeltaPlan is built in run() once the bundle inventory is loaded.
+        self.prior_state = dict(prior_state or {})
+        self.force_full = bool(force_full)
+        self.delta_plan: Optional[DeltaPlan] = None
+        # Streaming tables & materialized views are created/refreshed by DLT/SDP
+        # managed pipelines, so re-issuing their DDL would spin a new pipeline and
+        # re-derive data (task 4). Streaming tables can't be recreated standalone →
+        # always report-only. Materialized-view migration is gated behind this
+        # opt-in toggle (default OFF); when off they are report-only too.
+        self.migrate_materialized_views = bool(migrate_materialized_views)
+        # The utility never touches the run-as SPN's own grants (task 8): when
+        # replicating source ACLs onto target it EXCLUDES the run-as SPN as a
+        # grantee (it already holds catalog-scoped ALL PRIVILEGES + MANAGE, and its
+        # source-catalog grants are irrelevant to the target). No revokes, no
+        # residual reconciliation. Compared case-insensitively, backticks stripped.
+        self.run_as_spn = str(run_as_spn or "").strip().strip("`").lower()
+        #  _absent_objects: target_full_name of every object that is NOT present on
+        #    target after its create file ran — a create FAILURE, or a MANUAL skip
+        #    (external object with no configured location). The governance phases
+        #    must not act on these: a governed tag / ABAC match on an object that was
+        #    never created would otherwise be counted a SECOND time as a fail-closed
+        #    PROTECTION_FAILED, though nothing was created or dropped (task 5).
+        self._absent_objects: set[str] = set()
 
     # Object type → the create_* toggle that gates its creation.
     _CREATE_TOGGLE_FOR_TYPE = {
@@ -530,6 +687,12 @@ class PackageImportEngine:
                 f"Migrated export package not found: {self.root}"
             )
         inventory = self._load_inventory()
+        # Build the incremental delta plan from the CURRENT bundle inventory vs. the
+        # prior-run baseline. Auto-detected: a baseline present (and not force_full) →
+        # incremental; else full + seed. Unchanged objects are then skipped entirely.
+        self.delta_plan = DeltaPlan(
+            self._load_inventory_rows(), self.prior_state, force_full=self.force_full
+        )
         self._maybe_enter_existing_catalog_mode()
         by_target = {
             str(row.get("target_full_name") or ""): row
@@ -552,6 +715,7 @@ class PackageImportEngine:
         self._failed_tables = {}
         self._created_objects = {}
         self._failed_objects = {}
+        self._absent_objects = set()
         # ABAC scope metadata (file stem -> policy full name + on-securable), so an
         # ABAC failure can be mapped to the table(s) the policy protects for the
         # fail-closed drop sweep.
@@ -702,6 +866,52 @@ class PackageImportEngine:
             source_object_id=str(inventory_row.get("object_id") or ""),
             source_last_modified_at=inventory_row.get("last_modified_at"),
         )
+        # Incremental fingerprints of the CURRENT source object — written to
+        # uc_sync_state so the next run diffs against them.
+        if inventory_row:
+            result.ddl_hash = ddl_fingerprint(inventory_row)
+            result.governance_hash = governance_fingerprint(inventory_row)
+            result.grants_json = json.dumps(
+                grant_fingerprint_set(inventory_row), sort_keys=True
+            )
+        # Report-only types (task 4): streaming tables (always) and materialized
+        # views (unless migrate_materialized_views) are DLT/SDP-pipeline-managed —
+        # re-issuing their DDL would spin a new pipeline and re-derive data, so the
+        # utility never creates them. They are inventoried and reported, not migrated.
+        if object_type == "STREAMING_TABLE" or (
+            object_type == "MATERIALIZED_VIEW" and not self.migrate_materialized_views
+        ):
+            result.status = "SUCCESS"
+            result.action = "REPORT_ONLY"
+            result.delta_action = "REPORT_ONLY"
+            result.message = (
+                f"{object_type} is pipeline-managed (DLT/SDP) — reported, not "
+                "migrated"
+                + ("" if object_type == "STREAMING_TABLE"
+                   else " (set migrate_materialized_views=true to override)")
+            )
+            if target_full_name:
+                self._created_objects[target_full_name] = result
+            return result
+        # Delta gating: on an incremental run an object whose DDL + governance +
+        # grants are all unchanged is skipped ENTIRELY (zero writes) — no create, no
+        # grants, no governance re-apply. Its baseline row already holds the (still
+        # correct) fingerprints, so nothing needs re-recording.
+        result.delta_action = self.delta_plan.action(source_full_name) if self.delta_plan else ""
+        if (
+            not self.dry_run
+            and self.delta_plan is not None
+            and self.delta_plan.should_skip_object(source_full_name)
+        ):
+            result.status = "SUCCESS"
+            result.action = "UNCHANGED"
+            result.delta_action = "UNCHANGED"
+            result.message = "unchanged since last run (incremental: skipped)"
+            if target_full_name:
+                self._created_objects[target_full_name] = result
+            return result
+        statements: list[str] = []  # defined before the try so the except can
+        # report the attempted external LOCATION even on an early read failure.
         try:
             sql_text = path.read_text(encoding="utf-8")
             statements = [
@@ -727,6 +937,10 @@ class PackageImportEngine:
                 result.action = "MANUAL"
                 result.error_code = "EXTERNAL_LOCATION_MISSING"
                 result.message = manual_reason
+                # Never created → the governance phases must not act on it (task 5).
+                if target_full_name:
+                    self._absent_objects.add(target_full_name)
+                    self._created_objects[target_full_name] = result
                 return result
             if not self._create_enabled(object_type):
                 # create_*=false: the object is assumed to already exist on
@@ -841,7 +1055,20 @@ class PackageImportEngine:
                 result.status = "FAILURE"
                 result.error_code = type(exc).__name__
                 result.message = message
-                if _is_location_conflict_error(message):
+                if object_type in _EXTERNAL_OBJECT_TYPES:
+                    # Task 3 — no preflight: we attempted the create; on failure we
+                    # report the object, the attempted target path, and a stable
+                    # error_code for the reason (uncovered EL / permission / bad
+                    # path / overlap), then continue with the rest of the run.
+                    code, hint = classify_external_create_failure(message)
+                    attempted = self._first_location_literal(statements)
+                    result.error_code = code
+                    result.message = (
+                        f"{hint}"
+                        + (f"; attempted target path: {attempted}" if attempted else "")
+                        + f". {message[:1000]}"
+                    )
+                elif _is_location_conflict_error(message):
                     result.error_code = "LOCATION_OVERLAP"
                     result.message = (
                         "target storage path is already claimed by another "
@@ -861,6 +1088,11 @@ class PackageImportEngine:
         # non-table securable can mark it FAILURE in place (see _mark_failed_objects).
         if target_full_name:
             self._created_objects[target_full_name] = result
+        # A create FAILURE means the object is not present on target, so the
+        # governance phases must not act on it (task 5 — otherwise a governed tag /
+        # ABAC match would be counted a second time as a fail-closed drop).
+        if target_full_name and result.status == "FAILURE":
+            self._absent_objects.add(target_full_name)
         return result
 
     def _abac_meta_by_stem(
@@ -1056,6 +1288,28 @@ class PackageImportEngine:
             target_full_name = self._map_name(parsed_name)
             if not self._in_scope(object_type, target_full_name):
                 continue  # object excluded by the import scope filter
+            # An object that was never created (create FAILURE / MANUAL skip) must
+            # not have governance acted on it — its create row already carries the
+            # single accurate status; a governed tag here would double-count it as a
+            # fail-closed drop though nothing was created or dropped (task 5). ABAC
+            # policies are catalog/schema-level objects, not per-securable, so they
+            # are keyed by policy name (never in _absent_objects) and unaffected.
+            if not is_abac and target_full_name in self._absent_objects:
+                continue
+            # Incremental delta gating: on an incremental run, skip governance whose
+            # fingerprint is unchanged. Tags — skip when the object's governance
+            # fingerprint is unchanged. ABAC — skip when the policy object (an object
+            # in its own right) is unchanged. On a full run everything is applied.
+            if not self.dry_run and self.delta_plan is not None:
+                if is_abac:
+                    meta_probe = abac_meta.get(path.stem)
+                    policy_name = (meta_probe or {}).get("full_name") or parsed_name
+                    if self.delta_plan.incremental and self.delta_plan.should_skip_object(
+                        policy_name
+                    ):
+                        continue
+                elif not self.delta_plan.governance_changed(parsed_name):
+                    continue
             offset += 1
             meta = abac_meta.get(path.stem) if is_abac else None
             if meta:
@@ -1084,6 +1338,18 @@ class PackageImportEngine:
                 dependency_level=_type_rank(object_type),
                 import_order=start_order + offset,
             )
+            # An ABAC policy is an object in its own right → carry its delta action +
+            # fingerprints so it seeds/updates uc_sync_state (tag ops are attributes,
+            # not objects, and are excluded from the state upsert by the notebook).
+            if is_abac and self.delta_plan is not None:
+                result.delta_action = self.delta_plan.action(source_full_name)
+                policy_row = inventory.get(source_full_name) or {}
+                if policy_row:
+                    result.ddl_hash = ddl_fingerprint(policy_row)
+                    result.governance_hash = governance_fingerprint(policy_row)
+                    result.grants_json = json.dumps(
+                        grant_fingerprint_set(policy_row), sort_keys=True
+                    )
             try:
                 statements = _split_statements(path.read_text(encoding="utf-8"))
                 if self.dry_run:
@@ -1187,6 +1453,10 @@ class PackageImportEngine:
                     (object_type, target_full_name, statement)
                 )
                 continue
+            # Never re-grant to the run-as SPN itself (task 8): it already holds its
+            # catalog-scoped grant, and its source ACLs are irrelevant to the target.
+            if self.run_as_spn and _grant_grantee(statement) == self.run_as_spn:
+                continue
             try:
                 exec_sql.execute(statement)
             except Exception as grant_exc:  # noqa: BLE001
@@ -1280,35 +1550,68 @@ class PackageImportEngine:
             return statements, ""
 
         if object_type == "EXTERNAL_VOLUME":
-            location = locations.volume_location(schema, leaf) if locations else None
-            if location:
-                return (
-                    [self._replace_location_literal(s, location) for s in statements],
-                    "",
-                )
-            if self._existing_catalog_mode:
-                return statements, (
-                    f"external volume {source_full_name} has no target location; "
-                    f"add a row '{schema},{leaf},,<location>' to the object-locations "
-                    "file (its external location must already exist on target)"
-                )
-            return statements, ""
+            exact = locations.volume_location(schema, leaf) if locations else None
+            return self._place_external(
+                statements, exact, "volume", schema, leaf, source_full_name
+            )
 
         if object_type == "EXTERNAL_TABLE":
-            location = locations.table_location(schema, leaf) if locations else None
-            if location:
+            exact = locations.table_location(schema, leaf) if locations else None
+            return self._place_external(
+                statements, exact, "table", schema, leaf, source_full_name
+            )
+
+        return statements, ""
+
+    def _place_external(
+        self,
+        statements: list[str],
+        exact: Optional[str],
+        kind: str,
+        schema: str,
+        leaf: str,
+        source_full_name: str,
+    ) -> tuple[list[str], str]:
+        """Resolve an external object's target ``LOCATION`` by precedence: **exact
+        object-locations override → external_locations base-path swap → skip**
+        (task 2). Returns ``(statements, manual_reason)``.
+        """
+        # 1) Exact per-object override wins.
+        if exact:
+            return (
+                [self._replace_location_literal(s, exact) for s in statements],
+                "",
+            )
+        # 2) external_locations base-path prefix swap of the object's own LOCATION.
+        current = self._first_location_literal(statements)
+        ext = self.external_locations
+        if ext and current:
+            swapped = ext.rewrite(current)
+            if swapped:
                 return (
-                    [self._replace_location_literal(s, location) for s in statements],
+                    [self._replace_location_literal(s, swapped) for s in statements],
                     "",
                 )
-            if self._existing_catalog_mode:
-                return statements, (
-                    f"external table {source_full_name} has no target location; "
-                    f"add a row '{schema},,{leaf},<location>' to the object-locations "
-                    "file (its external location must already exist on target)"
-                )
-            return statements, ""
-
+            if ext.covers_target(current):
+                # Already re-pointed onto a target base (e.g. swapped at export) —
+                # it is placed, not an unmapped skip. Keep the LOCATION as-is.
+                return statements, ""
+        # 3) No mapping resolved. In existing-catalog / BYO mode the object cannot be
+        # placed (there is no path to reparent onto) — a clean MANUAL skip (task 3
+        # keeps this distinct from a create FAILURE). In Mode A the LOCATION was
+        # rewritten upstream at export, so it is kept as-is.
+        if self._existing_catalog_mode or self.external_locations:
+            row_hint = (
+                f"{schema},{leaf},,<location>" if kind == "volume"
+                else f"{schema},,{leaf},<location>"
+            )
+            return statements, (
+                f"external {kind} {source_full_name} has no target location: no "
+                "external_locations base-path matched its LOCATION and no exact "
+                "override was supplied. Add a base-path row to external_locations.csv, "
+                f"or an exact row '{row_hint}' to the object-locations file "
+                "(its external location must already exist on target)"
+            )
         return statements, ""
 
     def _apply_schema_location(self, statement: str, location: str) -> str:
@@ -1326,6 +1629,17 @@ class PackageImportEngine:
         if trimmed.endswith(";"):
             return trimmed[:-1] + clause + ";"
         return trimmed + clause
+
+    @staticmethod
+    def _first_location_literal(statements: Iterable[str]) -> str:
+        """The first ``LOCATION '…'`` literal in the (already location-rewritten)
+        statements — the target path the external create actually attempted, used
+        for task-3 failure reporting."""
+        for statement in statements or []:
+            match = re.search(r"LOCATION\s+'([^']*)'", str(statement), re.IGNORECASE)
+            if match:
+                return match.group(1)
+        return ""
 
     @staticmethod
     def _replace_location_literal(statement: str, location: str) -> str:
@@ -1365,6 +1679,15 @@ class PackageImportEngine:
         if not target:
             return name
         return f"{target}.{rest}" if rest else target
+
+    def _load_inventory_rows(self) -> list[dict[str, Any]]:
+        """The bundle inventory as a flat list (one entry per object) for delta
+        planning — distinct from ``_load_inventory`` which indexes by name."""
+        inventory_path = self.root / "inventory" / "objects.json"
+        if not inventory_path.exists():
+            return []
+        rows = json.loads(inventory_path.read_text(encoding="utf-8"))
+        return [row for row in rows if isinstance(row, dict)]
 
     def _load_inventory(self) -> dict[str, dict[str, Any]]:
         inventory_path = self.root / "inventory" / "objects.json"

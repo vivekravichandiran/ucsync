@@ -10,6 +10,7 @@ from typing import Any, Optional
 
 from uc_sync.components import resolve_components
 from uc_sync.location_mapping import (
+    load_external_locations_csv,
     load_location_mapping_csv,
     parse_location_mappings,
 )
@@ -88,6 +89,13 @@ class SyncConfig:
     state_table: str = ""
     import_package_path: str = ""
     location_mapping_csv_path: str = ""
+    # The single external-storage mapping file (task 2). Its column shape decides
+    # behavior: 2-col (source_base_path,target_base_path) → BYO (SC/EL are
+    # prerequisites, only prefix-swap); 3-col (+access_connector_id) → the utility
+    # creates the storage credential + external location. Supersedes the legacy
+    # 3-column location_mapping_csv_path.
+    external_locations_path: str = ""
+    external_locations_create_storage: bool = True
     catalog_mapping: dict[str, str] = field(default_factory=dict)
     catalogs: list[str] = field(default_factory=list)
     schemas: list[str] = field(default_factory=list)
@@ -98,6 +106,20 @@ class SyncConfig:
     include_regex: list[str] = field(default_factory=list)
     exclude_regex: list[str] = field(default_factory=list)
     import_mode: str = "CREATE_OR_SKIP"
+    # Incremental (delta) sync (task 1): run mode is auto-detected from uc_sync_state
+    # (baseline present → incremental; none → full + seed). force_full re-seeds a full
+    # reconcile on demand. Default off.
+    force_full: bool = False
+    # Streaming tables & materialized views are DLT/SDP-pipeline-managed and are
+    # report-only by default (task 4). Set this on to opt into materialized-view
+    # migration; streaming tables are always report-only.
+    migrate_materialized_views: bool = False
+    # Graded preflight (task 9): gate 01/02/03 behind an environment preflight. When
+    # enforced (default), a NO-GO (missing report lib, unreachable warehouse, …) is a
+    # red run, never a silent degrade. allow_missing_report=false makes report
+    # generation non-best-effort (a report failure fails the run).
+    preflight_enforce: bool = True
+    allow_missing_report: bool = False
     allow_destructive_operations: bool = False
     max_api_workers: int = 8
     mappings: dict[str, Any] = field(default_factory=dict)
@@ -351,6 +373,27 @@ def from_sources(
         for name in (*CREATE_TOGGLES, *APPLY_TOGGLES)
     }
 
+    # The single external-storage mapping file (task 2). When supplied it drives the
+    # export-time path rewrite + Mode-A SC/EL creation (via location_mappings) AND
+    # the import-time base-path prefix swap. Its column shape auto-selects behavior:
+    # a 2-column file (no access connector) is BYO — the storage credential +
+    # external location are customer prerequisites, so their create toggles are
+    # forced OFF; a 3-column file creates them (Mode-A parity).
+    external_locations_path = str(
+        pick("external_locations_path", runtime.get("external_locations_path"))
+    )
+    external_locations_create_storage = True
+    if external_locations_path:
+        ext_map = load_external_locations_csv(external_locations_path)
+        external_locations_create_storage = ext_map.creates_storage
+        if not location_mapping_csv_path and not mapping_file_path:
+            # Feed the legacy location_mappings machinery from this one file.
+            location_mappings = ext_map.to_location_mappings()
+        if not ext_map.creates_storage:
+            # BYO: never create the storage credential / external location.
+            toggles["create_storage_credentials"] = False
+            toggles["create_external_locations"] = False
+
     # Resolve UCSync's four operational-artifact locations from three inputs:
     # ops_catalog + ops_schema (audit/state tables) and output_volume_path
     # (exports + reports). See derive_ops_paths().
@@ -423,6 +466,8 @@ def from_sources(
             )
         ),
         location_mapping_csv_path=location_mapping_csv_path,
+        external_locations_path=external_locations_path,
+        external_locations_create_storage=external_locations_create_storage,
         catalog_mapping=catalog_mapping,
         catalogs=list(catalogs or []),
         schemas=list(schemas or []),
@@ -433,6 +478,18 @@ def from_sources(
         include_regex=list(include_regex or []),
         exclude_regex=list(exclude_regex or []),
         import_mode=str(runtime.get("import_mode") or "CREATE_OR_SKIP"),
+        force_full=_as_bool(pick("force_full", runtime.get("force_full")), False),
+        migrate_materialized_views=_as_bool(
+            pick("migrate_materialized_views",
+                 runtime.get("migrate_materialized_views")),
+            False,
+        ),
+        preflight_enforce=_as_bool(
+            pick("preflight_enforce", runtime.get("preflight_enforce")), True
+        ),
+        allow_missing_report=_as_bool(
+            pick("allow_missing_report", runtime.get("allow_missing_report")), False
+        ),
         allow_destructive_operations=_as_bool(
             runtime.get("allow_destructive_operations"), False
         ),

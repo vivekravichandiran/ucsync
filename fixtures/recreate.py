@@ -49,7 +49,16 @@ def substitute(text, cfg):
 
 
 def split_statements(text):
-    """';'-split respecting $$ blocks and ' string literals (matches dbsql.py)."""
+    """';'-split respecting $$ blocks and ' string literals (matches dbsql.py).
+
+    Full-line ``--`` comments are stripped FIRST so a ``;`` or apostrophe inside a
+    comment (e.g. "container root; each" or "account's data") never mis-splits the
+    char-level scanner. The fixtures use no ``$$`` bodies, so this line-strip is safe
+    (a comment line inside a dollar-quoted body would need the scanner instead).
+    """
+    text = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("--")
+    )
     stmts, buf, i, in_dollar, in_str = [], [], 0, False, False
     while i < len(text):
         ch = text[i]

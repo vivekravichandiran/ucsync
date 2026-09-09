@@ -50,6 +50,13 @@ dbutils.widgets.text("source_secret_key", "")      # secret key   (option 2)
 # EMPTY without a warehouse (tags still work, but ABAC/Policy-Matched-Columns are
 # blank). Point it at any SQL warehouse on the workspace that owns the objects.
 dbutils.widgets.text("source_warehouse_id", "")
+# The single external-storage mapping file (task 2). Lets inventory include the
+# external locations backing the configured source base paths. Blank = ELs are
+# still discovered by table-path coverage.
+dbutils.widgets.text("external_locations_path", "")
+# Graded environment preflight (task 9): enforced by default — a missing report
+# library is a red run, never a silent degrade.
+dbutils.widgets.dropdown("preflight_enforce", "true", ["true", "false"])
 dbutils.widgets.text("run_id", "")
 
 # COMMAND ----------
@@ -58,10 +65,15 @@ widgets = {k: dbutils.widgets.get(k) for k in (
     "connectivity_mode", "catalogs", "schemas", "output_volume_path",
     "ops_catalog", "ops_schema", "source_workspace_url",
     "source_client_id", "source_client_secret", "source_secret_scope",
-    "source_secret_key", "source_warehouse_id",
+    "source_secret_key", "source_warehouse_id", "external_locations_path",
+    "preflight_enforce",
 )}
 widgets["stage"] = "INVENTORY"
 cfg = from_sources(widgets)
+
+# Graded environment preflight — required libraries importable, before any work.
+from uc_sync.preflight import run_preflight, enforce_preflight
+enforce_preflight(run_preflight(check_libs=True), enforce=cfg.preflight_enforce)
 
 def _local(path):
     # UC Volumes are read/written directly at /Volumes/...; only dbfs:/ paths use

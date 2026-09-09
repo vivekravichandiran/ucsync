@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Optional
 
+# Incremental-sync fingerprint columns (task 1): the three per-object fingerprints
+# the next run diffs against. Appended to older state tables in place by
+# SyncStateService.ensure_table (same pattern as the audit table).
 STATE_TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS {full_name} (
   batch_id STRING,
@@ -14,6 +18,9 @@ CREATE TABLE IF NOT EXISTS {full_name} (
   target_full_name STRING,
   source_object_id STRING,
   source_definition_hash STRING,
+  ddl_hash STRING,
+  governance_hash STRING,
+  grants_json STRING,
   source_last_modified_at TIMESTAMP,
   last_sync_status STRING,
   last_sync_at TIMESTAMP,
@@ -35,6 +42,9 @@ STATE_COLUMNS = [
     "target_full_name",
     "source_object_id",
     "source_definition_hash",
+    "ddl_hash",
+    "governance_hash",
+    "grants_json",
     "source_last_modified_at",
     "last_sync_status",
     "last_sync_at",
@@ -45,6 +55,13 @@ STATE_COLUMNS = [
     "error_message",
     "utility_version",
     "updated_at",
+]
+
+# (column, SQL type) for columns that may be missing on an older state table.
+_STATE_UPGRADE_COLUMNS = [
+    ("ddl_hash", "STRING"),
+    ("governance_hash", "STRING"),
+    ("grants_json", "STRING"),
 ]
 
 
@@ -97,6 +114,57 @@ class SyncStateService:
         if schema_sql:
             self.spark.sql(schema_sql)
         self.spark.sql(ensure_state_table_sql(self.full_name))
+        # Upgrade older state tables in place with the incremental-sync fingerprint
+        # columns, so a pre-existing baseline keeps working (missing columns read as
+        # NULL → treated as a change → re-applied, which is safe/idempotent).
+        try:
+            existing = {f.name for f in self.spark.table(self.full_name).schema}
+        except Exception:  # noqa: BLE001 - if we cannot read schema, skip upgrade
+            return
+        missing = [
+            f"{name} {sql_type}"
+            for name, sql_type in _STATE_UPGRADE_COLUMNS
+            if name not in existing
+        ]
+        if missing:
+            self.spark.sql(
+                f"ALTER TABLE {self.full_name} ADD COLUMNS ({', '.join(missing)})"
+            )
+
+    def load_baseline(self) -> dict[str, dict[str, Any]]:
+        """Read the current per-object baseline for an incremental run.
+
+        Returns ``{source_full_name: {object_type, ddl_hash, governance_hash,
+        grants}}`` — one row per object (the MERGE keeps the latest). ``grants`` is
+        the parsed explicit-grant set (``{principal: [privileges]}``). A missing
+        table / unreadable state yields an empty baseline → the run is **full**.
+        """
+        try:
+            self.ensure_table()
+            rows = self.spark.sql(
+                "SELECT source_full_name, object_type, ddl_hash, governance_hash, "
+                f"grants_json FROM {self.full_name}"
+            ).collect()
+        except Exception:  # noqa: BLE001 - no baseline yet → full run
+            return {}
+        baseline: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            data = row.asDict() if hasattr(row, "asDict") else dict(row)
+            name = str(data.get("source_full_name") or "")
+            if not name:
+                continue
+            grants_json = data.get("grants_json")
+            try:
+                grants = json.loads(grants_json) if grants_json else {}
+            except (TypeError, ValueError):
+                grants = {}
+            baseline[name] = {
+                "object_type": str(data.get("object_type") or ""),
+                "ddl_hash": str(data.get("ddl_hash") or ""),
+                "governance_hash": str(data.get("governance_hash") or ""),
+                "grants": grants if isinstance(grants, dict) else {},
+            }
+        return baseline
 
     def upsert(self, rows: Iterable[Mapping[str, Any]]) -> int:
         records = [dict(row) for row in rows]
@@ -164,6 +232,13 @@ def state_row_from_import(
             result.get("source_definition_hash")
             or result.get("definition_hash")
             or ""
+        ),
+        "ddl_hash": str(result.get("ddl_hash") or ""),
+        "governance_hash": str(result.get("governance_hash") or ""),
+        "grants_json": (
+            result.get("grants_json")
+            if isinstance(result.get("grants_json"), str)
+            else json.dumps(result.get("grants_json") or {}, sort_keys=True)
         ),
         "source_last_modified_at": _as_datetime(
             result.get("source_last_modified_at") or result.get("last_modified_at")

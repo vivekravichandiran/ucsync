@@ -1,5 +1,5 @@
 -- Catalogs + schemas for the 3 source fixtures.
--- Each catalog is MANAGED on its storage account's `data` container root; each
+-- Each catalog is MANAGED on its storage account data container root; each
 -- schema gets an explicit MANAGED LOCATION at <account-root>/<schema> so managed
 -- data nests cleanly and external objects sit at flat <root>/<schema>/<object>.
 -- {{GOV_ACCOUNT}} / {{FIN_ACCOUNT}} / {{SALES_ACCOUNT}} are substituted by recreate.py.

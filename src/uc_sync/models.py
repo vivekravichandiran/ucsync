@@ -21,6 +21,12 @@ class ObjectType(str, Enum):
     EXTERNAL_VOLUME = "EXTERNAL_VOLUME"
     FUNCTION = "FUNCTION"
     MODEL = "MODEL"
+    # Tier-A AI-asset types — discovered & reported (report-only, never migrated;
+    # task 4). Reachable with catalog-scoped privileges, under catalog→schema.
+    ONLINE_TABLE = "ONLINE_TABLE"
+    VECTOR_INDEX = "VECTOR_INDEX"
+    MONITOR = "MONITOR"
+    UC_SECRET = "UC_SECRET"
     STORAGE_CREDENTIAL = "STORAGE_CREDENTIAL"
     SERVICE_CREDENTIAL = "SERVICE_CREDENTIAL"
     EXTERNAL_LOCATION = "EXTERNAL_LOCATION"

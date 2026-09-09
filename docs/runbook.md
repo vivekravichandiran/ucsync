@@ -237,3 +237,32 @@ governance phases. All default **true**.
 storage credentials → external locations → catalogs → schemas → volumes →
 functions → tables → views → **governed tags → ABAC policies → classic masks/row
 filters** → grants (last). You never sequence by hand.
+
+## 6. Incremental (delta) runs — automatic
+Run mode is **auto-detected** from `uc_sync_state`: the first run has no baseline →
+**full** run that seeds it; later runs diff each object's DDL / governance / grant
+fingerprints and apply **only deltas** — unchanged objects are skipped entirely
+(zero writes). Removals are **report-only** (a source grant or object that
+disappeared is surfaced on the **Delta** sheet, never revoked or dropped). Set
+`force_full=true` to force a full re-seed. A governance failure is **never a green
+run** — the import job exits non-zero (the report + audit/state are still written).
+
+## 7. Out of scope — stated deliberately
+- **Volume data copy** (file/dir contents inside a volume): a separate data-plane
+  effort, not this DDL/governance migrator. Volume *definitions* migrate; contents
+  do not.
+- **Tier-A AI assets** (registered models, vector-search indexes, online tables,
+  monitors, UC secrets): **inventoried and reported** (`in_scope_for_migration=false`)
+  but **not migrated**. Streaming tables / materialized views are likewise report-only
+  (DLT/SDP-managed); MV migration only behind `migrate_materialized_views=true`.
+- **Tier-B / Tier-C metastore-scoped objects** — **neither inventoried nor migrated**:
+  Lakehouse Federation **connections** & **foreign catalogs**, **service credentials**,
+  **workspace bindings**, **storage credentials not referenced by a migrated external
+  location**, Delta Sharing **shares / recipients / providers**, and **clean rooms**.
+  The catalog-scoped run principal cannot even list them (no metastore admin), and
+  Tier-C objects carry external identity/tokens that can't be copied — an operator
+  with the right privileges re-creates these separately. The utility neither sees nor
+  touches them, so their report sheets are intentionally absent (an empty sheet would
+  imply a coverage we don't provide).
+- **Non-UC / workspace-level assets** (workspace secret scopes, vector-search
+  *endpoints*, model-serving endpoints) belong to the workspace-migration utility.

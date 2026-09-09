@@ -1,9 +1,15 @@
 {
   "name": "${job_name_prefix} - Airgap Import (target)",
-  "tags": {"utility": "uc-governance-migration", "job": "airgap-import-target"},
+  "tags": {
+    "utility": "uc-governance-migration",
+    "job": "airgap-import-target"
+  },
   "max_concurrent_runs": 1,
   "parameters": [
-    {"name": "run_id", "default": "${run_id}"}
+    {
+      "name": "run_id",
+      "default": "${run_id}"
+    }
   ],
   "job_clusters": [
     {
@@ -13,7 +19,9 @@
         "node_type_id": "${node_type_id}",
         "num_workers": 1,
         "data_security_mode": "USER_ISOLATION",
-        "custom_tags": {"uc_migration": "true"}
+        "custom_tags": {
+          "uc_migration": "true"
+        }
       }
     }
   ],
@@ -22,9 +30,21 @@
       "task_key": "import_bundle",
       "job_cluster_key": "uc_migration_cluster",
       "libraries": [
-        {"pypi": {"package": "databricks-sdk>=0.36.0"}},
-        {"pypi": {"package": "PyYAML>=6.0"}},
-        {"pypi": {"package": "openpyxl>=3.1"}}
+        {
+          "pypi": {
+            "package": "databricks-sdk==0.36.0"
+          }
+        },
+        {
+          "pypi": {
+            "package": "PyYAML>=6.0"
+          }
+        },
+        {
+          "pypi": {
+            "package": "openpyxl>=3.1"
+          }
+        }
       ],
       "notebook_task": {
         "notebook_path": "${notebook_dir}/03_Import",
@@ -34,10 +54,13 @@
           "ops_schema": "${ops_schema}",
           "run_id": "{{job.parameters.run_id}}",
           "dry_run": "false",
+          "force_full": "${force_full}",
+          "migrate_materialized_views": "${migrate_materialized_views}",
           "filter_tables": "${filter_tables}",
           "catalog_mapping_json": "${catalog_mapping_json}",
           "import_warehouse_id": "${import_warehouse_id}",
           "object_locations_path": "${object_locations_path}",
+          "external_locations_path": "${external_locations_path}",
           "create_storage_credentials": "${create_storage_credentials}",
           "create_external_locations": "${create_external_locations}",
           "create_catalogs": "${create_catalogs}",
@@ -49,7 +72,9 @@
           "create_abac_policies": "${create_abac_policies}",
           "apply_grants": "${apply_grants}",
           "apply_tags": "${apply_tags}",
-          "apply_masks_row_filters": "${apply_masks_row_filters}"
+          "apply_masks_row_filters": "${apply_masks_row_filters}",
+          "preflight_enforce": "${preflight_enforce}",
+          "allow_missing_report": "${allow_missing_report}"
         }
       }
     }

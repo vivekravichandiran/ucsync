@@ -76,6 +76,11 @@ def _substitute(node: Any, values: Mapping[str, Any]) -> Any:
 # source-only Inventory+Export job is intentionally excluded.
 _TARGET_RUN_AS_JOB_KEYS = {"airgap_import_target", "e2e_dry_run", "e2e_live"}
 
+# The source-only Inventory+Export job runs on the SOURCE workspace and reads source
+# objects, so it honors a distinct source-side run-as SPN (task 7). The end-to-end
+# jobs run 01→02→03 as a single job (one run-as), so they use the target run-as only.
+_SOURCE_RUN_AS_JOB_KEYS = {"airgap_source"}
+
 
 def _apply_run_as(spec: dict[str, Any], run_as_spn: str) -> dict[str, Any]:
     """Set the job's ``run_as`` to a service principal, or leave it default.
@@ -129,6 +134,8 @@ def load_job_spec(
     spec = _apply_cluster_override(spec, str(values.get("existing_cluster_id", "")))
     if job_key in _TARGET_RUN_AS_JOB_KEYS:
         spec = _apply_run_as(spec, str(values.get("run_as_spn", "")))
+    elif job_key in _SOURCE_RUN_AS_JOB_KEYS:
+        spec = _apply_run_as(spec, str(values.get("source_run_as_spn", "")))
     return spec
 
 

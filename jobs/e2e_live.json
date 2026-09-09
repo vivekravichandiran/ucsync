@@ -26,7 +26,7 @@
       "libraries": [
         {
           "pypi": {
-            "package": "databricks-sdk>=0.36.0"
+            "package": "databricks-sdk==0.36.0"
           }
         },
         {
@@ -55,7 +55,9 @@
           "source_secret_scope": "${source_secret_scope}",
           "source_secret_key": "${source_secret_key}",
           "source_warehouse_id": "${source_warehouse_id}",
-          "run_id": "{{job.run_id}}"
+          "run_id": "{{job.run_id}}",
+          "external_locations_path": "${external_locations_path}",
+          "preflight_enforce": "${preflight_enforce}"
         }
       }
     },
@@ -70,7 +72,7 @@
       "libraries": [
         {
           "pypi": {
-            "package": "databricks-sdk>=0.36.0"
+            "package": "databricks-sdk==0.36.0"
           }
         },
         {
@@ -92,13 +94,15 @@
           "ops_catalog": "${ops_catalog}",
           "ops_schema": "${ops_schema}",
           "mapping_file_path": "${mapping_file_path}",
+          "external_locations_path": "${external_locations_path}",
           "source_workspace_url": "${source_workspace_url}",
           "source_client_id": "${source_client_id}",
           "source_client_secret": "${source_client_secret}",
           "source_secret_scope": "${source_secret_scope}",
           "source_secret_key": "${source_secret_key}",
           "source_warehouse_id": "${source_warehouse_id}",
-          "run_id": "{{job.run_id}}"
+          "run_id": "{{job.run_id}}",
+          "preflight_enforce": "${preflight_enforce}"
         }
       }
     },
@@ -113,7 +117,7 @@
       "libraries": [
         {
           "pypi": {
-            "package": "databricks-sdk>=0.36.0"
+            "package": "databricks-sdk==0.36.0"
           }
         },
         {
@@ -135,10 +139,13 @@
           "ops_schema": "${ops_schema}",
           "run_id": "{{job.run_id}}",
           "dry_run": "false",
+          "force_full": "${force_full}",
+          "migrate_materialized_views": "${migrate_materialized_views}",
           "filter_tables": "${filter_tables}",
           "catalog_mapping_json": "${catalog_mapping_json}",
           "import_warehouse_id": "${import_warehouse_id}",
           "object_locations_path": "${object_locations_path}",
+          "external_locations_path": "${external_locations_path}",
           "create_storage_credentials": "${create_storage_credentials}",
           "create_external_locations": "${create_external_locations}",
           "create_catalogs": "${create_catalogs}",
@@ -150,7 +157,9 @@
           "create_abac_policies": "${create_abac_policies}",
           "apply_grants": "${apply_grants}",
           "apply_tags": "${apply_tags}",
-          "apply_masks_row_filters": "${apply_masks_row_filters}"
+          "apply_masks_row_filters": "${apply_masks_row_filters}",
+          "preflight_enforce": "${preflight_enforce}",
+          "allow_missing_report": "${allow_missing_report}"
         }
       }
     }

@@ -26,7 +26,7 @@
       "libraries": [
         {
           "pypi": {
-            "package": "databricks-sdk>=0.36.0"
+            "package": "databricks-sdk==0.36.0"
           }
         },
         {
@@ -55,7 +55,9 @@
           "source_secret_scope": "${source_secret_scope}",
           "source_secret_key": "${source_secret_key}",
           "source_warehouse_id": "${source_warehouse_id}",
-          "run_id": "{{job.run_id}}"
+          "run_id": "{{job.run_id}}",
+          "external_locations_path": "${external_locations_path}",
+          "preflight_enforce": "${preflight_enforce}"
         }
       }
     },
@@ -70,7 +72,7 @@
       "libraries": [
         {
           "pypi": {
-            "package": "databricks-sdk>=0.36.0"
+            "package": "databricks-sdk==0.36.0"
           }
         },
         {
@@ -92,13 +94,15 @@
           "ops_catalog": "${ops_catalog}",
           "ops_schema": "${ops_schema}",
           "mapping_file_path": "${mapping_file_path}",
+          "external_locations_path": "${external_locations_path}",
           "source_workspace_url": "${source_workspace_url}",
           "source_client_id": "${source_client_id}",
           "source_client_secret": "${source_client_secret}",
           "source_secret_scope": "${source_secret_scope}",
           "source_secret_key": "${source_secret_key}",
           "source_warehouse_id": "${source_warehouse_id}",
-          "run_id": "{{job.run_id}}"
+          "run_id": "{{job.run_id}}",
+          "preflight_enforce": "${preflight_enforce}"
         }
       }
     }
