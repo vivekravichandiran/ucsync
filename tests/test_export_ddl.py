@@ -284,7 +284,11 @@ def test_function_captured_from_information_schema(tmp_path):
 
     assert result["ddl_by_source"].get("INFORMATION_SCHEMA") == 1
     ddl = (tmp_path / "v" / "run_run1" / "ddl" / "FUNCTION_c__sec__mask_ssn.sql").read_text()
-    assert "CREATE FUNCTION IF NOT EXISTS `c`.`sec`.`mask_ssn`" in ddl
+    # CREATE OR REPLACE (not IF NOT EXISTS): IF NOT EXISTS silently no-ops on a
+    # re-run, so a CHANGED function body would stay stale on target (incremental
+    # bug). Functions carry no data, so OR REPLACE is safe + idempotent.
+    assert "CREATE OR REPLACE FUNCTION `c`.`sec`.`mask_ssn`" in ddl
+    assert "IF NOT EXISTS" not in ddl
     assert "`v` STRING, `salt` INT" in ddl or "v STRING, salt INT" in ddl
     assert "RETURNS STRING" in ddl
     assert "RETURN '***'" in ddl

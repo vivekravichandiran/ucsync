@@ -397,8 +397,10 @@ def _function_ddl_from_definition(obj: UCObject) -> Optional[str]:
     if not return_type or not body:
         return None
     target = quote_full_name(obj.full_name)
+    # CREATE OR REPLACE (not IF NOT EXISTS) — see function_ddl_from_information_schema:
+    # IF NOT EXISTS silently no-ops on a re-run, leaving a CHANGED function stale.
     return (
-        f"CREATE FUNCTION IF NOT EXISTS {target}"
+        f"CREATE OR REPLACE FUNCTION {target}"
         f"({', '.join(declarations)}) RETURNS {return_type}"
         f"{comment_clause(definition.get('comment'))} RETURN {body};"
     )
@@ -483,8 +485,12 @@ def function_ddl_from_information_schema(
             declarations.append(f"{pident} {ptype}")
 
     target = quote_full_name(full_name)
+    # CREATE OR REPLACE (not IF NOT EXISTS): functions carry no data, so replace is
+    # safe + idempotent. IF NOT EXISTS would SILENTLY NO-OP on a re-run, leaving a
+    # CHANGED/REPLACED function body stale on target even though the delta plan
+    # correctly marked it REPLACED (bug: incremental function update lost).
     return (
-        f"CREATE FUNCTION IF NOT EXISTS {target}"
+        f"CREATE OR REPLACE FUNCTION {target}"
         f"({', '.join(declarations)}) RETURNS {return_type}"
         f"{comment_clause(comment)} RETURN {body};"
     )

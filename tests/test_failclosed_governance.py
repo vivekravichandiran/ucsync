@@ -251,6 +251,44 @@ def test_failclosed_preexisting_table_marked_failed_not_dropped(tmp_path: Path):
     assert table_row.error_code == "PROTECTION_FAILED"
 
 
+def test_failclosed_preexisting_table_via_silent_if_not_exists_not_dropped(
+    tmp_path: Path,
+):
+    """Regression for the incremental data-safety bug: a table that ALREADY EXISTS on
+    target where ``CREATE TABLE IF NOT EXISTS`` SILENTLY no-ops (raises NO
+    "already exists" error) must still be recognized as pre-existing — via the
+    pre-create existence probe — and therefore NEVER dropped when its governance
+    later fails. Before the fix, the silent no-op left ``skipped_existing=False`` →
+    action ``CREATE_OR_SKIP`` → the pre-existing (data-bearing) table was wrongly
+    added to ``_created_tables`` and DROPPED by the fail-closed sweep."""
+    root = tmp_path / "migrated"
+    _write(root, "ddl/TABLE_c__hr__pre.sql", "CREATE TABLE `c`.`hr`.`pre` (id INT);\n")
+    _write(root, "tags/TABLE_c__hr__pre.sql",
+           "ALTER TABLE `c`.`hr`.`pre` SET TAGS ('missing' = 'x');\n")
+    _write(root, "inventory/objects.json", "[]")
+
+    # The table is already present on target (data-bearing). GovSql's CREATE TABLE
+    # handler is a silent upsert (no "already exists" error) — exactly the
+    # `IF NOT EXISTS` no-op that hid pre-existence before the probe was added.
+    sql = GovSql(allowed_tags=set())
+    sql.tables.add("c.hr.pre")
+    results = PackageImportEngine(str(root), sql, dry_run=False).run()
+    table_row = next(r for r in results if r.object_type == "TABLE")
+
+    # The DISCRIMINATING assertion: the pre-create probe saw it pre-exist, so it was
+    # recorded SKIP_EXISTING (never added to _created_tables) → the fail-closed sweep
+    # cannot drop it. Before the fix this exact table WAS dropped. Governance still
+    # fails → the object is FLAGGED FAILURE (Task-10 hard-fail), its final action is
+    # GOVERNANCE_FAILED, but the table itself is NEVER dropped (it may hold data).
+    assert not any("DROP TABLE" in s for s in sql.statements)
+    assert "c.hr.pre" in sql.tables
+    assert table_row.status == "FAILURE"
+    assert table_row.error_code == "PROTECTION_FAILED"
+    assert table_row.action == "GOVERNANCE_FAILED"
+    # And it drives the Task-10 hard-fail like any governance failure.
+    assert any(r.target_full_name == "c.hr.pre" for r in governance_failures(results))
+
+
 def test_byo_sc_el_grants_and_ownership_skipped_when_create_disabled(tmp_path: Path):
     """BYO fix: when SC/EL creation is disabled, the utility must NOT replay their
     grants or ownership (metastore-scoped prerequisites, out of scope) — no GRANT,

@@ -1011,6 +1011,22 @@ class PackageImportEngine:
                 # USE CATALOG / USE SCHEMA context is issued — the statement carries
                 # its own 3-level namespace and runs correctly on any (stateless)
                 # executor.
+                #
+                # Fail-closed data-safety probe (task 10): a droppable table counts as
+                # "fresh / droppable" ONLY if it was ABSENT on target immediately
+                # before this run created it. `CREATE TABLE IF NOT EXISTS` no-ops
+                # SILENTLY on a pre-existing table (no "already exists" error raised),
+                # so `skipped_existing` alone cannot distinguish a genuinely fresh
+                # create from a re-run over a pre-existing (possibly data-bearing)
+                # table. Probe existence up front for droppable types so a pre-existing
+                # table is recorded SKIP_EXISTING and never added to _created_tables →
+                # the fail-closed drop sweep can never drop it (it is FLAGGED instead).
+                pre_exists = (
+                    object_type in _DROPPABLE_TABLE_TYPES
+                    and self._object_exists(
+                        object_type, target_full_name, executor=executor
+                    )
+                )
                 skipped_existing = False
                 for statement in statements:
                     try:
@@ -1038,11 +1054,14 @@ class PackageImportEngine:
                 if grant_warning:
                     result.message = f"created; grant warning: {grant_warning}"
                 result.status = "SUCCESS"
-                result.action = (
-                    "SKIP_EXISTING" if skipped_existing else "CREATE_OR_SKIP"
-                )
+                # A droppable table that pre-existed on target (probe), OR any object
+                # whose CREATE raised "already exists", is SKIP_EXISTING (never added
+                # to _created_tables → never droppable). Only a genuinely fresh create
+                # is CREATE_OR_SKIP.
+                existed = skipped_existing or pre_exists
+                result.action = "SKIP_EXISTING" if existed else "CREATE_OR_SKIP"
                 if not result.message:
-                    prefix = "already exists; " if skipped_existing else ""
+                    prefix = "already exists; " if existed else ""
                     result.message = (
                         prefix + (statements[0][:1000] if statements else "")
                     )
