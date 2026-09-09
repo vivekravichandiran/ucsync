@@ -25,7 +25,7 @@ for _p in ("../src", "./src", os.path.abspath(os.path.join(os.getcwd(), "..", "s
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
 
-from uc_sync.config import CREATE_TOGGLES, APPLY_TOGGLES
+from uc_sync.config import CREATE_TOGGLES, APPLY_TOGGLES, BYO_PREREQUISITE_TOGGLES
 from uc_sync.install_jobs import JOB_LABELS, install_jobs, resolve_job_keys
 
 # COMMAND ----------
@@ -100,8 +100,12 @@ dbutils.widgets.text("spark_version", "15.4.x-scala2.12")
 dbutils.widgets.text("node_type_id", "Standard_DS3_v2")
 
 # --- object-family create + governance apply toggles ---
+# BYO-by-default: catalog / schema / storage-credential / external-location creation
+# defaults OFF (customer prerequisites); contents + governance default ON.
 for _t in (*CREATE_TOGGLES, *APPLY_TOGGLES):
-    dbutils.widgets.dropdown(_t, "true", ["true", "false"])
+    dbutils.widgets.dropdown(
+        _t, "false" if _t in BYO_PREREQUISITE_TOGGLES else "true", ["true", "false"]
+    )
 
 # --- incremental (delta) sync (import/e2e jobs): run mode is auto-detected from
 #     uc_sync_state; force_full re-seeds a full reconcile on demand (default off). ---

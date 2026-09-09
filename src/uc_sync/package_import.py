@@ -215,6 +215,14 @@ _MANUAL_OBJECT_TYPES = {
     "PROVIDER",
 }
 
+# Metastore-scoped securables that are BYO prerequisites in a catalog-scoped run.
+# When their creation is disabled the utility must NOT replay their grants or
+# ownership: they are not created by the utility, are out of the catalog-scoped
+# migration, and on target may not exist under the source name (which would only log
+# noisy, non-fatal "does not exist" warnings). Catalog/schema, by contrast, DO get
+# their ACLs applied onto the pre-created securable.
+_METASTORE_SCOPED_PREREQ_TYPES = {"STORAGE_CREDENTIAL", "EXTERNAL_LOCATION"}
+
 # DESCRIBE variants used to prove an object really exists after a skip.
 _DESCRIBE_COMMANDS = {
     "CATALOG": "DESCRIBE CATALOG",
@@ -948,7 +956,16 @@ class PackageImportEngine:
                 # are still applied so existing objects get their ACLs.
                 result.status = "SUCCESS"
                 result.action = "SKIP_CREATE_DISABLED"
-                if not self.dry_run:
+                if object_type in _METASTORE_SCOPED_PREREQ_TYPES:
+                    # BYO prerequisite (SC/EL): never replay its grants/ownership —
+                    # it is a metastore-scoped securable the customer owns, out of the
+                    # catalog-scoped migration (skipping avoids noisy "does not exist"
+                    # ownership/grant warnings on the source-named credential/location).
+                    result.message = (
+                        "create disabled (BYO prerequisite); grants + ownership "
+                        "skipped (metastore-scoped, out of catalog-scoped scope)"
+                    )
+                elif not self.dry_run:
                     grant_warning = self._apply_grants_file(
                         grants_path, object_type, target_full_name,
                         executor=executor,

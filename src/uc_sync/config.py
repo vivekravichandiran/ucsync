@@ -35,6 +35,24 @@ CREATE_TOGGLES = (
 )
 APPLY_TOGGLES = ("apply_grants", "apply_tags", "apply_masks_row_filters")
 
+# BYO-by-default posture: the customer pre-creates the catalog, schemas, storage
+# credential, and external location, so the utility does NOT create them by default —
+# it starts "inside the schema" (tables / views / functions / volumes + governance).
+# Set a toggle true to opt back in (e.g. a from-scratch Mode-A run, or a 3-column
+# external_locations.csv which turns SC/EL creation on explicitly). Every other
+# create toggle (contents) and all apply toggles default true.
+BYO_PREREQUISITE_TOGGLES = (
+    "create_catalogs",
+    "create_schemas",
+    "create_storage_credentials",
+    "create_external_locations",
+)
+
+
+def _toggle_default(name: str) -> bool:
+    """Default for a create/apply toggle — BYO prerequisites off, everything else on."""
+    return name not in BYO_PREREQUISITE_TOGGLES
+
 
 @dataclass
 class SyncConfig:
@@ -42,10 +60,12 @@ class SyncConfig:
     stage: str = "INVENTORY"
     connectivity_mode: str = "direct"
     mapping_file_path: str = ""
-    create_storage_credentials: bool = True
-    create_external_locations: bool = True
-    create_catalogs: bool = True
-    create_schemas: bool = True
+    # BYO-by-default: catalog / schema / storage-credential / external-location are
+    # prerequisites the customer pre-creates, so their creation is OFF by default.
+    create_storage_credentials: bool = False
+    create_external_locations: bool = False
+    create_catalogs: bool = False
+    create_schemas: bool = False
     create_volumes: bool = True
     create_functions: bool = True
     create_tables: bool = True
@@ -369,7 +389,7 @@ def from_sources(
             for item in load_location_mapping_csv(mapping_file_path)
         ]
     toggles = {
-        name: _as_bool(pick(name, runtime.get(name)), True)
+        name: _as_bool(pick(name, runtime.get(name)), _toggle_default(name))
         for name in (*CREATE_TOGGLES, *APPLY_TOGGLES)
     }
 
@@ -389,10 +409,12 @@ def from_sources(
         if not location_mapping_csv_path and not mapping_file_path:
             # Feed the legacy location_mappings machinery from this one file.
             location_mappings = ext_map.to_location_mappings()
-        if not ext_map.creates_storage:
-            # BYO: never create the storage credential / external location.
-            toggles["create_storage_credentials"] = False
-            toggles["create_external_locations"] = False
+        # The file's column shape is authoritative for SC/EL creation, overriding the
+        # BYO default: a 3-column file (with an access connector) turns creation ON
+        # (Mode-A parity); a 2-column BYO file keeps it OFF.
+        create_sc_el = bool(ext_map.creates_storage)
+        toggles["create_storage_credentials"] = create_sc_el
+        toggles["create_external_locations"] = create_sc_el
 
     # Resolve UCSync's four operational-artifact locations from three inputs:
     # ops_catalog + ops_schema (audit/state tables) and output_volume_path

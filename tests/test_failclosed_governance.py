@@ -251,6 +251,47 @@ def test_failclosed_preexisting_table_marked_failed_not_dropped(tmp_path: Path):
     assert table_row.error_code == "PROTECTION_FAILED"
 
 
+def test_byo_sc_el_grants_and_ownership_skipped_when_create_disabled(tmp_path: Path):
+    """BYO fix: when SC/EL creation is disabled, the utility must NOT replay their
+    grants or ownership (metastore-scoped prerequisites, out of scope) — no GRANT,
+    no ALTER … OWNER TO on the source-named credential/location. Catalog/schema, by
+    contrast, still get their ACLs applied on the pre-created securable."""
+    root = tmp_path / "migrated"
+    _write(root, "ddl/STORAGE_CREDENTIAL_cred_a.sql",
+           "CREATE STORAGE CREDENTIAL `cred_a` WITH AZURE_MANAGED_IDENTITY "
+           "(ACCESS_CONNECTOR_ID='/x');\n")
+    _write(root, "grants/STORAGE_CREDENTIAL_cred_a.sql",
+           "GRANT ALL PRIVILEGES ON STORAGE CREDENTIAL `cred_a` TO `g`;\n"
+           "ALTER STORAGE CREDENTIAL `cred_a` OWNER TO `someone@x.com`;\n")
+    _write(root, "ddl/EXTERNAL_LOCATION_loc_a.sql",
+           "CREATE EXTERNAL LOCATION `loc_a` URL 'abfss://c@a/p' "
+           "WITH (STORAGE CREDENTIAL `cred_a`);\n")
+    _write(root, "grants/EXTERNAL_LOCATION_loc_a.sql",
+           "ALTER EXTERNAL LOCATION `loc_a` OWNER TO `someone@x.com`;\n")
+    # A catalog with create disabled DOES still get its grants applied.
+    _write(root, "ddl/CATALOG_c.sql", "CREATE CATALOG `c`;\n")
+    _write(root, "grants/CATALOG_c.sql",
+           "GRANT USE CATALOG ON CATALOG `c` TO `analyst@x.com`;\n")
+    _write(root, "inventory/objects.json", "[]")
+
+    sql = GovSql()
+    engine = PackageImportEngine(
+        str(root), sql, dry_run=False,
+        toggles={"create_storage_credentials": False,
+                 "create_external_locations": False,
+                 "create_catalogs": False},
+    )
+    engine.run()
+    engine._apply_deferred_ownership()  # flush any deferred OWNER TO
+    # No SC/EL grant or ownership statement was ever executed.
+    assert not any("STORAGE CREDENTIAL" in s.upper() and (
+        "GRANT" in s.upper() or "OWNER TO" in s.upper()) for s in sql.statements)
+    assert not any("EXTERNAL LOCATION" in s.upper() and "OWNER TO" in s.upper()
+                   for s in sql.statements)
+    # The catalog's ACL WAS applied (create disabled, but grants still replay).
+    assert any("GRANT USE CATALOG" in s and "analyst@x.com" in s for s in sql.statements)
+
+
 def test_run_as_spn_excluded_as_grantee(tmp_path: Path):
     """Task 8: the utility never re-grants to the run-as SPN — that grantee is
     skipped when replicating ACLs; every other grant still applies."""

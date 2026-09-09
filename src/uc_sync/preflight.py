@@ -72,10 +72,13 @@ class PreflightResult:
         return GO
 
     def render(self) -> str:
+        # Lead with the PASS/FAIL result (the severity is a parenthetical), so a
+        # passing blocking check reads "PASS (blocking): …" rather than the
+        # alarming-looking "[BLOCKING] ok".
         lines = [f"UC Sync preflight: {self.verdict}"]
         for c in self.checks:
-            mark = "ok" if c.passed else "FAIL"
-            lines.append(f"  [{c.severity:>8}] {mark}: {c.name}"
+            mark = "PASS" if c.passed else "FAIL"
+            lines.append(f"  {mark} ({c.severity.lower()}): {c.name}"
                          + (f" — {c.message}" if c.message else ""))
         return "\n".join(lines)
 

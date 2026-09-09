@@ -86,9 +86,17 @@ def test_new_contract_stage_connectivity_and_toggles():
     )
     assert cfg.stage == "IMPORT"
     assert cfg.connectivity_mode == "airgap"
-    # create_tables gated off, but everything else defaults on.
+    # create_tables gated off explicitly.
     assert cfg.create_tables is False
-    assert cfg.create_catalogs is True
+    # BYO-by-default: catalog / schema / SC / EL creation defaults OFF (they are
+    # customer prerequisites); contents + governance default ON.
+    assert cfg.create_catalogs is False
+    assert cfg.create_schemas is False
+    assert cfg.create_storage_credentials is False
+    assert cfg.create_external_locations is False
+    assert cfg.create_volumes is True
+    assert cfg.create_functions is True
+    assert cfg.create_views is True
     assert cfg.create_abac_policies is True
     # apply toggles.
     assert cfg.apply_grants is False

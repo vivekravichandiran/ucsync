@@ -21,7 +21,9 @@ for _p in ("../src", "./src", os.path.abspath(os.path.join(os.getcwd(), "..", "s
 
 import uuid
 from uc_sync import __version__
-from uc_sync.config import from_sources, CREATE_TOGGLES, APPLY_TOGGLES, _split_csv
+from uc_sync.config import (
+    from_sources, CREATE_TOGGLES, APPLY_TOGGLES, BYO_PREREQUISITE_TOGGLES, _split_csv,
+)
 from uc_sync.package_import import PackageImportEngine, governance_failures
 from uc_sync.location_mapping import (
     load_object_locations_csv,
@@ -83,8 +85,13 @@ dbutils.widgets.dropdown("migrate_materialized_views", "false", ["true", "false"
 # degrade. allow_missing_report=false makes report generation non-best-effort.
 dbutils.widgets.dropdown("preflight_enforce", "true", ["true", "false"])
 dbutils.widgets.dropdown("allow_missing_report", "false", ["true", "false"])
+# BYO-by-default: catalog / schema / storage-credential / external-location creation
+# defaults OFF (they are customer prerequisites); all other create + apply toggles
+# default ON. A 3-column external_locations.csv turns SC/EL creation back on.
 for _t in (*CREATE_TOGGLES, *APPLY_TOGGLES):
-    dbutils.widgets.dropdown(_t, "true", ["true", "false"])
+    dbutils.widgets.dropdown(
+        _t, "false" if _t in BYO_PREREQUISITE_TOGGLES else "true", ["true", "false"]
+    )
 dbutils.widgets.dropdown("dry_run", "false", ["true", "false"])
 
 # COMMAND ----------
