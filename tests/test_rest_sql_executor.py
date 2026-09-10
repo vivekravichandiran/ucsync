@@ -151,6 +151,22 @@ def test_empty_message_failure_is_retried():
     assert len(client.posts) == 3  # both empty-message failures retried, then success
 
 
+def test_permission_denied_fails_fast_and_surfaces_message():
+    # A PERMISSION_DENIED (error_code=BAD_REQUEST + message) is deterministic — it must
+    # fail FAST (submitted once, no retry) and the message must reach the caller, not be
+    # swallowed into a bare "statement FAILED:". This is the export SHOW CREATE case that
+    # masked a grant gap.
+    client = _FakeClient([
+        {"statement_id": "s", "status": {"state": "FAILED", "error": {
+            "error_code": "BAD_REQUEST",
+            "message": "PERMISSION_DENIED: User does not have SELECT on Table x"}}},
+    ])
+    ex = RestSqlExecutor(client, "wh", poll_seconds=0, retry_base_seconds=0)
+    with pytest.raises(RuntimeError, match="PERMISSION_DENIED: User does not have SELECT"):
+        ex.execute("SHOW CREATE TABLE x")
+    assert len(client.posts) == 1  # not retried
+
+
 def test_warm_up_issues_select_1():
     client = _FakeClient(_ok([["1"]]))
     ex = RestSqlExecutor(client, "wh", poll_seconds=0, retry_base_seconds=0)

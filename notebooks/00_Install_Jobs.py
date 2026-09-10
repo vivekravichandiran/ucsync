@@ -99,6 +99,25 @@ dbutils.widgets.text("existing_cluster_id", "")  # blank = new USER_ISOLATION jo
 dbutils.widgets.text("spark_version", "15.4.x-scala2.12")
 dbutils.widgets.text("node_type_id", "Standard_DS3_v2")
 
+# --- HTTP proxy for the job cluster (behind-proxy customer networks) ---
+# The job cluster the utility creates does NOT inherit a corporate forward proxy by
+# default. When the network requires one, the cluster needs it in its environment so
+# (a) PyPI library installs (databricks-sdk / PyYAML / openpyxl) can reach the internet
+# and (b) the utility's REST + cross-workspace calls route correctly. These are injected
+# as the job cluster's spark_env_vars (both UPPER and lower case) at job-creation time.
+# Leave the proxy URLs BLANK when there is no forward proxy (e.g. network-level / VNet
+# egress) — blank = nothing injected, so it is safe to leave the widgets in place.
+# NO_PROXY is pre-filled with the Databricks control-plane + Azure storage domains
+# (the latter so external-volume/table data-plane access is not sent through the proxy);
+# it is harmless when no proxy URL is set.
+dbutils.widgets.text("http_proxy", "")   # e.g. http://proxy.corp:8080 ; blank = none
+dbutils.widgets.text("https_proxy", "")  # e.g. http://proxy.corp:8080 ; blank = none
+dbutils.widgets.text(
+    "no_proxy",
+    "*.azuredatabricks.net,*.databricks.azure.com,*.dfs.core.windows.net,"
+    "*.blob.core.windows.net,169.254.169.254,127.0.0.1,localhost",
+)
+
 # --- object-family create + governance apply toggles ---
 # BYO-by-default: catalog / schema / storage-credential / external-location creation
 # defaults OFF (customer prerequisites); contents + governance default ON.
@@ -138,6 +157,7 @@ _simple = (
     "run_as_spn", "source_run_as_spn", "filter_tables", "catalog_mapping_json",
     "object_locations_path",
     "existing_cluster_id", "spark_version", "node_type_id", "job_name_prefix",
+    "http_proxy", "https_proxy", "no_proxy",
 )
 values = {k: dbutils.widgets.get(k).strip() for k in _simple}
 values["notebook_dir"] = notebook_dir

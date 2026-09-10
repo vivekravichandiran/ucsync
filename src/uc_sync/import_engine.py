@@ -96,15 +96,10 @@ _RETRYABLE_STATEMENT_HINTS = (
 
 
 def _statement_error_is_retryable(message: str) -> bool:
+    # Message-hint check only. A genuinely BLANK terminal failure (no error_code AND
+    # no message — the cold-warehouse signature) is handled explicitly in _run_once;
+    # this function is asked only about a populated message.
     low = (message or "").strip().lower()
-    # A FAILED/CANCELED/CLOSED state with NO error detail is the signature of a
-    # cold / just-autostopped serverless warehouse dropping the statement while it
-    # spins up. All statements this executor runs (SHOW CREATE, DESCRIBE,
-    # information_schema SELECTs) are idempotent reads, so an empty-message failure
-    # is safe to retry — and MUST be, or a transient cold-start drops the object
-    # from the export bundle with a bare "statement FAILED:" and no retry.
-    if not low:
-        return True
     return any(hint in low for hint in _RETRYABLE_STATEMENT_HINTS)
 
 
@@ -228,19 +223,25 @@ class RestSqlExecutor:
                 break
             if state in {"FAILED", "CANCELED", "CLOSED"}:
                 err = (resp.get("status") or {}).get("error") or {}
+                code = str(err.get("error_code") or "").strip()
                 raw_msg = str(err.get("message") or "").strip()
-                # An empty error detail is the signature of a cold / just-autostopped
-                # serverless warehouse dropping the statement while it spins up —
-                # retry (all statements here are idempotent reads). A known transient
-                # hint is likewise retryable. Only a real deterministic error
-                # (syntax / permission / not-found) fails fast. NOTE: decide on
-                # raw_msg, never on the sql-text fallback (which is never empty).
-                if not raw_msg or _statement_error_is_retryable(raw_msg):
-                    detail = raw_msg or (
-                        f"no error detail (warehouse warming?); stmt={sql[:120]}"
-                    )
+                # Always surface BOTH the error_code and the message (the API returns
+                # e.g. error_code=BAD_REQUEST + "PERMISSION_DENIED: User does not have
+                # SELECT …"); a permission/syntax misconfig must never reach the report
+                # as a bare "statement FAILED:" with no detail (that masked a grant gap
+                # as a mystery once already).
+                detail = "; ".join(p for p in (code, raw_msg) if p) or (
+                    f"no error detail; state={state}; stmt={sql[:120]}"
+                )
+                # Retry ONLY a genuinely blank terminal failure — no error_code AND no
+                # message — which is the cold / just-autostopped warehouse dropping the
+                # statement while it spins up (all statements here are idempotent reads).
+                # A known transient message hint is also retryable. Anything with a real
+                # error_code or message (permission / syntax / not-found) fails FAST.
+                blank = not code and not raw_msg
+                if blank or _statement_error_is_retryable(raw_msg):
                     raise _TransientSqlError(f"statement {state}: {detail}")
-                raise RuntimeError(f"statement {state}: {raw_msg}")
+                raise RuntimeError(f"statement {state}: {detail}")
             if time.time() > deadline:
                 # A cold warehouse warms in well under this; a timeout here means
                 # something is wrong that a resubmit won't fix — fail terminally.

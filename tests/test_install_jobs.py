@@ -64,6 +64,37 @@ def test_resolve_job_keys_rejects_unknown():
         resolve_job_keys("not_a_job")
 
 
+def test_proxy_env_injected_into_new_job_cluster():
+    spec = load_job_spec("e2e_live", _values(
+        http_proxy="http://proxy.corp:8080",
+        https_proxy="http://proxy.corp:8080",
+        no_proxy="*.azuredatabricks.net,*.dfs.core.windows.net",
+    ))
+    envs = [jc["new_cluster"]["spark_env_vars"] for jc in spec["job_clusters"]]
+    assert envs, "expected a new job cluster to carry proxy env"
+    for env in envs:
+        assert env["HTTP_PROXY"] == env["http_proxy"] == "http://proxy.corp:8080"
+        assert env["HTTPS_PROXY"] == env["https_proxy"] == "http://proxy.corp:8080"
+        assert env["NO_PROXY"] == env["no_proxy"] == "*.azuredatabricks.net,*.dfs.core.windows.net"
+
+
+def test_proxy_env_absent_when_urls_blank():
+    # No proxy URLs (our env): NO_PROXY-only is harmless, but with everything blank we
+    # inject nothing so a non-proxy environment is completely unaffected.
+    spec = load_job_spec("e2e_live", _values(http_proxy="", https_proxy="", no_proxy=""))
+    for jc in spec["job_clusters"]:
+        assert "spark_env_vars" not in jc["new_cluster"] or not jc["new_cluster"]["spark_env_vars"]
+
+
+def test_proxy_no_proxy_only_still_injected():
+    # Default posture (our test run): proxy blank, no_proxy pre-filled → only NO_PROXY is
+    # set, which is a no-op without a proxy, so it won't break the no-proxy env.
+    spec = load_job_spec("e2e_live", _values(http_proxy="", https_proxy="", no_proxy="*.azuredatabricks.net"))
+    env = spec["job_clusters"][0]["new_cluster"].get("spark_env_vars") or {}
+    assert env.get("NO_PROXY") == "*.azuredatabricks.net"
+    assert "HTTP_PROXY" not in env  # no proxy URL => no routing change
+
+
 def test_run_as_spn_applied_to_target_jobs_only():
     spn = "11111111-2222-3333-4444-555555555555"
     for key in ("airgap_import_target", "e2e_dry_run", "e2e_live"):

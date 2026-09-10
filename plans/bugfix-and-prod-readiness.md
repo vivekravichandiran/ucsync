@@ -55,29 +55,44 @@ and fail-closed for genuinely-fresh tables is unaffected.
 path-based-mask error as `EXTERNAL_CREATE_PERMISSION_DENIED` with a misleading "lacks
 CREATE EXTERNAL TABLE" hint — add a distinct code/hint for the masked-path case.
 
-### 2. Transient cold-warehouse SHOW CREATE failures → partial bundle silently flows to import — **OPEN** (robustness, HIGH for prod)
-**Found:** real-source e2e run `824507703579050` (2026-09-10). Export reported
-`export_status: ERROR 9 / SUCCESS 58`. 9 of 14 tables failed `SHOW CREATE` on the
-**cold source SQL warehouse** with a bare `statement FAILED:` (no underlying message).
-Because the design is hard-fail / no-synth (never drop masks), those 9 tables were
-**excluded from the bundle** → import couldn't create them → cascade: 4 analytics views
-+ `v_staff` + `order_summary` failed `TABLE_OR_VIEW_NOT_FOUND` on their missing base
-tables. Confirmed transient: `SHOW CREATE` for all 9 succeeds once the warehouse is warm.
+### 2. Export SHOW CREATE failures were PERMISSION_DENIED masked as empty "statement FAILED" — **OPEN** (correctness/observability, HIGH for prod)
+**Found:** real-source e2e runs `824507703579050` + `836235493506246` (2026-09-10).
+Export reported `ERROR 9 / SUCCESS 58`; the SAME 9 of 14 tables failed BOTH runs with a
+bare `statement FAILED:` (no detail). **Initial cold-warehouse diagnosis was WRONG** (a
+transient would fail different tables each run; this was deterministic). **Real cause,
+proven by running `SHOW CREATE` as the export SPN `9a439328` directly:**
+- `hr.new_hires` → `PERMISSION_DENIED: User does not have SELECT on Table`
+- `orders.orders` → `PERMISSION_DENIED: User does not have USE SCHEMA on Schema`
+- `hr.employees` → SUCCEEDED
+The export SPN gets its access via the `account users` group; the 5 captured tables have
+`account users` SELECT (+ USE SCHEMA), the 9 failed ones do not (they were granted SELECT
+only to specific principals during the ACL-matrix setup, or the SPN lacks USE SCHEMA on
+the schema). So `SHOW CREATE` was **denied**, the object dropped from the bundle, and the
+import cascade (missing base tables → dependent views fail) followed.
 
-**Sub-issues:**
-- (a) **Export task returns SUCCESS despite 9 ERRORs**, and the import then runs on a
-  **partial bundle** — producing a confusing half-migrated target. For prod, either fail
-  the export loudly when any inventoried object can't be captured, or have the import
-  refuse/flag a bundle that is missing inventoried objects (don't half-apply).
-- (b) **Retry/robustness:** SHOW CREATE should survive a cold serverless warehouse —
-  pre-warm the warehouse (issue a `SELECT 1` / wait for RUNNING before the capture loop),
-  and/or increase retry count/backoff. Operational mitigation today: pre-warm the source
-  warehouse (or set a longer auto-stop) before running.
-- (c) **Error surfacing:** the failure message is empty (`statement FAILED:`), so the
-  real cause is invisible. Capture and surface the underlying statement error/state.
+**Two real product bugs (independent of the env):**
+- (a) **Error surfacing is broken — THE important one.** The Statement Execution API
+  returns a clear `PERMISSION_DENIED: …` (verified by direct call), but the export's
+  `RestSqlExecutor` surfaced an EMPTY message (`statement FAILED:`). That masked a
+  permission misconfig as a mystery failure and misled the diagnosis. Fix: capture
+  `status.error.error_code` + `message` (and the statement state) faithfully; a
+  permission error must read as a permission error, and must be classified NON-retryable
+  (fail fast), not retried.
+- (b) **Export returns task-SUCCESS despite capture ERRORs**, and the import then runs on
+  a **partial bundle** → confusing half-migrated target. For prod, fail the export loudly
+  when any inventoried object can't be captured (or have the import refuse a bundle that
+  is missing inventoried objects). Don't half-apply.
 
-**Not a data-safety bug** and **not the import** — the import faithfully applied the
-(partial) bundle. Operational fix for now: warm the source warehouse, re-run.
+**Operational fix (test + customer):** the export/read SPN needs `USE CATALOG` +
+`USE SCHEMA` + `SELECT` on ALL source objects being migrated (least-privilege source
+read — see `docs/PERMISSIONS_GUIDE.md`). In the test env the SPN `9a439328` had only
+`account users USE CATALOG` + partial table grants → grant catalog-wide USE SCHEMA +
+SELECT on the 3 source catalogs and re-run.
+
+**Note:** the cold-warehouse warm-up + retry-on-empty change (commit `142a07b`) is a
+reasonable robustness improvement and is kept, but it is NOT the fix for this — it was
+built on the misleading empty error. With (a) fixed, a permission failure fails fast
+instead of being retried.
 
 ### 3. Test-fixture pollution on source `hr.employees` — **cleanup item**
 During BUG #1 live validation I seeded a permanent failing negative on source

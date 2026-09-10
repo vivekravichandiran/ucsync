@@ -119,12 +119,51 @@ def _apply_cluster_override(spec: dict[str, Any], existing_cluster_id: str) -> d
     return spec
 
 
+def _apply_proxy_env(spec: dict[str, Any], values: Mapping[str, Any]) -> dict[str, Any]:
+    """Inject HTTP(S)_PROXY / NO_PROXY into every NEW job cluster's ``spark_env_vars``.
+
+    A job cluster the utility creates does not inherit a corporate forward proxy, so a
+    behind-proxy customer needs it in the cluster environment for (a) PyPI library
+    installs and (b) the utility's REST + cross-workspace calls (urllib + the SDK honor
+    these vars). Both UPPER and lower case are set (different tools read different
+    cases). Only non-blank values are injected — blank proxy URLs => nothing added, so
+    a non-proxy environment is unaffected (NO_PROXY alone is a harmless no-op). Existing
+    ``spark_env_vars`` are preserved/merged. Applies to new_cluster specs only; an
+    ``existing_cluster_id`` cluster is configured by the operator, not here.
+    """
+
+    http_proxy = str(values.get("http_proxy") or "").strip()
+    https_proxy = str(values.get("https_proxy") or "").strip()
+    no_proxy = str(values.get("no_proxy") or "").strip()
+    env: dict[str, str] = {}
+    if http_proxy:
+        env["HTTP_PROXY"] = env["http_proxy"] = http_proxy
+    if https_proxy:
+        env["HTTPS_PROXY"] = env["https_proxy"] = https_proxy
+    if no_proxy:
+        env["NO_PROXY"] = env["no_proxy"] = no_proxy
+    if not env:
+        return spec
+
+    def _inject(cluster: Any) -> None:
+        if isinstance(cluster, dict):
+            merged = dict(cluster.get("spark_env_vars") or {})
+            merged.update(env)
+            cluster["spark_env_vars"] = merged
+
+    for jc in spec.get("job_clusters", []) or []:
+        _inject(jc.get("new_cluster"))
+    for task in spec.get("tasks", []) or []:
+        _inject(task.get("new_cluster"))
+    return spec
+
+
 def load_job_spec(
     job_key: str,
     values: Mapping[str, Any],
     specs_dir: Optional[str | Path] = None,
 ) -> dict[str, Any]:
-    """Load one job spec, substitute placeholders, and apply the cluster override."""
+    """Load one job spec, substitute placeholders, and apply cluster + proxy overrides."""
 
     if job_key not in JOB_SPECS:
         raise ValueError(f"Unknown job key '{job_key}'. Known: {sorted(JOB_SPECS)}")
@@ -132,6 +171,9 @@ def load_job_spec(
     raw = json.loads((base / JOB_SPECS[job_key]).read_text(encoding="utf-8"))
     spec = _substitute(raw, values)
     spec = _apply_cluster_override(spec, str(values.get("existing_cluster_id", "")))
+    # Proxy env goes on the NEW job cluster, so apply it after the cluster override
+    # (a no-op when an existing_cluster_id dropped the job_clusters block).
+    spec = _apply_proxy_env(spec, values)
     if job_key in _TARGET_RUN_AS_JOB_KEYS:
         spec = _apply_run_as(spec, str(values.get("run_as_spn", "")))
     elif job_key in _SOURCE_RUN_AS_JOB_KEYS:
