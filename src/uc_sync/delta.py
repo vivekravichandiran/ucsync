@@ -36,6 +36,7 @@ GOVERNANCE_UPDATED = "GOVERNANCE_UPDATED"
 SOURCE_ABSENT = "SOURCE_ABSENT"       # in baseline, gone from source → reported, no drop
 GRANT_ADDED = "GRANT_ADDED"
 GRANT_REMOVED = "GRANT_REMOVED"       # gone from source → reported, never revoked
+REPORT_ONLY = "REPORT_ONLY"           # pipeline-managed / Tier-A asset → reported, never migrated
 
 # Object types whose DDL can be safely re-applied with CREATE OR REPLACE on a change.
 _REPLACEABLE_TYPES = {
@@ -45,6 +46,15 @@ _REPLACEABLE_TYPES = {
 # fixed, so it is only ever CREATED_NEW or UNCHANGED.
 _VOLUME_TYPES = {"VOLUME", "EXTERNAL_VOLUME"}
 _ABAC_TYPE = "ABAC_POLICY"
+# Types the engine never creates (see package_import): streaming tables are always
+# pipeline-managed; Tier-A AI assets (models, online tables, vector indexes, monitors,
+# UC secrets) are inventory-only. Materialized views are report-only UNLESS
+# migrate_materialized_views is set (handled with the toggle in _decide). These must
+# surface on the Delta sheet as REPORT_ONLY, not CREATED_NEW/CHANGED — the plan action
+# alone would mislead (the object is reported, not migrated).
+_ALWAYS_REPORT_ONLY_TYPES = {
+    "STREAMING_TABLE", "MODEL", "ONLINE_TABLE", "VECTOR_INDEX", "MONITOR", "UC_SECRET",
+}
 
 
 @dataclass
@@ -82,9 +92,11 @@ class DeltaPlan:
         baseline: Optional[Mapping[str, Mapping[str, Any]]] = None,
         *,
         force_full: bool = False,
+        migrate_materialized_views: bool = False,
     ):
         self.baseline = dict(baseline or {})
         self.incremental = bool(self.baseline) and not force_full
+        self.migrate_materialized_views = bool(migrate_materialized_views)
         self._by_name: dict[str, ObjectDelta] = {}
         self._current_names: set[str] = set()
         for row in current_rows:
@@ -107,6 +119,16 @@ class DeltaPlan:
                         reason="present in baseline, absent from source (not dropped)",
                     )
                 )
+
+    def _is_report_only(self, object_type: str) -> bool:
+        """True for types the engine never migrates (see package_import): streaming
+        tables + Tier-A AI assets always, materialized views unless the toggle is set.
+        Mirrors the engine so the Delta sheet's action matches what actually happens."""
+        if object_type in _ALWAYS_REPORT_ONLY_TYPES:
+            return True
+        return (
+            object_type == "MATERIALIZED_VIEW" and not self.migrate_materialized_views
+        )
 
     def _decide(self, row: Mapping[str, Any], full_name: str) -> ObjectDelta:
         object_type = str(row.get("object_type") or "")
@@ -191,11 +213,21 @@ class DeltaPlan:
         rows: list[dict[str, Any]] = []
         for delta in self._by_name.values():
             if delta.action != UNCHANGED:
+                # Report-only types (streaming tables, Tier-A AI assets, and MVs unless
+                # migrate_materialized_views) are never migrated — the raw plan action
+                # (CREATED_NEW/CHANGED/REPLACED) would falsely imply they were created.
+                # Surface REPORT_ONLY instead so the Delta sheet matches reality. (This
+                # is label-only: skip/governance gating is unchanged, so an UNCHANGED
+                # report-only object still folds into the summarised count, not here.)
+                report_only = self._is_report_only(delta.object_type)
                 rows.append({
-                    "action": delta.action,
+                    "action": REPORT_ONLY if report_only else delta.action,
                     "object_type": delta.object_type,
                     "object": delta.full_name,
-                    "detail": delta.reason,
+                    "detail": (
+                        "pipeline-managed / Tier-A asset — reported, not migrated"
+                        if report_only else delta.reason
+                    ),
                 })
             for principal, privs in delta.grants_added.items():
                 rows.append({

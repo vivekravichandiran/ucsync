@@ -91,13 +91,19 @@ present in the baseline is never considered fresh. Combine with the probe for fu
 3. Re-run Stage-3 negative live: the pre-existing `employees_secure` with a failing
    new policy → flagged `GOVERNANCE_FAILED`, **not dropped**, job red.
 
-## Secondary (minor, reporting only — separate)
+## Secondary (minor, reporting only — separate) — ✅ FIXED 2026-09-10
 On the Delta sheet, report-only types (materialized views, streaming tables,
-registered models) show `CREATED_NEW` (the fingerprint-based delta-plan action)
-instead of `REPORT_ONLY`. The engine correctly does **not** create them (verified:
-`emp_mv` and the `fraud_scoring` model are absent on target), but the Delta sheet is
-misleading. Fix: derive the Delta action for these from the per-object result's
-`delta_action` (`REPORT_ONLY`) rather than the raw plan action.
+registered models) showed `CREATED_NEW` (the fingerprint-based delta-plan action)
+instead of `REPORT_ONLY`. The engine correctly does **not** create them (verified
+live: the `fraud_scoring` model is absent on target), but the Delta sheet was
+misleading. **Fix applied:** `delta.py` gained a `REPORT_ONLY` constant, an
+`_ALWAYS_REPORT_ONLY_TYPES` set (streaming tables + Tier-A AI assets: models, online
+tables, vector indexes, monitors, UC secrets) and an `_is_report_only()` helper that
+also treats materialized views as report-only unless `migrate_materialized_views`
+(now threaded into `DeltaPlan`). `delta_rows()` relabels any report-only-typed change
+to `REPORT_ONLY`. **Label-only** — skip/governance gating is unchanged, so an
+UNCHANGED report-only object still folds into the summarised count (not listed).
+Test: `test_report_only_types_labelled_report_only_not_created_new` (249 green).
 
 ---
 

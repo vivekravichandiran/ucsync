@@ -699,7 +699,8 @@ class PackageImportEngine:
         # prior-run baseline. Auto-detected: a baseline present (and not force_full) →
         # incremental; else full + seed. Unchanged objects are then skipped entirely.
         self.delta_plan = DeltaPlan(
-            self._load_inventory_rows(), self.prior_state, force_full=self.force_full
+            self._load_inventory_rows(), self.prior_state, force_full=self.force_full,
+            migrate_materialized_views=self.migrate_materialized_views,
         )
         self._maybe_enter_existing_catalog_mode()
         by_target = {

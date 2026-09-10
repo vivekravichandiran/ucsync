@@ -123,6 +123,35 @@ def test_grant_added_and_removed():
     assert ("GRANT_REMOVED", "c.s.t") in actions
 
 
+def test_report_only_types_labelled_report_only_not_created_new():
+    """Report-only types (streaming tables, Tier-A AI assets, and MVs unless the
+    toggle) must surface on the Delta sheet as REPORT_ONLY — the raw plan action
+    (CREATED_NEW) would falsely imply the engine created them. Bugfix: fraud_scoring
+    (a registered MODEL) showed CREATED_NEW though it is never migrated."""
+    rows = [
+        {"object_type": "MODEL", "full_name": "c.s.fraud_scoring", "tags": {},
+         "grants": [], "definition": {}},
+        {"object_type": "STREAMING_TABLE", "full_name": "c.s.st", "tags": {},
+         "grants": [], "definition": {}},
+        {"object_type": "MATERIALIZED_VIEW", "full_name": "c.s.mv", "tags": {},
+         "grants": [], "definition": {"view_definition": "SELECT 1"}},
+    ]
+    # Full run (no baseline): raw plan action would be CREATED_NEW for all three.
+    plan = DeltaPlan(rows, None)
+    actions = {r["object"]: r["action"] for r in plan.delta_rows()}
+    assert actions["c.s.fraud_scoring"] == "REPORT_ONLY"
+    assert actions["c.s.st"] == "REPORT_ONLY"
+    assert actions["c.s.mv"] == "REPORT_ONLY"  # MV report-only by default
+
+    # With migrate_materialized_views=True the MV is migrated → NOT report-only,
+    # while the streaming table + model stay report-only (always).
+    plan_mv = DeltaPlan(rows, None, migrate_materialized_views=True)
+    actions_mv = {r["object"]: r["action"] for r in plan_mv.delta_rows()}
+    assert actions_mv["c.s.mv"] == "CREATED_NEW"
+    assert actions_mv["c.s.st"] == "REPORT_ONLY"
+    assert actions_mv["c.s.fraud_scoring"] == "REPORT_ONLY"
+
+
 def test_source_absent_reported_not_dropped():
     rows = _rows()
     base = _baseline(rows)
