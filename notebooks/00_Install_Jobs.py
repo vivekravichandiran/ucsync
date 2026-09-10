@@ -105,17 +105,22 @@ dbutils.widgets.text("node_type_id", "Standard_DS3_v2")
 # (a) PyPI library installs (databricks-sdk / PyYAML / openpyxl) can reach the internet
 # and (b) the utility's REST + cross-workspace calls route correctly. These are injected
 # as the job cluster's spark_env_vars (both UPPER and lower case) at job-creation time.
-# Leave the proxy URLs BLANK when there is no forward proxy (e.g. network-level / VNet
-# egress) — blank = nothing injected, so it is safe to leave the widgets in place.
-# NO_PROXY is pre-filled with the Databricks control-plane + Azure storage domains
-# (the latter so external-volume/table data-plane access is not sent through the proxy);
-# it is harmless when no proxy URL is set.
-dbutils.widgets.text("http_proxy", "")   # e.g. http://proxy.corp:8080 ; blank = none
-dbutils.widgets.text("https_proxy", "")  # e.g. http://proxy.corp:8080 ; blank = none
+#
+# The proxy URLs default to the CURRENT customer's forward proxy so they can run this
+# notebook with nothing to enter. For a DIFFERENT environment, override per install:
+#   * another customer -> set the two URLs to that customer's proxy;
+#   * no forward proxy (network-level / VNet egress, or our own test workspace) -> set
+#     both URLs BLANK. Blank => nothing injected, so the cluster routes directly.
+# NO_PROXY is the bypass list: Databricks control plane (*.databricks.com +
+# *.azuredatabricks.net + *.databricks.azure.com) plus Azure storage
+# (*.dfs/*.blob.core.windows.net, so external-volume/table DATA-PLANE access is NOT sent
+# through the proxy) plus loopback/metadata. Harmless when no proxy URL is set.
+dbutils.widgets.text("http_proxy", "http://databricksproxy.jio.com:8080")   # customer proxy; blank = none
+dbutils.widgets.text("https_proxy", "http://databricksproxy.jio.com:8080")  # customer proxy; blank = none
 dbutils.widgets.text(
     "no_proxy",
-    "*.azuredatabricks.net,*.databricks.azure.com,*.dfs.core.windows.net,"
-    "*.blob.core.windows.net,169.254.169.254,127.0.0.1,localhost",
+    "localhost,127.0.0.1,169.254.169.254,*.databricks.com,*.azuredatabricks.net,"
+    "*.databricks.azure.com,*.dfs.core.windows.net,*.blob.core.windows.net",
 )
 
 # --- object-family create + governance apply toggles ---
