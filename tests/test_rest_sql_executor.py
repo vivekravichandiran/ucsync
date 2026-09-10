@@ -136,6 +136,28 @@ def test_exhausts_retries_and_raises():
     assert len(client.posts) == 3  # initial + 2 retries
 
 
+def test_empty_message_failure_is_retried():
+    # Cold-warehouse signature: FAILED with NO error detail. This must be retried
+    # (not treated as a deterministic error) — otherwise a cold source warehouse
+    # silently drops the object from the export bundle with a bare "statement
+    # FAILED:". Idempotent reads make the retry safe.
+    client = _FakeClient([
+        {"statement_id": "s", "status": {"state": "FAILED"}},          # no error key
+        {"statement_id": "s", "status": {"state": "FAILED", "error": {"message": ""}}},  # blank
+        _ok([["ok"]]),
+    ])
+    ex = RestSqlExecutor(client, "wh", poll_seconds=0, retry_base_seconds=0)
+    assert ex.execute("SHOW CREATE TABLE c.s.t") == [["ok"]]
+    assert len(client.posts) == 3  # both empty-message failures retried, then success
+
+
+def test_warm_up_issues_select_1():
+    client = _FakeClient(_ok([["1"]]))
+    ex = RestSqlExecutor(client, "wh", poll_seconds=0, retry_base_seconds=0)
+    ex.warm_up()
+    assert client.posts and client.posts[0][1]["statement"] == "SELECT 1"
+
+
 def test_execute_follows_chunk_links():
     client = _FakeClient(
         {

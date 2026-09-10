@@ -96,7 +96,15 @@ _RETRYABLE_STATEMENT_HINTS = (
 
 
 def _statement_error_is_retryable(message: str) -> bool:
-    low = (message or "").lower()
+    low = (message or "").strip().lower()
+    # A FAILED/CANCELED/CLOSED state with NO error detail is the signature of a
+    # cold / just-autostopped serverless warehouse dropping the statement while it
+    # spins up. All statements this executor runs (SHOW CREATE, DESCRIBE,
+    # information_schema SELECTs) are idempotent reads, so an empty-message failure
+    # is safe to retry — and MUST be, or a transient cold-start drops the object
+    # from the export bundle with a bare "statement FAILED:" and no retry.
+    if not low:
+        return True
     return any(hint in low for hint in _RETRYABLE_STATEMENT_HINTS)
 
 
@@ -168,6 +176,19 @@ class RestSqlExecutor:
             max_wait_seconds=900.0,
         )
 
+    def warm_up(self) -> None:
+        """Block until the warehouse is serving queries, before a burst of captures.
+
+        A cold (or just auto-stopped) serverless warehouse can drop the first
+        statements it receives while it spins up — they come back ``FAILED`` with no
+        error detail. Rather than let the real capture loop absorb those transient
+        failures one object at a time (and risk exhausting per-statement retries on a
+        slow start), issue one trivial idempotent statement first and let the
+        retry + poll loop ride out the warm-up, so every subsequent capture runs
+        against a warm warehouse. Idempotent and safe to call more than once.
+        """
+        self.execute("SELECT 1")
+
     def execute(self, sql: str) -> list[list[Any]]:
         last_err: Optional[Exception] = None
         for attempt in range(self.max_retries + 1):
@@ -207,11 +228,19 @@ class RestSqlExecutor:
                 break
             if state in {"FAILED", "CANCELED", "CLOSED"}:
                 err = (resp.get("status") or {}).get("error") or {}
-                msg = str(err.get("message") or err or sql[:120])
-                if _statement_error_is_retryable(msg):
-                    raise _TransientSqlError(f"statement {state}: {msg}")
-                # Deterministic SQL error — do not retry.
-                raise RuntimeError(f"statement {state}: {msg}")
+                raw_msg = str(err.get("message") or "").strip()
+                # An empty error detail is the signature of a cold / just-autostopped
+                # serverless warehouse dropping the statement while it spins up —
+                # retry (all statements here are idempotent reads). A known transient
+                # hint is likewise retryable. Only a real deterministic error
+                # (syntax / permission / not-found) fails fast. NOTE: decide on
+                # raw_msg, never on the sql-text fallback (which is never empty).
+                if not raw_msg or _statement_error_is_retryable(raw_msg):
+                    detail = raw_msg or (
+                        f"no error detail (warehouse warming?); stmt={sql[:120]}"
+                    )
+                    raise _TransientSqlError(f"statement {state}: {detail}")
+                raise RuntimeError(f"statement {state}: {raw_msg}")
             if time.time() > deadline:
                 # A cold warehouse warms in well under this; a timeout here means
                 # something is wrong that a resubmit won't fix — fail terminally.

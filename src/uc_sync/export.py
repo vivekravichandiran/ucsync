@@ -180,6 +180,25 @@ class ExportService:
         tag_files = 0
         abac_files = 0
         ddl_by_source: dict[str, int] = {}
+        warnings_global: list[str] = []
+
+        # Pre-warm the (possibly cold / auto-stopped) source warehouse before the
+        # SHOW CREATE capture burst. A cold serverless warehouse drops its first
+        # statements with a bare "statement FAILED:" while it spins up; capturing
+        # DDL has no synthesized fallback, so a dropped statement silently loses the
+        # object from the bundle. Warming up front (and the executor's retry on
+        # empty-message failures) keeps the capture loop running against a warm
+        # warehouse. Best-effort: a warm-up failure is not fatal on its own — the
+        # per-object capture still retries — so it is only recorded as a warning.
+        if not dry_run and self.sql is not None and hasattr(self.sql, "warm_up"):
+            try:
+                self.sql.warm_up()
+            except Exception as exc:  # noqa: BLE001
+                warmup_warning = (
+                    f"source warehouse warm-up did not confirm ready: {exc}"
+                )
+                print(f"[export] {warmup_warning}")
+                warnings_global.append(warmup_warning)
 
         for obj in objects_list:
             try:
@@ -413,6 +432,7 @@ class ExportService:
             "tag_files": tag_files,
             "abac_files": abac_files,
             "ddl_by_source": ddl_by_source,
+            "warnings": warnings_global,
         }
 
     def _capture_object_ddl(
