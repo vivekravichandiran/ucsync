@@ -128,6 +128,31 @@ def test_transient_submit_exception_is_retried():
     assert len(client.posts) == 2
 
 
+def test_permanent_http_submit_error_fails_fast():
+    """Bug #10: a clearly-permanent submit error (400/401/404) fails immediately
+    with its real HTTP status/body — never retried 5 times behind a mystery."""
+    import re
+    for status in ("400", "401", "404"):
+        client = _FakeClient([RuntimeError(f"HTTP {status}: Invalid request")])
+        ex = RestSqlExecutor(client, "wh", poll_seconds=0, retry_base_seconds=0)
+        with pytest.raises(RuntimeError) as exc:
+            ex.execute("CREATE VIEW c.s.v AS SELECT 1")
+        # Real status surfaced, and submitted exactly once (no retry).
+        assert re.search(rf"HTTP {status}", str(exc.value))
+        assert len(client.posts) == 1
+
+
+def test_transient_403_submit_error_is_retried():
+    """Bug #10: a 403 (the one-off control-plane blip) IS transient — retried."""
+    client = _FakeClient([
+        RuntimeError("HTTP 403: Invalid request"),
+        _ok([["ok"]]),
+    ])
+    ex = RestSqlExecutor(client, "wh", poll_seconds=0, retry_base_seconds=0)
+    assert ex.execute("SELECT 1") == [["ok"]]
+    assert len(client.posts) == 2
+
+
 def test_exhausts_retries_and_raises():
     client = _FakeClient([RuntimeError("boom")] * 3)
     ex = RestSqlExecutor(client, "wh", poll_seconds=0, retry_base_seconds=0, max_retries=2)

@@ -13,6 +13,7 @@ from uc_sync.dependency import plan
 from uc_sync.export import canonical_hash
 from uc_sync.mapping import MappingResolver
 from uc_sync.models import UCObject
+from uc_sync.rewrite import is_replayable_table_property
 from uc_sync.package_import import (
     _POLICY_COMPUTE_HINT as POLICY_COMPUTE_HINT,
     _is_policy_unsupported_error,
@@ -101,6 +102,27 @@ def _statement_error_is_retryable(message: str) -> bool:
     # this function is asked only about a populated message.
     low = (message or "").strip().lower()
     return any(hint in low for hint in _RETRYABLE_STATEMENT_HINTS)
+
+
+# HTTP statuses that are genuinely transient at submit time and worth retrying with
+# backoff (bug #10): a brief control-plane rejection (403 — the one-off view-403),
+# rate limiting (429), and server/gateway errors (500/502/503/504). Everything else
+# with an explicit status — 400 (bad request), 401 (unauthorized), 404 (not found),
+# and other permanent 4xx — must FAIL FAST with the real status + body, never retried
+# 5 times behind a "statement failed after N attempts" mystery.
+_RETRYABLE_HTTP_STATUSES = {403, 408, 429, 500, 502, 503, 504}
+_HTTP_STATUS_RE = re.compile(r"HTTP\s+(\d{3})")
+
+
+def _submit_error_is_retryable(message: str) -> bool:
+    """Classify a submit/poll error message (from WorkspaceClient, e.g. ``HTTP 404:
+    …``). A parsed HTTP status decides: retry only the transient set, fail fast on any
+    other explicit status. A message with no HTTP status is a network-level blip →
+    retryable."""
+    match = _HTTP_STATUS_RE.search(message or "")
+    if not match:
+        return True  # no HTTP status → network blip, safe to retry
+    return int(match.group(1)) in _RETRYABLE_HTTP_STATUSES
 
 
 class RestSqlExecutor:
@@ -213,7 +235,12 @@ class RestSqlExecutor:
                 },
             )
         except Exception as exc:  # noqa: BLE001 - client raises RuntimeError
-            raise _TransientSqlError(f"submit failed: {exc}") from exc
+            # Bug #10: surface the real HTTP status/body and fail FAST on a clearly-
+            # permanent error (400/401/404/other 4xx); retry only genuinely transient
+            # ones (403/429/5xx) or a network blip with no status.
+            if _submit_error_is_retryable(str(exc)):
+                raise _TransientSqlError(f"submit failed: {exc}") from exc
+            raise RuntimeError(f"submit failed (permanent): {exc}") from exc
 
         deadline = time.time() + self.max_wait_seconds
         delay = self.poll_seconds
@@ -256,7 +283,9 @@ class RestSqlExecutor:
                     f"/api/2.0/sql/statements/{resp.get('statement_id')}"
                 )
             except Exception as exc:  # noqa: BLE001
-                raise _TransientSqlError(f"poll failed: {exc}") from exc
+                if _submit_error_is_retryable(str(exc)):
+                    raise _TransientSqlError(f"poll failed: {exc}") from exc
+                raise RuntimeError(f"poll failed (permanent): {exc}") from exc
 
         result = resp.get("result") or {}
         rows = [list(r) for r in (result.get("data_array") or [])]
@@ -842,11 +871,14 @@ class ImportEngine:
         data_format = str(
             obj.definition.get("data_source_format") or "DELTA"
         ).upper()
-        # Runtime-generated Delta protocol properties are not portable.
+        # Bug #7: keep replayable table properties (incl. meaningful delta.* such as
+        # dataSkippingStatsColumns / feature.allowColumnDefaults); drop only the
+        # genuinely un-replayable keys (row-tracking materialized column names + min
+        # reader/writer protocol versions).
         portable_properties = {
             key: value
             for key, value in (obj.properties or {}).items()
-            if not str(key).lower().startswith("delta.")
+            if is_replayable_table_property(key)
         }
         properties = ""
         if portable_properties:

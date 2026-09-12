@@ -124,25 +124,102 @@ def _type_rank(object_type: str) -> int:
 
 
 def _split_statements(sql_text: str) -> list[str]:
-    """Split a SQL file into executable statements, preserving $$ blocks."""
+    """Split a SQL file into executable statements, comment- and quote-aware (bug #11).
 
+    A ``;`` is a statement boundary only at the top level — one inside a string
+    literal (``'…'`` / ``"…"``), a quoted identifier (```…```), a ``--`` line comment,
+    a ``/* … */`` block comment, or a ``$$ … $$`` block is NOT a boundary. Comments
+    are **preserved** in the emitted statement: the SQL engine understands ``--`` and
+    ``/* */`` natively, so a captured view / function keeps its author's comments
+    intact. The splitter's only job is to separate multiple statements — it never
+    deletes the user's comments (the old line-drop mangled a flattened statement or
+    one ending with an inline ``--`` comment).
+    """
+
+    text = str(sql_text or "")
     statements: list[str] = []
-    buffer: list[str] = []
-    in_dollar = False
-    for line in str(sql_text or "").splitlines():
-        stripped = line.strip()
-        if stripped.startswith("--"):
-            continue
-        if "$$" in line:
-            # Toggle for each $$ occurrence on the line.
-            in_dollar = (line.count("$$") % 2 == 1) ^ in_dollar
-        buffer.append(line)
-        if not in_dollar and stripped.endswith(";"):
-            statement = "\n".join(buffer).strip()
-            if statement:
-                statements.append(statement)
-            buffer = []
-    trailing = "\n".join(buffer).strip()
+    buf: list[str] = []
+    i, n = 0, len(text)
+    in_single = in_double = in_backtick = False
+    in_line_comment = in_block_comment = in_dollar = False
+
+    def _flush(end: str = "") -> None:
+        stmt = "".join(buf).strip()
+        if stmt:
+            statements.append(stmt + end)
+        buf.clear()
+
+    while i < n:
+        ch = text[i]
+        two = text[i : i + 2]
+        if in_line_comment:
+            buf.append(ch)
+            if ch == "\n":
+                in_line_comment = False
+            i += 1
+        elif in_block_comment:
+            if two == "*/":
+                buf.append(two)
+                in_block_comment = False
+                i += 2
+            else:
+                buf.append(ch)
+                i += 1
+        elif in_dollar:
+            if two == "$$":
+                buf.append(two)
+                in_dollar = False
+                i += 2
+            else:
+                buf.append(ch)
+                i += 1
+        elif in_single:
+            buf.append(ch)
+            if ch == "'":
+                in_single = False
+            i += 1
+        elif in_double:
+            buf.append(ch)
+            if ch == '"':
+                in_double = False
+            i += 1
+        elif in_backtick:
+            buf.append(ch)
+            if ch == "`":
+                in_backtick = False
+            i += 1
+        elif two == "--":
+            in_line_comment = True
+            buf.append(two)
+            i += 2
+        elif two == "/*":
+            in_block_comment = True
+            buf.append(two)
+            i += 2
+        elif two == "$$":
+            in_dollar = True
+            buf.append(two)
+            i += 2
+        elif ch == "'":
+            in_single = True
+            buf.append(ch)
+            i += 1
+        elif ch == '"':
+            in_double = True
+            buf.append(ch)
+            i += 1
+        elif ch == "`":
+            in_backtick = True
+            buf.append(ch)
+            i += 1
+        elif ch == ";":
+            _flush(";")
+            i += 1
+        else:
+            buf.append(ch)
+            i += 1
+
+    trailing = "".join(buf).strip()
     if trailing:
         statements.append(trailing if trailing.endswith(";") else f"{trailing};")
     return statements
@@ -262,20 +339,62 @@ def governance_failures(
     ]
 
 
+def _split_qualified_name(full_name: str) -> list[str]:
+    """Split a (possibly partially-backticked) dotted name into its parts on the
+    TOP-LEVEL dots only — a dot inside a backtick-quoted part is part of the name,
+    not a separator (bug #5). Each returned part has its surrounding backticks
+    stripped; e.g. ``cat.schema.`4g_cust``` → ``['cat', 'schema', '4g_cust']`` and
+    ```cat`.`odd.name``` → ``['cat', 'odd.name']``."""
+    parts: list[str] = []
+    buf: list[str] = []
+    in_backtick = False
+    i = 0
+    text = str(full_name or "")
+    while i < len(text):
+        ch = text[i]
+        if ch == "`":
+            if in_backtick and i + 1 < len(text) and text[i + 1] == "`":
+                # An escaped backtick inside a quoted identifier (`` `` ``).
+                buf.append("`")
+                i += 2
+                continue
+            in_backtick = not in_backtick
+            i += 1
+            continue
+        if ch == "." and not in_backtick:
+            parts.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    parts.append("".join(buf))
+    return [p.strip() for p in parts if p.strip()]
+
+
 def quote_full_name(full_name: str) -> str:
-    return ".".join(f"`{part}`" for part in str(full_name).split(".") if part)
+    """Fully backtick-quote a dotted name, tolerating a name whose parts are already
+    quoted or mix quoted/bare parts (bug #5). A backtick inside a part is escaped by
+    doubling."""
+    return ".".join(
+        "`" + part.replace("`", "``") + "`"
+        for part in _split_qualified_name(full_name)
+    )
 
 
 # The object name that follows ``CREATE <type> [IF NOT EXISTS]``. Captures the
-# CREATE head (group 1) and the object name (group 2), whether the name is 1-, 2-,
-# or 3-part and backtick-quoted or bare. ``STORAGE CREDENTIAL`` is intentionally not
-# matched — it is created over REST, never executed as SQL.
+# CREATE head (group 1) and the object name (group 2). Each dot-separated part is
+# independently backtick-quoted OR bare, so a MIXED name (bug #5) such as
+# ``cat.schema.`4g_cust``` — bare catalog/schema, backticked digit-leading table —
+# is captured in full, not just its ``cat.schema`` prefix (which left the backticked
+# tail behind and produced a 4-part name → "requires a single-part namespace").
+# ``STORAGE CREDENTIAL`` is intentionally not matched — it is created over REST.
 _CREATE_NAME_RE = re.compile(
     r"^(\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMPORARY\s+)?"
     r"(?:EXTERNAL\s+|MATERIALIZED\s+|STREAMING\s+)?"
     r"(?:TABLE|VIEW|FUNCTION|VOLUME|SCHEMA|CATALOG|LOCATION)\s+"
     r"(?:IF\s+NOT\s+EXISTS\s+)?)"
-    r"(`[^`]+`(?:\s*\.\s*`[^`]+`)*|[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*)",
+    r"((?:`[^`]+`|[A-Za-z_]\w*)(?:\s*\.\s*(?:`[^`]+`|[A-Za-z_]\w*))*)",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -496,7 +615,6 @@ class PackageImportEngine:
         object_locations: Optional[ObjectLocations] = None,
         external_locations: Optional[ExternalLocationMapping] = None,
         prior_state: Optional[dict[str, dict[str, Any]]] = None,
-        force_full: bool = False,
         migrate_materialized_views: bool = False,
         run_as_spn: str = "",
         abac_sql_executor: Any = None,
@@ -582,12 +700,11 @@ class PackageImportEngine:
         self._failed_objects: dict[str, str] = {}
         # Incremental (delta) sync (task 1). ``prior_state`` is the last-run baseline
         # read from uc_sync_state ({source_full_name: {ddl_hash, governance_hash,
-        # grants}}); ``force_full`` forces a full re-seed. When a baseline is present
-        # and force_full is off the run is INCREMENTAL: unchanged objects are skipped
-        # entirely (zero writes) and only changed governance / grants are touched. The
-        # DeltaPlan is built in run() once the bundle inventory is loaded.
+        # grants}}). When a baseline is present the run is INCREMENTAL: unchanged
+        # objects are skipped entirely (zero writes) and only changed governance /
+        # grants are touched; with no baseline it is a full run + seed. The DeltaPlan
+        # is built in run() once the bundle inventory is loaded.
         self.prior_state = dict(prior_state or {})
-        self.force_full = bool(force_full)
         self.delta_plan: Optional[DeltaPlan] = None
         # Streaming tables & materialized views are created/refreshed by DLT/SDP
         # managed pipelines, so re-issuing their DDL would spin a new pipeline and
@@ -696,10 +813,10 @@ class PackageImportEngine:
             )
         inventory = self._load_inventory()
         # Build the incremental delta plan from the CURRENT bundle inventory vs. the
-        # prior-run baseline. Auto-detected: a baseline present (and not force_full) →
-        # incremental; else full + seed. Unchanged objects are then skipped entirely.
+        # prior-run baseline. Auto-detected: a baseline present → incremental; else
+        # full + seed. Unchanged objects are then skipped entirely.
         self.delta_plan = DeltaPlan(
-            self._load_inventory_rows(), self.prior_state, force_full=self.force_full,
+            self._load_inventory_rows(), self.prior_state,
             migrate_materialized_views=self.migrate_materialized_views,
         )
         self._maybe_enter_existing_catalog_mode()

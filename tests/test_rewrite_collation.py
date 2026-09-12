@@ -35,9 +35,10 @@ def test_table_collation_clause_is_stripped():
     # Surrounding DDL is preserved and remains valid.
     assert "USING delta" in out
     assert "CREATE TABLE ai27_uctest_target.sales.products" in out
-    # This fixture's TBLPROPERTIES were all delta.* internals, so the whole
-    # clause is dropped by strip_reserved_table_properties.
-    assert "TBLPROPERTIES" not in out
+    # Bug #7: only the un-replayable keys (min reader/writer versions) are dropped;
+    # the replayable delta.enableDeletionVectors is preserved, so the clause stays.
+    assert "'delta.enableDeletionVectors' = 'true'" in out
+    assert "minReaderVersion" not in out and "minWriterVersion" not in out
 
 
 def test_double_quoted_collation_clause_is_stripped():
@@ -182,10 +183,20 @@ TBLPROPERTIES (
   'my.business.tag' = 'gold');"""
 
 
-def test_reserved_delta_properties_are_removed():
+def test_only_unreplayable_delta_properties_are_removed():
+    """Bug #7: only the genuinely un-replayable keys are dropped (auto-generated
+    row-tracking materialized column names + min reader/writer protocol versions);
+    every other delta.* setting is KEPT so the target matches the source."""
     out = strip_managed_storage_clauses(_FULL_TBLPROPS, "TABLE")
-    assert "delta." not in out            # every reserved key gone
-    assert "COLLATION" not in out         # collation gone too
+    # Un-replayable keys are gone.
+    assert "minReaderVersion" not in out
+    assert "minWriterVersion" not in out
+    assert "materializedRowIdColumnName" not in out
+    assert "materializedRowCommitVersionColumnName" not in out
+    # Replayable, meaningful settings are preserved (were wrongly dropped before).
+    assert "'delta.enableDeletionVectors' = 'true'" in out
+    assert "'delta.feature.rowTracking' = 'supported'" in out
+    assert "COLLATION" not in out         # collation still gone
 
 
 def test_user_defined_properties_are_preserved():
@@ -194,14 +205,31 @@ def test_user_defined_properties_are_preserved():
     assert "TBLPROPERTIES" in out
 
 
-def test_tblproperties_clause_dropped_when_only_delta_keys():
-    only_delta = (
+def test_tblproperties_clause_dropped_when_only_unreplayable_keys():
+    only_unreplayable = (
         "CREATE TABLE c.s.t (id INT)\nUSING delta\n"
-        "TBLPROPERTIES (\n  'delta.enableRowTracking' = 'true')"
+        "TBLPROPERTIES (\n  'delta.minReaderVersion' = '3',\n"
+        "  'delta.minWriterVersion' = '7')"
     )
-    out = strip_reserved_table_properties(only_delta)
+    out = strip_reserved_table_properties(only_unreplayable)
     assert "TBLPROPERTIES" not in out
     assert "USING delta" in out
+
+
+def test_replayable_delta_properties_survive_bug7():
+    """The two settings that broke tables when stripped: late-column clustering
+    stats and column DEFAULTs — must now be preserved."""
+    ddl = (
+        "CREATE TABLE c.s.t (id INT, ts TIMESTAMP)\nUSING delta\nCLUSTER BY (ts)\n"
+        "TBLPROPERTIES (\n"
+        "  'delta.dataSkippingStatsColumns' = 'ts',\n"
+        "  'delta.feature.allowColumnDefaults' = 'supported',\n"
+        "  'delta.minReaderVersion' = '3')"
+    )
+    out = strip_reserved_table_properties(ddl)
+    assert "'delta.dataSkippingStatsColumns' = 'ts'" in out
+    assert "'delta.feature.allowColumnDefaults' = 'supported'" in out
+    assert "minReaderVersion" not in out
 
 
 def test_property_strip_leaves_view_collation_property_untouched():
@@ -226,14 +254,18 @@ def test_tblproperties_value_with_parens_not_truncated():
         "  'ai27_uc.fixture' = 'true',\n"
         "  'databricks.delta.expressionStats.selectedColumns' = "
         "'upper(region),lower(region)',\n"
+        "  'delta.minReaderVersion' = '3',\n"
         "  'delta.enableRowTracking' = 'true');"
     )
     out = strip_reserved_table_properties(ddl)
-    # User property kept; delta.* and databricks.* dropped; no corruption.
+    # A value containing ``)`` must not truncate the block (bug #7 keeps this key).
     assert "'ai27_uc.fixture' = 'true'" in out
-    assert "databricks." not in out
-    assert "delta.enableRowTracking" not in out
-    assert "lower(region)" not in out  # the reserved value is gone entirely
+    assert (
+        "'databricks.delta.expressionStats.selectedColumns' = "
+        "'upper(region),lower(region)'"
+    ) in out
+    assert "'delta.enableRowTracking' = 'true'" in out  # replayable → kept
+    assert "minReaderVersion" not in out                # un-replayable → dropped
     assert "CLUSTER BY (region)" in out
 
 

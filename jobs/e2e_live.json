@@ -139,7 +139,6 @@
           "ops_schema": "${ops_schema}",
           "run_id": "{{job.run_id}}",
           "dry_run": "false",
-          "force_full": "${force_full}",
           "migrate_materialized_views": "${migrate_materialized_views}",
           "filter_tables": "${filter_tables}",
           "catalog_mapping_json": "${catalog_mapping_json}",
@@ -158,8 +157,8 @@
           "apply_grants": "${apply_grants}",
           "apply_tags": "${apply_tags}",
           "apply_masks_row_filters": "${apply_masks_row_filters}",
-          "preflight_enforce": "${preflight_enforce}",
-          "allow_missing_report": "${allow_missing_report}"
+          "preflight_enforce": "${preflight_enforce}"
+
         }
       }
     }

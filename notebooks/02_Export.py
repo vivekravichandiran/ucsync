@@ -23,7 +23,7 @@ for _p in ("../src", "./src", os.path.abspath(os.path.join(os.getcwd(), "..", "s
 
 from uc_sync.config import from_sources
 from uc_sync.audit import AuditService, stage_audit_row
-from uc_sync.export import ExportService
+from uc_sync.export import ExportService, export_read_failures
 from uc_sync.migrate_export import MigrateExportService
 from uc_sync.import_engine import SparkSqlExecutor, RestSqlExecutor
 from uc_sync.auth import local_workspace_auth, direct_workspace_auth
@@ -164,4 +164,24 @@ except Exception as _exc:  # noqa: BLE001 - report is best-effort
     traceback.print_exc()
 
 print(json.dumps({k: v for k, v in result.items() if k != "results"}, indent=2, default=str))
+
+# Bug #2: fail the export LOUDLY if any inventoried object could not be read
+# (permission-denied SHOW CREATE, failed DDL capture, …) rather than reporting
+# overall success and letting the import run on a partial bundle. The report + audit
+# rows above are already written, so the operator sees the real per-object cause;
+# the stage then exits non-zero so the pipeline stops before importing an incomplete
+# set. Fix the source permission / prerequisite and re-run.
+read_failures = export_read_failures(result)
+if read_failures:
+    print(f"\n[export] {len(read_failures)} object(s) could not be read — job will exit non-zero:")
+    for f in read_failures:
+        print(f"  [{f.get('error_code')}] {f.get('object_type')} {f.get('full_name')}: "
+              f"{str(f.get('error_message'))[:200]}")
+    raise RuntimeError(
+        f"UC Sync export could not read {len(read_failures)} inventoried object(s) "
+        "(e.g. permission-denied SHOW CREATE / DDL capture failure). The report and "
+        "audit rows were written; the bundle is INCOMPLETE, so the export fails "
+        "rather than letting the import run on a partial set. Fix the source "
+        f"permissions/prerequisites and re-run. run_id={run_id}"
+    )
 dbutils.notebook.exit(json.dumps({"run_id": run_id, "exported": result.get("exported")}))

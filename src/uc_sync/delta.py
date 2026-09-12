@@ -7,8 +7,10 @@ booleans the import engine consults; unchanged objects are skipped entirely (zer
 writes), and only changed governance / grants are touched.
 
 Run mode is auto-detected, never a widget: a baseline present for the scope → run
-**incremental**; none → run **full** and seed the baseline. ``force_full`` forces a
-full re-seed on demand.
+**incremental**; none → run **full** and seed the baseline. A plain re-run is
+already idempotent (existing tables use ``CREATE IF NOT EXISTS``, so their data is
+untouched); for a genuine reset the documented path is ``DROP SCHEMA … CASCADE``
+then recreate — only safe before any data has been loaded into the target.
 
 Match key = **``full_name``** (per the resolved decision): a UC object id is not
 stable across a source rebuild, so the durable baseline key is the name. A rename
@@ -54,6 +56,10 @@ _ABAC_TYPE = "ABAC_POLICY"
 # alone would mislead (the object is reported, not migrated).
 _ALWAYS_REPORT_ONLY_TYPES = {
     "STREAMING_TABLE", "MODEL", "ONLINE_TABLE", "VECTOR_INDEX", "MONITOR", "UC_SECRET",
+    # FOREIGN objects that only look like tables (bug #6): Lakebase-synced tables.
+    "LAKEBASE_TABLE",
+    # Pipeline-managed tables (bug #8): reported, never migrated.
+    "PIPELINE_TABLE",
 }
 
 
@@ -83,7 +89,7 @@ class DeltaPlan:
     ``baseline`` is ``{full_name: {"ddl_hash", "governance_hash", "grants"}}`` read
     from ``uc_sync_state`` (``grants`` is the normalised explicit-grant set dict). An
     empty / absent baseline means a **full** run: every object is ``CREATED_NEW`` and
-    nothing is gated. ``force_full`` also yields a full run.
+    nothing is gated.
     """
 
     def __init__(
@@ -91,11 +97,10 @@ class DeltaPlan:
         current_rows: list[Mapping[str, Any]],
         baseline: Optional[Mapping[str, Mapping[str, Any]]] = None,
         *,
-        force_full: bool = False,
         migrate_materialized_views: bool = False,
     ):
         self.baseline = dict(baseline or {})
-        self.incremental = bool(self.baseline) and not force_full
+        self.incremental = bool(self.baseline)
         self.migrate_materialized_views = bool(migrate_materialized_views)
         self._by_name: dict[str, ObjectDelta] = {}
         self._current_names: set[str] = set()

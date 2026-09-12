@@ -221,16 +221,44 @@ def strip_inline_policy_clauses(text: str) -> str:
     return rewritten
 
 
-def strip_reserved_table_properties(text: str) -> str:
-    """Remove reserved/auto-managed ``delta.*`` keys from a TBLPROPERTIES block.
+# The ONLY table properties that genuinely cannot be replayed on CREATE TABLE
+# (bug #7). Everything else — including replayable, meaningful settings like
+# ``delta.dataSkippingStatsColumns`` (late-column clustering), ``delta.feature.
+# allowColumnDefaults`` (column DEFAULTs), deletion vectors, row tracking, auto-
+# optimize, compression, … — is KEPT so the target matches the source's real
+# configuration. Blanket-dropping ``delta.*`` broke 12 tables and silently changed
+# every "successful" one. Compared case-insensitively.
+#   * the two auto-generated row-tracking materialized column names — assigned by
+#     the engine; replaying the source's names throws DELTA_UNKNOWN_CONFIGURATION;
+#   * the protocol floor versions — the target derives these from the enabled
+#     features, and setting them explicitly is rejected / meaningless.
+_UNREPLAYABLE_TABLE_PROPERTY_KEYS = {
+    "delta.rowtracking.materializedrowidcolumnname",
+    "delta.rowtracking.materializedrowcommitversioncolumnname",
+    "delta.minreaderversion",
+    "delta.minwriterversion",
+}
 
-    ``SHOW CREATE TABLE`` emits the table's full property set, including
-    protocol/feature keys and auto-generated row-tracking column names
-    (``delta.rowTracking.materializedRowIdColumnName`` etc.). Replaying those on
-    ``CREATE TABLE`` fails with ``DELTA_UNKNOWN_CONFIGURATION``. These describe
-    source storage internals the target metastore manages itself, so drop every
-    ``delta.*`` property and let the target assign its own. User-defined
-    (non-``delta.``) properties are preserved; if none remain, the whole
+
+def is_replayable_table_property(key: str) -> bool:
+    """True unless ``key`` is one of the genuinely un-replayable table properties
+    (bug #7). Used by the DDL-synthesis paths so they keep the same meaningful
+    delta.* settings the SHOW CREATE path preserves."""
+    return str(key or "").lower() not in _UNREPLAYABLE_TABLE_PROPERTY_KEYS
+
+
+def strip_reserved_table_properties(text: str) -> str:
+    """Remove ONLY the un-replayable table properties from a TBLPROPERTIES block.
+
+    ``SHOW CREATE TABLE`` emits the table's full property set. A few keys cannot be
+    replayed on ``CREATE TABLE`` (they throw ``DELTA_UNKNOWN_CONFIGURATION`` or are
+    engine-derived) — the auto-generated row-tracking materialized column names and
+    the min reader/writer protocol versions (see
+    ``_UNREPLAYABLE_TABLE_PROPERTY_KEYS``). Those are dropped; **every other
+    property is preserved** so the target's configuration matches the source
+    (bug #7 — the previous code stripped all ``delta.*``/``databricks.*``, breaking
+    late-column clustering + column DEFAULTs and silently dropping deletion vectors,
+    row tracking, auto-optimize, compression, …). If no properties remain the whole
     ``TBLPROPERTIES (...)`` clause is removed.
     """
 
@@ -245,11 +273,7 @@ def strip_reserved_table_properties(text: str) -> str:
         for key, value in re.findall(
             r"'([^']*)'\s*=\s*'([^']*)'", body
         ):
-            lowered = key.lower()
-            # Drop reserved/auto-managed keys (delta.* and databricks.*); these
-            # describe source storage internals the target manages itself and
-            # throw DELTA_UNKNOWN_CONFIGURATION on replay.
-            if lowered.startswith("delta.") or lowered.startswith("databricks."):
+            if key.lower() in _UNREPLAYABLE_TABLE_PROPERTY_KEYS:
                 continue
             kept.append(f"'{key}' = '{value}'")
         if not kept:

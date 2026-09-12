@@ -162,11 +162,17 @@ def test_source_absent_reported_not_dropped():
     assert len(absent) == 1 and absent[0]["object"] == "c.s.gone"
 
 
-def test_force_full_ignores_baseline():
+def test_force_full_option_removed():
+    """Bug #1: the force_full option is gone entirely. A baseline present always
+    yields an incremental run (a plain re-run is idempotent — no forced re-seed),
+    and the removed kwarg is rejected."""
+    import pytest
+
     rows = _rows()
-    plan = DeltaPlan(rows, _baseline(rows), force_full=True)
-    assert plan.incremental is False
-    assert plan.action("c.s.t") == "CREATED_NEW"
+    plan = DeltaPlan(rows, _baseline(rows))
+    assert plan.incremental is True
+    with pytest.raises(TypeError):
+        DeltaPlan(rows, _baseline(rows), force_full=True)
 
 
 # --- Engine integration -----------------------------------------------------

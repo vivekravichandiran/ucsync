@@ -132,17 +132,17 @@ for _t in (*CREATE_TOGGLES, *APPLY_TOGGLES):
     )
 
 # --- incremental (delta) sync (import/e2e jobs): run mode is auto-detected from
-#     uc_sync_state; force_full re-seeds a full reconcile on demand (default off). ---
-dbutils.widgets.dropdown("force_full", "false", ["true", "false"])
+#     uc_sync_state — a baseline present → incremental, none → full + seed. A plain
+#     re-run is idempotent; for a genuine reset use DROP SCHEMA … CASCADE + recreate
+#     (only safe before any data is loaded into the target). ---
 # --- report-only Tier-A handling (import/e2e jobs): streaming tables & materialized
 #     views are DLT/SDP-managed and report-only; set true to migrate materialized
 #     views (streaming tables stay report-only). ---
 dbutils.widgets.dropdown("migrate_materialized_views", "false", ["true", "false"])
 # --- graded preflight (all jobs): NO-GO on a bad environment (missing report lib,
-#     unreachable warehouse) is enforced by default; allow_missing_report makes the
-#     import report non-best-effort. ---
+#     unreachable warehouse) is enforced by default. Every run also always produces
+#     its report — a report-write failure fails the run (bug #4, no opt-out). ---
 dbutils.widgets.dropdown("preflight_enforce", "true", ["true", "false"])
-dbutils.widgets.dropdown("allow_missing_report", "false", ["true", "false"])
 
 dbutils.widgets.dropdown("run_now", "false", ["true", "false"])
 
@@ -166,10 +166,8 @@ _simple = (
 )
 values = {k: dbutils.widgets.get(k).strip() for k in _simple}
 values["notebook_dir"] = notebook_dir
-values["force_full"] = dbutils.widgets.get("force_full")
 values["migrate_materialized_views"] = dbutils.widgets.get("migrate_materialized_views")
 values["preflight_enforce"] = dbutils.widgets.get("preflight_enforce")
-values["allow_missing_report"] = dbutils.widgets.get("allow_missing_report")
 for _t in (*CREATE_TOGGLES, *APPLY_TOGGLES):
     values[_t] = dbutils.widgets.get(_t)
 

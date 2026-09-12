@@ -447,6 +447,34 @@ GRANT SELECT ON VIEW v TO `user`;
     assert statements[1].startswith("GRANT")
 
 
+def test_split_statements_preserves_comments_bug11():
+    """Bug #11: comments are preserved (not line-dropped), and a ``;`` inside a
+    string / comment does not split a statement."""
+    sql = (
+        "-- header comment\n"
+        "CREATE VIEW v AS SELECT id -- inline comment; not a boundary\n"
+        "FROM t WHERE name = 'a;b';\n"
+        "/* block; comment */\n"
+        "GRANT SELECT ON VIEW v TO `user`;\n"
+    )
+    statements = _split_statements(sql)
+    assert len(statements) == 2
+    # The author's comments survive.
+    assert "-- header comment" in statements[0]
+    assert "-- inline comment; not a boundary" in statements[0]
+    # A ``;`` inside the string literal did not split the statement.
+    assert "'a;b'" in statements[0]
+    assert statements[1].startswith("/* block; comment */") or "GRANT" in statements[1]
+    assert "GRANT SELECT ON VIEW v" in statements[1]
+
+
+def test_split_statements_inline_semicolon_in_string_not_split():
+    sql = "INSERT INTO t VALUES ('x;y'); INSERT INTO t VALUES ('z');"
+    statements = _split_statements(sql)
+    assert len(statements) == 2
+    assert "'x;y'" in statements[0]
+
+
 def test_normalize_create_adds_if_not_exists():
     from uc_sync.package_import import _normalize_create_statement
 

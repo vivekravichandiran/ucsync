@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Iterable, List
+from typing import Any, Iterable, List, Optional
 
 from uc_sync.config import SyncConfig
 from uc_sync.filters import allowed
@@ -268,15 +268,19 @@ class InventoryService:
         # AFTER the component filter so they always surface ("we checked, you have
         # none" vs "we never looked"); every row carries in_scope_for_migration=false.
         # Migration scope is unchanged — nothing here is ever created on the target.
-        tier_a = self._iter_tier_a_assets(catalogs)
+        tier_a = self._iter_tier_a_assets(catalogs, filtered)
         return filtered + tier_a
 
-    def _iter_tier_a_assets(self, catalogs: list[UCObject]) -> list[UCObject]:
+    def _iter_tier_a_assets(
+        self, catalogs: list[UCObject], in_scope: list[UCObject]
+    ) -> list[UCObject]:
         """Best-effort discovery of the report-only Tier-A AI-asset types.
 
         Every collector is wrapped so a missing privilege / evolving API yields an
         empty result, never a failure (report-only). Discovery walks the same
-        in-scope catalog→schema surface as the main inventory.
+        in-scope catalog→schema surface as the main inventory. Quality monitors have
+        no bulk list endpoint (bug #3), so they are probed **per in-scope table**
+        from the objects the main inventory already resolved.
         """
         assets: list[UCObject] = []
         for cat in catalogs:
@@ -288,7 +292,6 @@ class InventoryService:
                 for collector in (
                     self._iter_registered_models,
                     self._iter_online_tables,
-                    self._iter_quality_monitors,
                     self._iter_vector_indexes,
                     self._iter_uc_secrets,
                 ):
@@ -299,6 +302,7 @@ class InventoryService:
                             f"[inventory] Tier-A {collector.__name__} skipped for "
                             f"{cat.name}.{schema.name}: {exc!r}"
                         )
+        assets.extend(self._iter_quality_monitors(in_scope))
         return assets
 
     def _tier_a_object(
@@ -344,10 +348,62 @@ class InventoryService:
         # endpoint, so this is best-effort and typically empty. VERIFY LIVE.
         return []
 
-    def _iter_quality_monitors(self, catalog: str, schema: str) -> Iterable[UCObject]:
-        # Lakehouse/quality monitors are per-table (GET .../tables/{t}/monitor); the
-        # API is evolving. VERIFY LIVE. Report-only, so best-effort empty by default.
-        return []
+    # Table-like types a Lakehouse/quality monitor can be attached to. (Streaming
+    # tables, MVs and views can also carry monitors; probe the concrete table family.)
+    _MONITORABLE_TYPES = {
+        ObjectType.TABLE,
+        ObjectType.EXTERNAL_TABLE,
+        ObjectType.MATERIALIZED_VIEW,
+        ObjectType.STREAMING_TABLE,
+    }
+
+    def _iter_quality_monitors(self, in_scope: list[UCObject]) -> Iterable[UCObject]:
+        """Report-only Lakehouse/quality monitors (bug #3).
+
+        There is **no bulk list** for monitors (the Data Quality API's list is
+        currently unimplemented), so probe each in-scope table with the per-object
+        get (``GET /api/2.1/unity-catalog/tables/{full_name}/monitor`` — the deprecated
+        quality-monitors get, which mirrors ``data-quality get-monitor``). A monitored
+        table returns its monitor config; an unmonitored one returns a clean not-found,
+        which we skip silently. Report-only: a probe failure never fails inventory.
+        """
+        for table in in_scope:
+            if table.object_type not in self._MONITORABLE_TYPES:
+                continue
+            monitor = self._probe_table_monitor(table.full_name)
+            if not monitor:
+                continue
+            yield self._tier_a_object(
+                ObjectType.MONITOR,
+                f"{table.full_name}#monitor",
+                monitored_table=table.full_name,
+                status=monitor.get("status"),
+                monitor_version=monitor.get("monitor_version"),
+                assets_dir=monitor.get("assets_dir"),
+                output_schema_name=monitor.get("output_schema_name"),
+                profile_metrics_table_name=monitor.get("profile_metrics_table_name"),
+                drift_metrics_table_name=monitor.get("drift_metrics_table_name"),
+            )
+
+    def _probe_table_monitor(self, table_full_name: str) -> Optional[dict[str, Any]]:
+        """Return the monitor config for a table, or None if it has none / cannot be
+        read. A not-found (no monitor) is the common, expected case and is quiet."""
+        try:
+            monitor = self.source.get(
+                f"/api/2.1/unity-catalog/tables/{table_full_name}/monitor"
+            )
+        except Exception as exc:  # noqa: BLE001 - not-found (no monitor) is expected
+            msg = str(exc)
+            if "404" not in msg and "does not exist" not in msg.lower() \
+                    and "not found" not in msg.lower() \
+                    and "cannot find" not in msg.lower():
+                # A genuine error (e.g. a permission gap) — note it, but never fail
+                # inventory (monitors are report-only).
+                print(
+                    f"[inventory] monitor probe skipped for {table_full_name}: {exc!r}"
+                )
+            return None
+        return monitor if isinstance(monitor, dict) and monitor else None
 
     def _iter_vector_indexes(self, catalog: str, schema: str) -> Iterable[UCObject]:
         # Vector-search indexes are listed per endpoint, not per schema. VERIFY LIVE.
@@ -530,6 +586,8 @@ class InventoryService:
             t = {**t, **detail}
             updated_at, src = _ts(t)
             table_type = (t.get("table_type") or "MANAGED").upper()
+            data_source_format = str(t.get("data_source_format") or "").upper()
+            report_only_foreign = False
             if table_type in {"VIEW", "METRIC_VIEW"}:
                 otype = (
                     ObjectType.METRIC_VIEW
@@ -546,8 +604,30 @@ class InventoryService:
                 otype = ObjectType.MATERIALIZED_VIEW
             elif table_type == "STREAMING_TABLE":
                 otype = ObjectType.STREAMING_TABLE
+            elif table_type == "FOREIGN":
+                # FOREIGN objects only LOOK like tables and cannot be recreated with
+                # ordinary table SQL (bug #6): a Lakebase-synced table (Postgres copy,
+                # POSTGRESQL_FORMAT) or a Vector Search index (VECTOR_INDEX_FORMAT).
+                # Classify to their own report-only types so they are never sent to
+                # SHOW CREATE / CREATE; any other FOREIGN format is reported too.
+                report_only_foreign = True
+                if data_source_format == "VECTOR_INDEX_FORMAT":
+                    otype = ObjectType.VECTOR_INDEX
+                else:
+                    otype = ObjectType.LAKEBASE_TABLE
             else:
                 otype = ObjectType.TABLE
+            # Bug #8: a table owned by a DLT/SDP/Kafka pipeline carries a non-null
+            # top-level pipeline_id (event-log table or pipeline output). It cannot
+            # be recreated with ordinary table SQL (UC demands a managing pipeline;
+            # event-log schemas don't exist on the target). Reclassify a plain
+            # pipeline-managed table to a report-only type; pipeline-output MVs /
+            # streaming tables are already report-only via their own types.
+            pipeline_id = t.get("pipeline_id")
+            report_only_pipeline = False
+            if pipeline_id and otype in {ObjectType.TABLE, ObjectType.EXTERNAL_TABLE}:
+                otype = ObjectType.PIPELINE_TABLE
+                report_only_pipeline = True
             yield UCObject(
                 object_type=otype,
                 name=t["name"],
@@ -578,6 +658,14 @@ class InventoryService:
                     "view_with_metrics": t.get("view_with_metrics"),
                     "row_filter": _row_filter_from_payload(t),
                     "column_masks": _column_masks_from_payload(t),
+                    # FOREIGN (Lakebase-synced / Vector Search, bug #6) and pipeline-
+                    # managed (bug #8) objects are reported, never migrated.
+                    **(
+                        {"in_scope_for_migration": False}
+                        if (report_only_foreign or report_only_pipeline)
+                        else {}
+                    ),
+                    **({"pipeline_id": pipeline_id} if pipeline_id else {}),
                 },
                 properties=t.get("properties") or {},
                 source_metadata=t,

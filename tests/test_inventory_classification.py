@@ -1,5 +1,106 @@
 from uc_sync.config import from_sources
 from uc_sync.inventory import InventoryService, _is_dynamic_view, _is_metric_view
+from uc_sync.models import ObjectType
+
+
+class _ForeignTablesSource:
+    """A source with a Lakebase-synced table, a Vector Search index, and a plain
+    managed table (bug #6). List + per-object get both return the same rows."""
+
+    _ROWS = {
+        "c.s.lakebase_sync": {
+            "name": "lakebase_sync", "full_name": "c.s.lakebase_sync",
+            "table_type": "FOREIGN", "data_source_format": "POSTGRESQL_FORMAT",
+        },
+        "c.s.vs_index": {
+            "name": "vs_index", "full_name": "c.s.vs_index",
+            "table_type": "FOREIGN", "data_source_format": "VECTOR_INDEX_FORMAT",
+        },
+        "c.s.orders": {
+            "name": "orders", "full_name": "c.s.orders",
+            "table_type": "MANAGED", "data_source_format": "DELTA",
+        },
+    }
+
+    def paginate(self, path, items_key=None, **q):
+        if path.endswith("/tables"):
+            return iter(list(self._ROWS.values()))
+        return iter([])
+
+    def get(self, path, **q):
+        return self._ROWS.get(path.rsplit("/tables/", 1)[-1], {})
+
+
+def test_foreign_tables_classified_report_only():
+    cfg = from_sources({"execution_mode": "LOCAL", "catalogs": "c"})
+    tables = list(InventoryService(_ForeignTablesSource(), cfg)._iter_tables("c", "s"))
+    by_name = {t.full_name: t for t in tables}
+    assert by_name["c.s.lakebase_sync"].object_type == ObjectType.LAKEBASE_TABLE
+    assert by_name["c.s.lakebase_sync"].definition["in_scope_for_migration"] is False
+    assert by_name["c.s.vs_index"].object_type == ObjectType.VECTOR_INDEX
+    assert by_name["c.s.vs_index"].definition["in_scope_for_migration"] is False
+    # A plain managed table is unaffected and remains in scope.
+    assert by_name["c.s.orders"].object_type == ObjectType.TABLE
+    assert "in_scope_for_migration" not in by_name["c.s.orders"].definition
+
+
+class _PipelineTablesSource:
+    """A source with a pipeline event-log table (non-null pipeline_id), a pipeline
+    output table (also pipeline_id), and a plain table (bug #8)."""
+
+    _ROWS = {
+        "c.s.event_log": {
+            "name": "event_log", "full_name": "c.s.event_log",
+            "table_type": "MANAGED", "data_source_format": "DELTA",
+            "pipeline_id": "pl-1234",
+        },
+        "c.s.orders": {
+            "name": "orders", "full_name": "c.s.orders",
+            "table_type": "MANAGED", "data_source_format": "DELTA",
+            "pipeline_id": None,
+        },
+    }
+
+    def paginate(self, path, items_key=None, **q):
+        if path.endswith("/tables"):
+            return iter(list(self._ROWS.values()))
+        return iter([])
+
+    def get(self, path, **q):
+        return self._ROWS.get(path.rsplit("/tables/", 1)[-1], {})
+
+
+def test_pipeline_managed_table_classified_report_only():
+    cfg = from_sources({"execution_mode": "LOCAL", "catalogs": "c"})
+    tables = list(InventoryService(_PipelineTablesSource(), cfg)._iter_tables("c", "s"))
+    by_name = {t.full_name: t for t in tables}
+    assert by_name["c.s.event_log"].object_type == ObjectType.PIPELINE_TABLE
+    assert by_name["c.s.event_log"].definition["in_scope_for_migration"] is False
+    assert by_name["c.s.event_log"].definition["pipeline_id"] == "pl-1234"
+    # A plain table (pipeline_id empty) is migrated normally.
+    assert by_name["c.s.orders"].object_type == ObjectType.TABLE
+    assert "in_scope_for_migration" not in by_name["c.s.orders"].definition
+
+
+def test_foreign_types_never_capture_ddl():
+    """Bug #6: report-only FOREIGN objects are never sent to SHOW CREATE / synthesis."""
+    from uc_sync.export import ExportService
+    from uc_sync.models import UCObject
+
+    objs = [
+        UCObject(object_type=ObjectType.LAKEBASE_TABLE, name="lb",
+                 full_name="c.s.lb", definition={"in_scope_for_migration": False}),
+        UCObject(object_type=ObjectType.VECTOR_INDEX, name="vi",
+                 full_name="c.s.vi", definition={"in_scope_for_migration": False}),
+    ]
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        result = ExportService(f"{d}/v", "r1", workspace_root=f"{d}/w").run(
+            objs, dry_run=False
+        )
+    # No DDL captured, and neither is a hard ERROR (they are report-only, not failures).
+    assert result["ddl_files"] == 0
+    assert all(r["status"] != "ERROR" for r in result["results"])
 
 
 def test_identity_aware_view_is_dynamic():

@@ -127,19 +127,18 @@ class SyncConfig:
     exclude_regex: list[str] = field(default_factory=list)
     import_mode: str = "CREATE_OR_SKIP"
     # Incremental (delta) sync (task 1): run mode is auto-detected from uc_sync_state
-    # (baseline present → incremental; none → full + seed). force_full re-seeds a full
-    # reconcile on demand. Default off.
-    force_full: bool = False
+    # (baseline present → incremental; none → full + seed). A plain re-run is already
+    # idempotent; for a genuine reset use DROP SCHEMA … CASCADE then recreate (only
+    # safe before any data has been loaded into the target — see the runbook).
     # Streaming tables & materialized views are DLT/SDP-pipeline-managed and are
     # report-only by default (task 4). Set this on to opt into materialized-view
     # migration; streaming tables are always report-only.
     migrate_materialized_views: bool = False
     # Graded preflight (task 9): gate 01/02/03 behind an environment preflight. When
     # enforced (default), a NO-GO (missing report lib, unreachable warehouse, …) is a
-    # red run, never a silent degrade. allow_missing_report=false makes report
-    # generation non-best-effort (a report failure fails the run).
+    # red run, never a silent degrade. Every run always produces its report — a
+    # report-write failure fails the run (bug #4, no opt-out).
     preflight_enforce: bool = True
-    allow_missing_report: bool = False
     allow_destructive_operations: bool = False
     max_api_workers: int = 8
     mappings: dict[str, Any] = field(default_factory=dict)
@@ -500,7 +499,6 @@ def from_sources(
         include_regex=list(include_regex or []),
         exclude_regex=list(exclude_regex or []),
         import_mode=str(runtime.get("import_mode") or "CREATE_OR_SKIP"),
-        force_full=_as_bool(pick("force_full", runtime.get("force_full")), False),
         migrate_materialized_views=_as_bool(
             pick("migrate_materialized_views",
                  runtime.get("migrate_materialized_views")),
@@ -508,9 +506,6 @@ def from_sources(
         ),
         preflight_enforce=_as_bool(
             pick("preflight_enforce", runtime.get("preflight_enforce")), True
-        ),
-        allow_missing_report=_as_bool(
-            pick("allow_missing_report", runtime.get("allow_missing_report")), False
         ),
         allow_destructive_operations=_as_bool(
             runtime.get("allow_destructive_operations"), False

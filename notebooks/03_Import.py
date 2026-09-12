@@ -74,17 +74,17 @@ dbutils.widgets.text("import_warehouse_id", "")
 # Incremental (delta) sync (task 1): run mode is AUTO-DETECTED — a baseline in
 # uc_sync_state (from a prior successful run) → incremental (only deltas applied,
 # unchanged objects skipped with zero writes); no baseline → full run + seed the
-# baseline. force_full=true re-seeds a full reconcile on demand (default off).
-dbutils.widgets.dropdown("force_full", "false", ["true", "false"])
+# baseline. A plain re-run is idempotent; for a genuine reset use DROP SCHEMA …
+# CASCADE then recreate (only safe before any data is loaded into the target).
 # Streaming tables & materialized views are DLT/SDP-pipeline-managed → report-only
 # by default (task 4). Set true to opt into materialized-view migration; streaming
 # tables are always report-only.
 dbutils.widgets.dropdown("migrate_materialized_views", "false", ["true", "false"])
 # Graded environment preflight (task 9): when enforced (default), a NO-GO (e.g. a
 # missing report library on a proxy-restricted cluster) is a red run, never a silent
-# degrade. allow_missing_report=false makes report generation non-best-effort.
+# degrade. Every run must also produce its report — a report-write failure fails the
+# run (bug #4, no opt-out).
 dbutils.widgets.dropdown("preflight_enforce", "true", ["true", "false"])
-dbutils.widgets.dropdown("allow_missing_report", "false", ["true", "false"])
 # BYO-by-default: catalog / schema / storage-credential / external-location creation
 # defaults OFF (they are customer prerequisites); all other create + apply toggles
 # default ON. A 3-column external_locations.csv turns SC/EL creation back on.
@@ -105,10 +105,8 @@ cfg = from_sources({
     "catalog_mapping_json": dbutils.widgets.get("catalog_mapping_json"),
     "import_warehouse_id": dbutils.widgets.get("import_warehouse_id"),
     "external_locations_path": dbutils.widgets.get("external_locations_path"),
-    "force_full": dbutils.widgets.get("force_full"),
     "migrate_materialized_views": dbutils.widgets.get("migrate_materialized_views"),
     "preflight_enforce": dbutils.widgets.get("preflight_enforce"),
-    "allow_missing_report": dbutils.widgets.get("allow_missing_report"),
     **{t: dbutils.widgets.get(t) for t in (*CREATE_TOGGLES, *APPLY_TOGGLES)},
 })
 
@@ -156,9 +154,9 @@ abac_executor = (
 )
 
 # Incremental (delta) sync: read the prior-run baseline from uc_sync_state. When a
-# baseline exists (and force_full is off) the run is incremental — only deltas are
-# applied and unchanged objects are skipped entirely; otherwise it is a full run
-# that seeds the baseline. Best-effort: no readable state → full run.
+# baseline exists the run is incremental — only deltas are applied and unchanged
+# objects are skipped entirely; otherwise it is a full run that seeds the baseline.
+# Best-effort: no readable state → full run.
 prior_state = {}
 try:
     if cfg.state_table:
@@ -184,7 +182,6 @@ engine = PackageImportEngine(
     object_locations=object_locations,
     external_locations=external_locations,
     prior_state=prior_state,
-    force_full=cfg.force_full,
     migrate_materialized_views=cfg.migrate_materialized_views,
     run_as_spn=_run_as_spn,
     abac_sql_executor=abac_executor,
@@ -223,14 +220,12 @@ try:
 except Exception as _exc:  # noqa: BLE001
     import traceback
     traceback.print_exc()
-    # Task 9 — the report is not silently optional: a failure to write it fails the
-    # run unless the operator explicitly opted out (allow_missing_report=true).
-    if not cfg.allow_missing_report:
-        raise RuntimeError(
-            "report generation failed and allow_missing_report=false — a run must "
-            f"not complete without its report. Root cause: {_exc!r}"
-        )
-    print(f"report generation skipped (allow_missing_report=true): {_exc!r}")
+    # Bug #4 — every run must produce its report; there is no opt-out. A failure to
+    # write the report always fails the run.
+    raise RuntimeError(
+        "report generation failed — a run must not complete without its report. "
+        f"Root cause: {_exc!r}"
+    )
 
 # Operations tables under {ops_catalog}.{ops_schema} on THIS (target) workspace:
 #   uc_sync_audit — one IMPORT row per object (append-only history).

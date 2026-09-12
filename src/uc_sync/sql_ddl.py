@@ -7,6 +7,7 @@ import re
 from typing import Any, Iterable, Optional
 
 from uc_sync.models import ObjectType, UCObject
+from uc_sync.rewrite import is_replayable_table_property
 
 # Prefer live SHOW CREATE for these types when a SQL executor is available.
 SHOW_CREATE_TABLE_TYPES = {
@@ -307,10 +308,14 @@ def _table_ddl_from_definition(obj: UCObject) -> Optional[str]:
     location_clause = (
         f" LOCATION '{escape_literal(location)}'" if location else ""
     )
+    # Bug #7: keep every replayable table property (incl. meaningful delta.* like
+    # dataSkippingStatsColumns / feature.allowColumnDefaults); drop only the
+    # genuinely un-replayable keys (row-tracking materialized column names + min
+    # reader/writer protocol versions).
     portable_properties = {
         key: value
         for key, value in (obj.properties or {}).items()
-        if not str(key).lower().startswith("delta.")
+        if is_replayable_table_property(key)
     }
     properties = ""
     if portable_properties:

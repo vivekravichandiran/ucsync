@@ -7,7 +7,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from uc_sync import __version__
 from uc_sync.governance import (
@@ -52,6 +52,20 @@ _HARD_FAIL_SHOW_CREATE_TYPES = {
     "STREAMING_TABLE",
 }
 
+# Report-only types that must never have DDL captured — they are reported but never
+# recreated. FOREIGN objects that only look like tables (bug #6): a Lakebase-synced
+# table (POSTGRESQL_FORMAT) and a Vector Search index (VECTOR_INDEX_FORMAT) — the
+# latter cannot even be read by SHOW CREATE. Plus the inventory-only Tier-A AI assets.
+_REPORT_ONLY_NO_DDL_TYPES = {
+    "LAKEBASE_TABLE",
+    "PIPELINE_TABLE",
+    "VECTOR_INDEX",
+    "ONLINE_TABLE",
+    "MONITOR",
+    "UC_SECRET",
+    "MODEL",
+}
+
 
 @dataclass
 class ExportItemResult:
@@ -71,6 +85,23 @@ class ExportItemResult:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def export_read_failures(result: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Per-object export results that could NOT be read (status ``ERROR``).
+
+    Bug #2: the export must fail loudly if it could not read any inventoried
+    object — a permission-denied SHOW CREATE, a failed DDL capture, etc. — instead
+    of quietly reporting overall success and letting the import run on a partial
+    bundle. The caller (notebook 02) uses this to exit non-zero after the report
+    and audit rows have been written, so the operator sees the real cause and
+    re-runs rather than importing an incomplete set.
+    """
+    return [
+        item
+        for item in (result.get("results") or [])
+        if isinstance(item, dict) and item.get("status") == "ERROR"
+    ]
 
 
 def canonical_hash(obj: UCObject) -> str:
@@ -455,6 +486,17 @@ class ExportService:
         """
 
         otype = obj.object_type.value
+
+        # Report-only types that only LOOK like tables (bugs #6/#8) or are inventory-
+        # only Tier-A AI assets: never capture DDL (no SHOW CREATE, no synthesis) —
+        # they are reported, never recreated. Also honour an explicit
+        # in_scope_for_migration=false flag so any object marked report-only at
+        # inventory is skipped regardless of its type.
+        if otype in _REPORT_ONLY_NO_DDL_TYPES or (
+            isinstance(obj.definition, dict)
+            and obj.definition.get("in_scope_for_migration") is False
+        ):
+            return None, None
 
         if otype == "FUNCTION":
             if self.sql is not None:

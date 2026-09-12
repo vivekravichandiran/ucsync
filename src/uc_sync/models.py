@@ -27,6 +27,15 @@ class ObjectType(str, Enum):
     VECTOR_INDEX = "VECTOR_INDEX"
     MONITOR = "MONITOR"
     UC_SECRET = "UC_SECRET"
+    # FOREIGN table_type objects that only LOOK like tables — reported, never
+    # migrated (bug #6). A Lakebase-synced table is a Postgres copy shown in UC for
+    # governance visibility (data_source_format POSTGRESQL_FORMAT); a Vector Search
+    # index (VECTOR_INDEX_FORMAT) classifies as ObjectType.VECTOR_INDEX above.
+    LAKEBASE_TABLE = "LAKEBASE_TABLE"
+    # A plain table owned by a DLT/SDP/Kafka pipeline (non-null top-level pipeline_id
+    # from the tables API) — a pipeline event-log table or output. Reported, never
+    # migrated (bug #8): the pipeline recreates its own event logs on the target.
+    PIPELINE_TABLE = "PIPELINE_TABLE"
     STORAGE_CREDENTIAL = "STORAGE_CREDENTIAL"
     SERVICE_CREDENTIAL = "SERVICE_CREDENTIAL"
     EXTERNAL_LOCATION = "EXTERNAL_LOCATION"

@@ -62,6 +62,47 @@ def test_registered_model_discovered_as_report_only():
     assert model.definition.get("version_count") == 2
 
 
+class MonitorSource:
+    """Fake source with two tables, one of which carries a quality monitor. The
+    monitor endpoint returns config for the monitored table and raises a not-found
+    (like the live API) for the unmonitored one."""
+
+    def paginate(self, path, items_key, **q):
+        if path.endswith("/catalogs"):
+            return iter([{"name": "c", "catalog_type": "MANAGED_CATALOG"}])
+        if path.endswith("/schemas"):
+            return iter([{"name": "s", "full_name": "c.s"}])
+        if path.endswith("/tables"):
+            return iter([
+                {"name": "monitored", "full_name": "c.s.monitored",
+                 "table_type": "MANAGED", "columns": []},
+                {"name": "plain", "full_name": "c.s.plain",
+                 "table_type": "MANAGED", "columns": []},
+            ])
+        return iter([])
+
+    def get(self, path, **q):
+        if path == "/api/2.1/unity-catalog/tables/c.s.monitored/monitor":
+            return {"status": "MONITOR_STATUS_ACTIVE", "monitor_version": "3",
+                    "profile_metrics_table_name": "c.s.monitored_profile_metrics"}
+        if path.endswith("/monitor"):
+            raise RuntimeError("HTTP 404: {'error_code':'RESOURCE_DOES_NOT_EXIST',"
+                               "'message':'Monitor cannot find'}")
+        return {}
+
+
+def test_quality_monitor_discovered_per_object_report_only():
+    """Bug #3: monitors have no bulk list, so each in-scope table is probed; a
+    monitored table is reported (report-only), an unmonitored one is skipped."""
+    objects = InventoryService(MonitorSource(), _cfg()).run()
+    monitors = [o for o in objects if o.object_type == ObjectType.MONITOR]
+    assert len(monitors) == 1
+    mon = monitors[0]
+    assert mon.definition.get("monitored_table") == "c.s.monitored"
+    assert mon.definition.get("in_scope_for_migration") is False
+    assert mon.definition.get("status") == "MONITOR_STATUS_ACTIVE"
+
+
 def test_report_shows_tier_a_tab_and_no_tier_b_c_tabs(tmp_path: Path):
     objects = [
         {"object_type": "MODEL", "full_name": "c.s.m", "owner": "ml@x.com",

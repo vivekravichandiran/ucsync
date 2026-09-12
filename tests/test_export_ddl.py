@@ -227,6 +227,33 @@ def test_show_create_failure_is_hard_failure_no_synth(tmp_path):
     assert result["exported"] == 0
 
 
+def test_export_read_failures_flags_unread_objects(tmp_path):
+    """Bug #2: a table whose SHOW CREATE fails is surfaced by export_read_failures
+    so the export stage can fail loudly instead of importing a partial bundle."""
+    from uc_sync.export import export_read_failures
+
+    objects = [
+        UCObject(
+            object_type=ObjectType.TABLE,
+            name="orders",
+            full_name="c.s.orders",
+            definition={"columns": [{"name": "id", "type_text": "int"}]},
+        ),
+    ]
+    result = ExportService(
+        str(tmp_path / "v"), "run1",
+        sql_executor=_FailingShowCreate(),
+        workspace_root=str(tmp_path / "w"),
+    ).run(objects, dry_run=False)
+
+    failures = export_read_failures(result)
+    assert len(failures) == 1
+    assert failures[0]["full_name"] == "c.s.orders"
+    assert failures[0]["error_code"] == "DDL_CAPTURE_FAILED"
+    # A clean run reports no read failures.
+    assert export_read_failures({"results": [{"status": "SUCCESS"}]}) == []
+
+
 def test_table_missing_warehouse_is_hard_failure(tmp_path):
     """A table with no SQL executor at all is also a hard capture failure — DDL
     capture is warehouse-only for the table/view family."""

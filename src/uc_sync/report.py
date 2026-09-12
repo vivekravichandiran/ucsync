@@ -394,6 +394,10 @@ _INVENTORY_ONLY = [
     ("VECTOR_INDEX", "Vector Search Indexes"),
     ("MONITOR", "Monitors"),
     ("UC_SECRET", "UC Secrets"),
+    # FOREIGN objects that only look like tables — reported, never migrated (bug #6).
+    ("LAKEBASE_TABLE", "Lakebase Tables"),
+    # Pipeline-managed tables (event logs / outputs) — reported, never migrated (#8).
+    ("PIPELINE_TABLE", "Pipeline Tables"),
 ]
 
 

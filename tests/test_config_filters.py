@@ -113,3 +113,16 @@ def test_stage_defaults_from_legacy_mode_and_sync_maps_to_import():
         "airgap"
     )
     assert from_sources({"execution_mode": "LOCAL"}).connectivity_mode == "direct"
+
+
+def test_report_is_mandatory_no_allow_missing_report_option():
+    """Bug #4: every run must produce its report — the allow_missing_report escape
+    hatch is gone from the config and the job specs."""
+    import json
+    from pathlib import Path
+
+    cfg = from_sources({"stage": "IMPORT", "allow_missing_report": "true"})
+    assert not hasattr(cfg, "allow_missing_report")
+    jobs_dir = Path(__file__).resolve().parent.parent / "jobs"
+    for spec in jobs_dir.glob("*.json"):
+        assert "allow_missing_report" not in spec.read_text()
