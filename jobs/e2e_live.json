@@ -140,6 +140,7 @@
           "run_id": "{{job.run_id}}",
           "dry_run": "false",
           "migrate_materialized_views": "${migrate_materialized_views}",
+          "copy_volume_data": "${copy_volume_data}",
           "filter_tables": "${filter_tables}",
           "catalog_mapping_json": "${catalog_mapping_json}",
           "import_warehouse_id": "${import_warehouse_id}",
@@ -157,8 +158,11 @@
           "apply_grants": "${apply_grants}",
           "apply_tags": "${apply_tags}",
           "apply_masks_row_filters": "${apply_masks_row_filters}",
-          "preflight_enforce": "${preflight_enforce}"
-
+          "preflight_enforce": "${preflight_enforce}",
+          "source_workspace_url": "${source_workspace_url}",
+          "source_client_id": "${source_client_id}",
+          "source_secret_scope": "${source_secret_scope}",
+          "source_secret_key": "${source_secret_key}"
         }
       }
     }

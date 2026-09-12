@@ -139,6 +139,9 @@ for _t in (*CREATE_TOGGLES, *APPLY_TOGGLES):
 #     views are DLT/SDP-managed and report-only; set true to migrate materialized
 #     views (streaming tables stay report-only). ---
 dbutils.widgets.dropdown("migrate_materialized_views", "false", ["true", "false"])
+# --- volume data copy (FEAT-4): copy managed+external volume files source→target via
+#     the Files API; default off, incremental via a control table, >5 GB reported. ---
+dbutils.widgets.dropdown("copy_volume_data", "false", ["true", "false"])
 # --- graded preflight (all jobs): NO-GO on a bad environment (missing report lib,
 #     unreachable warehouse) is enforced by default. Every run also always produces
 #     its report — a report-write failure fails the run (bug #4, no opt-out). ---
@@ -167,6 +170,7 @@ _simple = (
 values = {k: dbutils.widgets.get(k).strip() for k in _simple}
 values["notebook_dir"] = notebook_dir
 values["migrate_materialized_views"] = dbutils.widgets.get("migrate_materialized_views")
+values["copy_volume_data"] = dbutils.widgets.get("copy_volume_data")
 values["preflight_enforce"] = dbutils.widgets.get("preflight_enforce")
 for _t in (*CREATE_TOGGLES, *APPLY_TOGGLES):
     values[_t] = dbutils.widgets.get(_t)

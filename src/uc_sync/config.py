@@ -134,6 +134,10 @@ class SyncConfig:
     # report-only by default (task 4). Set this on to opt into materialized-view
     # migration; streaming tables are always report-only.
     migrate_materialized_views: bool = False
+    # Volume data copy (FEAT-4): copy the actual files of managed + external volumes
+    # source→target via the Files API. Default OFF (securables are always created;
+    # file bytes are optional). Incremental via a control table of copied mtimes.
+    copy_volume_data: bool = False
     # Graded preflight (task 9): gate 01/02/03 behind an environment preflight. When
     # enforced (default), a NO-GO (missing report lib, unreachable warehouse, …) is a
     # red run, never a silent degrade. Every run always produces its report — a
@@ -503,6 +507,9 @@ def from_sources(
             pick("migrate_materialized_views",
                  runtime.get("migrate_materialized_views")),
             False,
+        ),
+        copy_volume_data=_as_bool(
+            pick("copy_volume_data", runtime.get("copy_volume_data")), False
         ),
         preflight_enforce=_as_bool(
             pick("preflight_enforce", runtime.get("preflight_enforce")), True

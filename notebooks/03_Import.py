@@ -30,8 +30,11 @@ from uc_sync.location_mapping import (
     load_external_locations_csv,
 )
 from uc_sync.import_engine import RestSqlExecutor
-from uc_sync.auth import local_workspace_auth
+from uc_sync.auth import local_workspace_auth, direct_workspace_auth
 from uc_sync.workspace_client import WorkspaceClient
+from uc_sync.volume_copy import (
+    VolumeDataCopier, SparkVolumeCopyControl, InMemoryVolumeCopyControl, copy_summary,
+)
 from uc_sync.audit import AuditService, stage_audit_row
 from uc_sync.sync_state import SyncStateService, state_row_from_import
 
@@ -80,6 +83,11 @@ dbutils.widgets.text("import_warehouse_id", "")
 # by default (task 4). Set true to opt into materialized-view migration; streaming
 # tables are always report-only.
 dbutils.widgets.dropdown("migrate_materialized_views", "false", ["true", "false"])
+# Volume data copy (FEAT-4): copy managed + external volume FILES source→target via
+# the Files API (securables are always created; the bytes are optional). Default off;
+# incremental via a control table (only new/modified files re-copied). >5 GB files are
+# reported, not silently dropped.
+dbutils.widgets.dropdown("copy_volume_data", "false", ["true", "false"])
 # Graded environment preflight (task 9): when enforced (default), a NO-GO (e.g. a
 # missing report library on a proxy-restricted cluster) is a red run, never a silent
 # degrade. Every run must also produce its report — a report-write failure fails the
@@ -93,6 +101,13 @@ for _t in (*CREATE_TOGGLES, *APPLY_TOGGLES):
         _t, "false" if _t in BYO_PREREQUISITE_TOGGLES else "true", ["true", "false"]
     )
 dbutils.widgets.dropdown("dry_run", "false", ["true", "false"])
+# Source-workspace auth (direct mode) — needed only to read source volume FILES when
+# copy_volume_data is on (volume bytes are not in the bundle). Blank in airgap / when
+# the toggle is off.
+dbutils.widgets.text("source_workspace_url", "")
+dbutils.widgets.text("source_client_id", "")
+dbutils.widgets.text("source_secret_scope", "")
+dbutils.widgets.text("source_secret_key", "")
 
 # COMMAND ----------
 
@@ -106,7 +121,12 @@ cfg = from_sources({
     "import_warehouse_id": dbutils.widgets.get("import_warehouse_id"),
     "external_locations_path": dbutils.widgets.get("external_locations_path"),
     "migrate_materialized_views": dbutils.widgets.get("migrate_materialized_views"),
+    "copy_volume_data": dbutils.widgets.get("copy_volume_data"),
     "preflight_enforce": dbutils.widgets.get("preflight_enforce"),
+    "source_workspace_url": dbutils.widgets.get("source_workspace_url"),
+    "source_client_id": dbutils.widgets.get("source_client_id"),
+    "source_secret_scope": dbutils.widgets.get("source_secret_scope"),
+    "source_secret_key": dbutils.widgets.get("source_secret_key"),
     **{t: dbutils.widgets.get(t) for t in (*CREATE_TOGGLES, *APPLY_TOGGLES)},
 })
 
@@ -222,6 +242,7 @@ try:
         export_results=export_results,
         import_results=[r.to_dict() for r in results],
         delta_rows=delta_rows,
+        workspace_url=getattr(wc.auth, "host", ""),
     )
     print(f"report: {report_path}")
 except Exception as _exc:  # noqa: BLE001
@@ -276,6 +297,61 @@ except Exception as _exc:  # noqa: BLE001 - ops tables are best-effort
     import traceback
     print(f"ops audit/state write skipped: {_exc!r}")
     traceback.print_exc()
+
+# Volume data copy (FEAT-4): copy managed + external volume FILES source→target via
+# the Files API — the bundle carries the volume securables, not their bytes. Toggle
+# default off; incremental via a control table (only new/modified files re-copied);
+# a >5 GB file is reported, not silently dropped. Best-effort: a copy failure is
+# recorded, never fails the governance migration itself.
+if cfg.copy_volume_data:
+    try:
+        with open(f"{migrated}/inventory/objects.json") as _fh:
+            _inv_rows = json.load(_fh)
+        _volumes = [
+            r for r in _inv_rows
+            if str(r.get("object_type")) in ("VOLUME", "EXTERNAL_VOLUME")
+        ]
+        if not cfg.source_workspace_url:
+            print("[volume-copy] copy_volume_data=true but no source_workspace_url — "
+                  "cannot read source files; skipping (set source auth to enable).")
+        elif not _volumes:
+            print("[volume-copy] no volumes in scope to copy.")
+        else:
+            _secret = cfg.source_client_secret
+            if not _secret and cfg.source_secret_scope and cfg.source_secret_key:
+                _secret = dbutils.secrets.get(
+                    scope=cfg.source_secret_scope, key=cfg.source_secret_key)
+            _src_client = WorkspaceClient(direct_workspace_auth(
+                cfg.source_workspace_url, cfg.source_client_id, _secret))
+            try:
+                _control = SparkVolumeCopyControl(
+                    spark, f"{cfg.ops_catalog}.{cfg.ops_schema}.uc_sync_volume_files")
+            except Exception as _cx:  # noqa: BLE001
+                print(f"[volume-copy] control table unavailable ({_cx!r}) — in-memory")
+                _control = InMemoryVolumeCopyControl()
+            _copier = VolumeDataCopier(_src_client, wc, control=_control)
+            _all_copy = []
+            for _v in _volumes:
+                _parts = str(_v.get("full_name") or "").split(".")
+                if len(_parts) != 3:
+                    continue
+                _cat, _sch, _name = _parts
+                _tgt_cat = cfg.catalog_mapping.get(_cat, _cat)
+                _all_copy.extend(_copier.copy_volume(
+                    _v["full_name"],
+                    f"/Volumes/{_cat}/{_sch}/{_name}",
+                    f"/Volumes/{_tgt_cat}/{_sch}/{_name}",
+                ))
+            if isinstance(_control, SparkVolumeCopyControl):
+                _control.flush()
+            print(f"[volume-copy] {copy_summary(_all_copy)}")
+            for _r in _all_copy:
+                if _r.status in ("FAILED", "SKIPPED_TOO_LARGE"):
+                    print(f"  [{_r.status}] {_r.source_path}: {_r.message[:160]}")
+    except Exception as _exc:  # noqa: BLE001 - volume data copy is best-effort
+        import traceback
+        print(f"[volume-copy] skipped: {_exc!r}")
+        traceback.print_exc()
 
 summary = {}
 for r in results:

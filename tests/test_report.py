@@ -96,17 +96,17 @@ def test_issues_sheet_counts_split_and_governance_status(tmp_path):
     # The two non-success ops (dropped table + failed tag), no SUCCESS ones.
     assert len(issues) - 1 == 2
 
-    # Summary: a SINGLE per-object tally, no separate governance section.
+    # Summary: a SINGLE per-object outcome roll-up (wsmig vocabulary, FEAT-5), no
+    # separate governance section.
     summary = [tuple(r) for r in wb["Summary"].iter_rows(values_only=True)]
     flat = [str(c) for row in summary for c in row if c is not None]
-    assert "import_status (per object)" in flat
+    assert "Outcome roll-up" in flat
     assert "governed-tag operations" not in flat and "governance operations" not in flat
-    # The created table SUCCESS + the ABAC policy SUCCESS = 2 SUCCESS, plus the
-    # dropped table's FAILURE = 1. The tag ALTER row is excluded (folded into the
-    # table it failed).
+    # The created table + the ABAC policy = 2 Created, plus the dropped table's
+    # FAILED = 1. The tag ALTER row is excluded (folded into the table it failed).
     sflat = {summary[i][0]: summary[i][1] for i in range(len(summary))
-             if summary[i][0] in ("SUCCESS", "FAILURE")}
-    assert sflat.get("SUCCESS") == 2 and sflat.get("FAILURE") == 1
+             if summary[i][0] in ("Created", "FAILED")}
+    assert sflat.get("Created") == 2 and sflat.get("FAILED") == 1
 
     # Tags sheet carries import_status; the bad table's tag reads FAILED.
     tag_rows = list(wb["Tags"].iter_rows(values_only=True))
@@ -218,9 +218,9 @@ def test_abac_counts_as_object_so_export_and_import_totals_match(tmp_path):
 
     # export objects == import per-object == 3 (all incl. the ABAC policy). The
     # governed-tag ALTER on the catalog is folded into the catalog's object status
-    # (SUCCESS here), NOT a separate tally.
+    # (Created here), NOT a separate tally.
     assert _count("export_status", "SUCCESS") == 3
-    assert _count("import_status (per object)", "SUCCESS") == 3
+    assert _count("Outcome roll-up", "Created") == 3
     flat = [str(c) for row in summary for c in row if c is not None]
     assert "governed-tag operations" not in flat and "governance operations" not in flat
 

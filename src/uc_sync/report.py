@@ -203,6 +203,10 @@ def _render_import_status(entry: Optional[dict[str, str]]) -> str:
         return ""  # no import in this stage (inventory/export reports)
     status, action, msg = entry["status"], entry["action"], entry["message"]
     tail = f": {msg[:200]}" if msg else ""
+    # #12 / FEAT-5: a report-only object is never "SUCCESS (REPORT_ONLY)" — it reads
+    # as a Skipped variant (nothing was applied to a target object).
+    if action in ("REPORT_ONLY", "SKIP_REPORT_ONLY"):
+        return "SKIPPED (no target object)"
     if action == "SKIP_CREATE_DISABLED":
         return "SKIPPED — not created by utility (create toggle off; pre-existing)"
     if action == "SKIP_FILTERED":
@@ -401,6 +405,79 @@ _INVENTORY_ONLY = [
 ]
 
 
+# --- FEAT-5: workspace-migration (wsmig) report vocabulary --------------------
+# Status key -> (display label, cell fill hex). Mirrors wsmig's _STATUS_STYLE so
+# operators read a familiar report; supersedes #12 (report-only reads as a Skipped
+# variant, never "SUCCESS (REPORT_ONLY)", and is counted outside success).
+_STATUS_STYLE: dict[str, tuple[str, str]] = {
+    "created": ("Created", "D1FAE5"),
+    "created_with_warning": ("Created (warning)", "FDE68A"),
+    "updated": ("Updated", "DBEAFE"),
+    "adopted": ("Adopted (pre-existing)", "CFFAFE"),
+    "skipped": ("Skipped (unchanged)", "E5E7EB"),
+    "manual": ("Manual step", "FEF3C7"),
+    "not_selected": ("Deferred (not selected)", "F1F5F9"),
+    "skipped_no_object": ("Skipped (no target object)", "EDE9FE"),
+    "deleted_in_source": ("Deleted in source", "FFE4E6"),
+    "failed": ("FAILED", "FEE2E2"),
+    "": ("—", "FFFFFF"),
+}
+# Summary roll-up order — FAILURES FIRST, then created/updated/adopted, then the
+# skip/defer variants (report-only counted here, outside success).
+_SUMMARY_ORDER = (
+    "failed", "created", "created_with_warning", "updated", "adopted",
+    "skipped", "skipped_no_object", "not_selected", "manual", "deleted_in_source",
+)
+# Which roll-up buckets count as "actually applied" vs. skipped (honest totals, #12).
+_SUCCESS_STATUSES = {"created", "created_with_warning", "updated", "adopted"}
+
+# wsmig palette / fonts.
+_WSMIG_HEADER_BG = "1E3A5F"   # deep navy
+_WSMIG_SECTION_BG = "334155"  # slate
+_WSMIG_DB_RED = "FF3621"      # Databricks brand red
+_WSMIG_ALT_ROW = "F1F5F9"     # very light gray
+_WSMIG_FONT = "Calibri"
+
+
+_REPORT_ONLY_TYPES_REPORT = {
+    "STREAMING_TABLE", "MODEL", "ONLINE_TABLE", "VECTOR_INDEX", "MONITOR",
+    "UC_SECRET", "LAKEBASE_TABLE", "PIPELINE_TABLE",
+}
+
+
+def _is_report_only_object(o: dict[str, Any]) -> bool:
+    """A report-only inventory object (never migrated): a Tier-A / FOREIGN / pipeline
+    type, or anything flagged in_scope_for_migration=false."""
+    if str(o.get("object_type") or "") in _REPORT_ONLY_TYPES_REPORT:
+        return True
+    return (o.get("definition") or {}).get("in_scope_for_migration") is False
+
+
+def _wsmig_status_key(entry: Optional[dict[str, Any]]) -> str:
+    """Map an internal import-result entry to a wsmig status key. A report-only /
+    never-created object (no import result, or a REPORT_ONLY action) reads as
+    ``skipped_no_object`` — counted outside success (#12)."""
+    if not entry:
+        return "skipped_no_object"
+    status = str(entry.get("status") or "")
+    action = str(entry.get("action") or "")
+    if action in ("REPORT_ONLY", "SKIP_REPORT_ONLY"):
+        return "skipped_no_object"
+    if status == "FAILURE":
+        return "failed"
+    if status == "MANUAL_ACTION_REQUIRED":
+        return "manual"
+    if action in ("SKIP_CREATE_DISABLED", "SKIP_EXISTING"):
+        return "adopted"
+    if action == "SKIP_FILTERED":
+        return "not_selected"
+    if action == "COLUMN_ADDED" or status == "SUCCESS_WITH_WARNINGS":
+        return "created_with_warning"
+    if status in ("SUCCESS", "PENDING"):
+        return "created"
+    return "skipped"
+
+
 def build_report(
     objects: list[dict[str, Any]],
     out_path: str,
@@ -410,6 +487,7 @@ def build_report(
     import_results: Optional[list[dict[str, Any]]] = None,
     delta_rows: Optional[list[dict[str, Any]]] = None,
     run_id: str = "",
+    workspace_url: str = "",
 ) -> str:
     """Write the migration workbook to ``out_path`` (.xlsx). Returns the path.
 
@@ -426,7 +504,10 @@ def build_report(
     """
 
     from openpyxl import Workbook
-    from openpyxl.styles import Font
+    from openpyxl.styles import Font, PatternFill
+
+    def _fill(hex_color: str) -> "PatternFill":
+        return PatternFill("solid", fgColor=hex_color)
 
     if stage is None:
         stage = (
@@ -467,15 +548,21 @@ def build_report(
     def _sheet(title: str, headers: list[str]):
         ws = wb.create_sheet(title)
         ws.append(headers)
+        # wsmig palette: navy header band, white bold Calibri.
         for cell in ws[1]:
-            cell.font = Font(bold=True)
+            cell.font = Font(bold=True, color="FFFFFF", name=_WSMIG_FONT)
+            cell.fill = _fill(_WSMIG_HEADER_BG)
         return ws
 
-    # Summary
+    # Summary — title bar (workspace URL + generated timestamp) in the wsmig style.
     ws = wb.active
     ws.title = "Summary"
     ws.append(["UC Governance Migration report"])
-    ws["A1"].font = Font(bold=True, size=14)
+    ws["A1"].font = Font(bold=True, size=14, color="FFFFFF", name=_WSMIG_FONT)
+    ws["A1"].fill = _fill(_WSMIG_HEADER_BG)
+    from datetime import datetime, timezone
+    ws.append(["workspace", str(workspace_url or "")])
+    ws.append(["generated", datetime.now(timezone.utc).isoformat(timespec="seconds")])
     ws.append(["run_id", run_id])
     ws.append(["objects", len(objects)])
     counts: dict[str, int] = {}
@@ -505,13 +592,61 @@ def build_report(
         # The per-tag detail still lives on the Tags sheet; governed-tag ALTER result
         # rows are excluded here so they are not double-counted against their object.
         object_results = [r for r in import_results if not _is_tag_op_result(r)]
-        st: dict[str, int] = {}
+        rollup: dict[str, int] = {}
+        imported_names: set[str] = set()
         for r in object_results:
-            st[r.get("status", "")] = st.get(r.get("status", ""), 0) + 1
+            key = _wsmig_status_key(r)
+            rollup[key] = rollup.get(key, 0) + 1
+            imported_names.add(str(r.get("target_full_name") or r.get("full_name") or ""))
+            imported_names.add(str(r.get("source_full_name") or ""))
+        # #12 / FEAT-5: report-only inventory objects (never imported) are counted as
+        # a Skipped variant, OUTSIDE success — never "SUCCESS (REPORT_ONLY)".
+        for o in objects:
+            if o["full_name"] in imported_names or str(
+                o.get("target_full_name") or ""
+            ) in imported_names:
+                continue
+            if _is_report_only_object(o):
+                rollup["skipped_no_object"] = rollup.get("skipped_no_object", 0) + 1
         ws.append([])
-        ws.append(["import_status (per object)", "count"])
-        for k in sorted(st):
-            ws.append([k, st[k]])
+        hdr_row = ws.max_row + 1
+        ws.append(["Outcome roll-up", "count"])
+        for c in ws[hdr_row]:
+            c.font = Font(bold=True, color="FFFFFF", name=_WSMIG_FONT)
+            c.fill = _fill(_WSMIG_SECTION_BG)
+        total = 0
+        for key in _SUMMARY_ORDER:  # FAILURES FIRST (see _SUMMARY_ORDER)
+            if key not in rollup:
+                continue
+            label, colour = _STATUS_STYLE[key]
+            ws.append([label, rollup[key]])
+            ws.cell(row=ws.max_row, column=1).fill = _fill(colour)
+            total += rollup[key]
+        trow = ws.max_row + 1
+        ws.append(["TOTAL", total])
+        for c in ws[trow]:
+            c.font = Font(bold=True, name=_WSMIG_FONT)
+        applied = sum(v for k, v in rollup.items() if k in _SUCCESS_STATUSES)
+        skipped = sum(
+            v for k, v in rollup.items()
+            if k in ("skipped", "skipped_no_object", "not_selected")
+        )
+        ws.append(["applied (created/updated/adopted)", applied])
+        ws.append(["skipped (incl. report-only)", skipped])
+        # Manual-steps section (wsmig parity): objects needing an operator action.
+        manual = [r for r in object_results if _wsmig_status_key(r) == "manual"]
+        if manual:
+            ws.append([])
+            mrow = ws.max_row + 1
+            ws.append([f"Manual steps required ({len(manual)})", ""])
+            for c in ws[mrow]:
+                c.font = Font(bold=True, color="FFFFFF", name=_WSMIG_FONT)
+                c.fill = _fill(_WSMIG_DB_RED)
+            for r in manual:
+                ws.append([
+                    str(r.get("target_full_name") or r.get("full_name") or ""),
+                    str(r.get("message") or "")[:200],
+                ])
 
     # Issues sheet (right after Summary): every non-success import op — a table
     # dropped fail-closed (PROTECTION_FAILED), a view that failed on its dropped
@@ -600,10 +735,14 @@ def build_report(
             + status_headers,
         )
         for o in sorted(rows, key=lambda x: x["full_name"]):
+            # Report-only rows read as a Skipped variant (#12), never blank/SUCCESS.
+            inv_status = list(_status_cells(o))
+            if stage == "IMPORT" and inv_status and not inv_status[-1]:
+                inv_status[-1] = "SKIPPED (no target object)"
             ws_t.append([
                 o["full_name"], "false", _cell(o, "comment"), o.get("owner") or "",
                 "inventory-only — report-only Tier-A AI asset (not migrated)",
-            ] + _status_cells(o))
+            ] + inv_status)
 
     # Catch-all for any present type not explicitly modeled above (never drop an
     # object silently). ABAC policies have their own dedicated sheets below.
