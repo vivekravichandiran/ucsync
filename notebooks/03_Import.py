@@ -29,7 +29,7 @@ from uc_sync.location_mapping import (
     load_object_locations_csv,
     load_external_locations_csv,
 )
-from uc_sync.import_engine import SparkSqlExecutor, RestSqlExecutor
+from uc_sync.import_engine import RestSqlExecutor
 from uc_sync.auth import local_workspace_auth
 from uc_sync.workspace_client import WorkspaceClient
 from uc_sync.audit import AuditService, stage_audit_row
@@ -145,13 +145,20 @@ external_locations = (
 # COMMAND ----------
 
 wc = WorkspaceClient(local_workspace_auth(dbutils))
-# The SQL warehouse executor runs BOTH the ABAC CREATE POLICY phase and the view-
-# creation phase (both are rejected / unreliable on a classic Spark cluster). None
-# when unset, in which case an ABAC-carrying bundle fails those policies closed
-# (fail-fast) and views fall back to the Spark executor.
-abac_executor = (
-    RestSqlExecutor(wc, cfg.import_warehouse_id) if cfg.import_warehouse_id else None
-)
+# FEAT-1: run ALL replay (tables, functions, masks, row filters, views, materialized
+# views, ABAC policies, tags, grants) through ONE serverless SQL warehouse — nothing
+# on the job cluster's Spark session. One always-current runtime (fixes GEOMETRY /
+# bug #9 with no version fiddling) and one auth path (removes the class behind the
+# one-off view-403 / bug #10), with consistent, explainable behavior. The same
+# executor is the main DDL executor AND the ABAC/view executor. Inventory reads
+# stay as-is. import_warehouse_id is therefore required for the import stage.
+if not cfg.import_warehouse_id:
+    raise ValueError(
+        "import_warehouse_id is required — FEAT-1 runs all import replay on a single "
+        "serverless SQL warehouse (no Spark-cluster DDL). Set import_warehouse_id."
+    )
+warehouse_executor = RestSqlExecutor(wc, cfg.import_warehouse_id)
+abac_executor = warehouse_executor
 
 # Incremental (delta) sync: read the prior-run baseline from uc_sync_state. When a
 # baseline exists the run is incremental — only deltas are applied and unchanged
@@ -175,7 +182,7 @@ except Exception:  # noqa: BLE001
     _run_as_spn = ""
 
 engine = PackageImportEngine(
-    migrated, SparkSqlExecutor(spark), dry_run=cfg.dry_run, toggles=toggles,
+    migrated, warehouse_executor, dry_run=cfg.dry_run, toggles=toggles,
     workspace_client=wc,
     catalog_mapping=cfg.catalog_mapping,
     select_tables=_split_csv(dbutils.widgets.get("filter_tables")),

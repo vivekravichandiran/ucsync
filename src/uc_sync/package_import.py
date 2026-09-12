@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from uc_sync.delta import DeltaPlan
+from uc_sync.delta import CHANGED, DeltaPlan
 from uc_sync.dependency import _TYPE_RANK
 from uc_sync.fingerprints import (
     ddl_fingerprint,
@@ -16,8 +16,14 @@ from uc_sync.fingerprints import (
     grant_fingerprint_set,
 )
 from uc_sync.location_mapping import ExternalLocationMapping, ObjectLocations
-from uc_sync.models import ObjectType
+from uc_sync.models import ObjectType, UCObject
 from uc_sync.report import _table_in_policy_scope
+from uc_sync.sql_ddl import (
+    escape_literal,
+    mask_statements_for_object,
+    quote_identifier,
+    row_filter_statements_for_object,
+)
 
 # View-like securables are created AFTER governance + the drop sweep, so a view
 # built on a table that governance failed (and dropped) simply fails to create —
@@ -860,6 +866,13 @@ class PackageImportEngine:
             if _parse_sql_filename(p.name)[0] in _VIEW_LIKE_TYPES
         ]
 
+        # Phase 0 — governed tags (FEAT-2): create each governed tag (+ allowed
+        # values) before any SET TAGS. Idempotent — a same-account target already has
+        # the tag (SKIP_EXISTING). Gated by apply_tags (governed-tag creation is a
+        # prerequisite of tag assignment).
+        if self.toggles.get("apply_tags", True):
+            results.extend(self._create_governed_tags(len(results)))
+
         # Phase 1 — structure + full table definitions. Inline classic masks / row
         # filters make protection atomic: a missing mask/filter function fails the
         # CREATE TABLE itself, so no unprotected table survives.
@@ -867,6 +880,14 @@ class PackageImportEngine:
             results.append(
                 self._import_ddl_file(path, len(results) + 1, inventory, by_target)
             )
+
+        # Phase 1b — governed schema evolution (FEAT-3): on an incremental run, add
+        # columns present on the source but missing on the (pre-existing) target, with
+        # the exact source type, then apply the new column's classic mask / row filter.
+        # Runs after structural (so the target table + any mask functions exist) and
+        # before the tag phase (so a governed tag on a new column applies). A same-tag
+        # new column is auto-covered by the existing ABAC policy (no new policy).
+        results.extend(self._replay_schema_evolution(by_target, len(results)))
 
         # Phase 2 — governed tags on non-view objects. A tag failure on a TABLE
         # records that table for the drop sweep (fail-closed).
@@ -1388,6 +1409,181 @@ class PackageImportEngine:
                 "object not fully governed (fail-closed): a governance step "
                 f"failed — {feature}"
             )
+
+    def _describe_columns(self, target_full_name: str) -> Optional[set[str]]:
+        """Lower-cased column names of an existing target table via DESCRIBE TABLE,
+        or None if it cannot be read. Stops at the partition/detail section (a blank
+        or ``#``-prefixed row)."""
+        try:
+            rows = self.sql.execute(
+                f"DESCRIBE TABLE {quote_full_name(target_full_name)}"
+            )
+        except Exception:  # noqa: BLE001 - can't read → skip evolution for this table
+            return None
+        cols: set[str] = set()
+        for row in rows or []:
+            name = str((row[0] if isinstance(row, (list, tuple)) else row) or "").strip()
+            if not name or name.startswith("#"):
+                break
+            cols.add(name.lower())
+        return cols
+
+    def _replay_schema_evolution(
+        self, by_target: dict[str, dict[str, Any]], order_start: int
+    ) -> list["PackageImportResult"]:
+        """FEAT-3: add source columns missing on the (pre-existing) target on an
+        incremental run, with the exact source type, and apply the new column's
+        classic mask / row filter. Governed tags on new columns are applied by the
+        tag phase (their fingerprint changed); a same-tag new column is auto-covered
+        by the existing ABAC policy. Drops / renames / type changes are out of scope
+        (flagged, never actioned)."""
+        if self.dry_run or self.delta_plan is None or not self.delta_plan.incremental:
+            return []
+        results: list["PackageImportResult"] = []
+        for target_full_name, row in by_target.items():
+            object_type = str(row.get("object_type") or "")
+            if object_type not in _DROPPABLE_TABLE_TYPES:  # TABLE / EXTERNAL_TABLE
+                continue
+            source_full = str(
+                row.get("source_full_name") or row.get("full_name") or ""
+            )
+            if self.delta_plan.action(source_full) != CHANGED:
+                continue
+            definition = row.get("definition") or {}
+            source_columns = [
+                c for c in (definition.get("columns") or []) if isinstance(c, dict)
+            ]
+            if not source_columns:
+                continue
+            target_cols = self._describe_columns(target_full_name)
+            if target_cols is None:
+                continue
+            added = [
+                c for c in source_columns
+                if str(c.get("name") or "").lower() not in target_cols
+            ]
+            if not added:
+                continue
+            # Build a synthetic object so the existing mask/row-filter builders emit
+            # the correctly-quoted ALTER statements against the target name.
+            synthetic = UCObject(
+                object_type=ObjectType(object_type),
+                name=target_full_name.split(".")[-1],
+                full_name=target_full_name,
+                definition=definition,
+            )
+            new_names = {str(c.get("name") or "").lower() for c in added}
+            for col in added:
+                col_name = str(col.get("name") or "")
+                type_text = str(col.get("type_text") or col.get("type") or "").strip()
+                if not col_name or not type_text:
+                    continue
+                stmt = (
+                    f"ALTER TABLE {quote_full_name(target_full_name)} "
+                    f"ADD COLUMN {quote_identifier(col_name)} {type_text}"
+                )
+                if col.get("comment"):
+                    stmt += f" COMMENT '{escape_literal(str(col['comment']))}'"
+                status, message, error_code = "SUCCESS", "", ""
+                action = "COLUMN_ADDED"
+                try:
+                    self.sql.execute(stmt + ";")
+                    message = f"added column {col_name} {type_text}"
+                except Exception as exc:  # noqa: BLE001
+                    msg = str(exc)
+                    if _is_already_exists_error(msg) or "already exists" in msg.lower():
+                        action, message = "SKIP_EXISTING", f"column {col_name} exists"
+                    else:
+                        status, error_code = "FAILURE", "SCHEMA_EVOLUTION_FAILED"
+                        message = msg[:300]
+                results.append(PackageImportResult(
+                    object_type="COLUMN", source_full_name=f"{source_full}.{col_name}",
+                    target_full_name=f"{target_full_name}.{col_name}",
+                    full_name=f"{target_full_name}.{col_name}",
+                    action=action, status=status, message=message,
+                    error_code=error_code, dependency_level=0,
+                    import_order=order_start + len(results) + 1,
+                ))
+            # Apply the new columns' classic masks + a row filter that references any
+            # new column (idempotent: an already-bound mask/filter is a skip).
+            policy_stmts = [
+                s for s in mask_statements_for_object(synthetic)
+                if any(f"ALTER COLUMN {quote_identifier(c.get('name') or '')} " in s
+                       for c in added)
+            ]
+            row_filter = synthetic.row_filter() or {}
+            rf_cols = {str(c).lower() for c in (row_filter.get("input_columns") or
+                                                row_filter.get("columns") or [])}
+            if rf_cols & new_names:
+                policy_stmts += row_filter_statements_for_object(synthetic)
+            for stmt in policy_stmts:
+                try:
+                    self.sql.execute(stmt)
+                except Exception as exc:  # noqa: BLE001
+                    msg = str(exc)
+                    if _is_policy_exists_error(msg):
+                        continue
+                    results.append(PackageImportResult(
+                        object_type="COLUMN",
+                        source_full_name=source_full, target_full_name=target_full_name,
+                        full_name=target_full_name, action="APPLY_POLICY",
+                        status="FAILURE", error_code="SCHEMA_EVOLUTION_FAILED",
+                        message=msg[:300], dependency_level=0,
+                        import_order=order_start + len(results) + 1,
+                    ))
+        return results
+
+    def _create_governed_tags(self, order_start: int) -> list["PackageImportResult"]:
+        """Phase 0 (FEAT-2): create governed tags (+ allowed values) before any SET
+        TAGS. Idempotent — an already-existing governed tag (a same-account target
+        already sees it, account-scoped) is a SKIP_EXISTING, not a failure. Runs on
+        the main executor (the single serverless warehouse under FEAT-1)."""
+        gt_dir = self.root / "governed_tags"
+        if not gt_dir.exists():
+            return []
+        files = sorted(
+            p for p in gt_dir.glob("*.sql")
+            if p.is_file() and not p.name.startswith("all_")
+        )
+        results: list[PackageImportResult] = []
+        for path in files:
+            object_type, tag_key = _parse_sql_filename(path.name)
+            # Incremental gating: skip an unchanged governed tag.
+            if (
+                not self.dry_run
+                and self.delta_plan is not None
+                and self.delta_plan.incremental
+                and self.delta_plan.should_skip_object(tag_key)
+            ):
+                continue
+            action, status, message, error_code = "CREATE_OR_SKIP", "SUCCESS", "", ""
+            statements = [
+                s for s in _split_statements(path.read_text(encoding="utf-8")) if s.strip()
+            ]
+            if self.dry_run:
+                message = "dry run"
+            else:
+                for stmt in statements:
+                    try:
+                        self.sql.execute(stmt)
+                        message = f"created governed tag {tag_key}"
+                    except Exception as exc:  # noqa: BLE001
+                        msg = str(exc)
+                        if _is_already_exists_error(msg) or "already exists" in msg.lower():
+                            action, message = "SKIP_EXISTING", (
+                                f"governed tag {tag_key} already exists"
+                            )
+                        else:
+                            status, error_code = "FAILURE", "GOVERNED_TAG_FAILED"
+                            message = msg[:300]
+                            break
+            results.append(PackageImportResult(
+                object_type=object_type, source_full_name=tag_key,
+                target_full_name=tag_key, full_name=tag_key,
+                action=action, status=status, message=message, error_code=error_code,
+                dependency_level=0, import_order=order_start + len(results) + 1,
+            ))
+        return results
 
     def _apply_governance_dir(
         self,

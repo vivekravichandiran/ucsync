@@ -476,6 +476,24 @@ def test_abac_runs_on_warehouse_with_no_use_context(tmp_path: Path):
     assert abac_row.target_full_name == "c#policy:cat_mask"
 
 
+def test_feat1_single_warehouse_runs_ddl_and_abac_on_one_executor(tmp_path: Path):
+    """FEAT-1: with the serverless warehouse as the SOLE executor (passed as both the
+    main and the ABAC executor), every replay statement — table DDL AND CREATE POLICY
+    — runs on that one executor, with no ABAC_WAREHOUSE_REQUIRED fail-closed."""
+    root = _abac_bundle(tmp_path)
+    warehouse = WarehouseSql()
+    results = PackageImportEngine(
+        str(root), warehouse, dry_run=False, abac_sql_executor=warehouse,
+    ).run()
+
+    abac_row = next(r for r in results if r.object_type == "ABAC_POLICY")
+    assert abac_row.status == "SUCCESS"
+    assert abac_row.error_code != "ABAC_WAREHOUSE_REQUIRED"
+    # Both the table DDL and the ABAC policy ran on the single warehouse executor.
+    assert any("CREATE TABLE" in s for s in warehouse.statements)
+    assert any("CREATE POLICY" in s for s in warehouse.statements)
+
+
 def test_abac_without_warehouse_fails_fast_and_drops_matched_table(tmp_path: Path):
     # Policy attached ON the table so its scope matches the created table.
     root = _abac_bundle(

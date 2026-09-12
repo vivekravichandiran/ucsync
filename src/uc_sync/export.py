@@ -12,6 +12,7 @@ from typing import Any, Iterable, Mapping, Optional
 from uc_sync import __version__
 from uc_sync.governance import (
     abac_policy_create_statement,
+    governed_tag_create_statement,
     tag_statements_for_object,
 )
 from uc_sync.models import ObjectType, UCObject
@@ -189,6 +190,7 @@ class ExportService:
             "policies",
             "tags",
             "abac",
+            "governed_tags",
             "bindings",
             "validation",
             "checksums",
@@ -205,6 +207,8 @@ class ExportService:
         all_policy_ddls: list[str] = []
         all_tag_ddls: list[str] = []
         all_abac_ddls: list[str] = []
+        all_governed_tag_ddls: list[str] = []
+        governed_tag_files = 0
         ddl_files = 0
         grant_files = 0
         policy_files = 0
@@ -244,6 +248,32 @@ class ExportService:
                     meta_rel,
                     json.dumps(obj.to_dict(), indent=2, default=str) + "\n",
                 )
+
+                # Governed-tag definitions (FEAT-2): emit a CREATE GOVERNED TAG file
+                # (with allowed values) into governed_tags/ so the import can create
+                # them before any SET TAGS. No DDL/grants/tags/policies of their own.
+                if obj.object_type == ObjectType.GOVERNED_TAG:
+                    gt_sql = governed_tag_create_statement(
+                        obj.full_name,
+                        list((obj.definition or {}).get("allowed_values") or []),
+                    )
+                    gt_body = render_sql_file(
+                        [gt_sql], header=f"Governed tag {obj.full_name}"
+                    )
+                    self._write_text(f"governed_tags/{stem}.sql", gt_body)
+                    all_governed_tag_ddls.append(gt_body.rstrip() + "\n")
+                    governed_tag_files += 1
+                    results.append(
+                        ExportItemResult(
+                            object_type=obj.object_type.value,
+                            full_name=obj.full_name,
+                            status="SUCCESS",
+                            definition_hash=digest,
+                            metadata_path=meta_paths.get("volume")
+                            or meta_paths.get("workspace", ""),
+                        )
+                    )
+                    continue
 
                 ddl_path = ""
                 workspace_ddl_path = ""
@@ -433,11 +463,20 @@ class ExportService:
                     header=f"ABAC policy CREATE statements for run {self.run_id}",
                 ),
             )
+        if all_governed_tag_ddls:
+            self._write_text(
+                "governed_tags/all_governed_tags.sql",
+                render_sql_file(
+                    [block.rstrip() for block in all_governed_tag_ddls],
+                    header=f"Governed-tag CREATE statements for run {self.run_id}",
+                ),
+            )
         manifest["ddl_files"] = ddl_files
         manifest["grant_files"] = grant_files
         manifest["policy_files"] = policy_files
         manifest["tag_files"] = tag_files
         manifest["abac_files"] = abac_files
+        manifest["governed_tag_files"] = governed_tag_files
         manifest["ddl_by_source"] = ddl_by_source
         self._write_text(
             "manifest.json",
@@ -462,6 +501,7 @@ class ExportService:
             "policy_files": policy_files,
             "tag_files": tag_files,
             "abac_files": abac_files,
+            "governed_tag_files": governed_tag_files,
             "ddl_by_source": ddl_by_source,
             "warnings": warnings_global,
         }

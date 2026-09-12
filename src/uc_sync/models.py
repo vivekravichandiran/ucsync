@@ -45,6 +45,10 @@ class ObjectType(str, Enum):
     RECIPIENT = "RECIPIENT"
     PROVIDER = "PROVIDER"
     ABAC_POLICY = "ABAC_POLICY"
+    # A governed-tag definition (account-level tag policy + allowed values). Created
+    # on the target BEFORE its values are assigned (FEAT-2), idempotent for a
+    # same-account target where the tag is already visible.
+    GOVERNED_TAG = "GOVERNED_TAG"
     GRANT = "GRANT"
     BINDING = "BINDING"
 

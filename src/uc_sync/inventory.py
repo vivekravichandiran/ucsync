@@ -269,7 +269,43 @@ class InventoryService:
         # none" vs "we never looked"); every row carries in_scope_for_migration=false.
         # Migration scope is unchanged — nothing here is ever created on the target.
         tier_a = self._iter_tier_a_assets(catalogs, filtered)
-        return filtered + tier_a
+        # Governed-tag definitions (FEAT-2): the account-level tag policies actually
+        # used by the in-scope objects, captured so the import can CREATE them on the
+        # target before any SET TAGS (idempotent for a same-account target).
+        governed = self._iter_governed_tags(filtered)
+        return filtered + governed + tier_a
+
+    def _iter_governed_tags(self, objects: list[UCObject]) -> list[UCObject]:
+        """Emit a GOVERNED_TAG object per governed tag actually assigned on an
+        in-scope object (FEAT-2). Its definition carries the allowed-value list read
+        from the source account's tag-policies API. Best-effort: no policies (API
+        absent / not permitted) → nothing emitted, and the assign phase is unchanged.
+        """
+        from uc_sync.governance import read_governed_tag_policies
+
+        policies = read_governed_tag_policies(self.source)
+        if not policies:
+            return []
+        used_keys: set[str] = set()
+        for obj in objects:
+            for key in (obj.tags or {}):
+                used_keys.add(str(key))
+            for col_tags in (obj.definition or {}).get("column_tags", {}).values():
+                for key in (col_tags or {}):
+                    used_keys.add(str(key))
+        governed: list[UCObject] = []
+        for key in sorted(used_keys):
+            if key not in policies:
+                continue  # free-form tag — no governed-tag definition to create
+            governed.append(
+                UCObject(
+                    object_type=ObjectType.GOVERNED_TAG,
+                    name=key,
+                    full_name=key,
+                    definition={"allowed_values": policies[key]},
+                )
+            )
+        return governed
 
     def _iter_tier_a_assets(
         self, catalogs: list[UCObject], in_scope: list[UCObject]

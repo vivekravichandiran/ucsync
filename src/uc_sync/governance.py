@@ -69,6 +69,55 @@ def read_tags(sql: Any, catalog: str) -> dict[str, Any]:
     return {"objects": objects, "columns": columns}
 
 
+def read_governed_tag_policies(client: Any) -> dict[str, list[str]]:
+    """Read the account's governed-tag policies from the tag-policies API (FEAT-2).
+
+    Returns ``{tag_key: [allowed value, …]}``. Governed tags are account-scoped, so
+    the source workspace's client sees the same set the target account has. A tag
+    with no restricted value list maps to an empty list. Best-effort: any read
+    failure (API absent, no permission) yields ``{}`` — governed-tag creation then
+    simply does nothing and the existing assign phase runs as before.
+    """
+    if client is None or not (hasattr(client, "paginate") or hasattr(client, "get")):
+        return {}
+    policies: dict[str, list[str]] = {}
+    try:
+        # The API paginates under "tag_policies"; fall back to a plain GET list.
+        if hasattr(client, "paginate"):
+            rows = list(client.paginate("/api/2.1/tag-policies", "tag_policies"))
+        else:
+            rows = (client.get("/api/2.1/tag-policies") or {}).get("tag_policies") or []
+    except Exception as exc:  # noqa: BLE001 - report-only, never fail inventory
+        print(f"[governance] tag-policies read skipped: {exc!r}")
+        return {}
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        key = row.get("tag_key") or row.get("key")
+        if not key:
+            continue
+        values = [
+            str(v.get("name"))
+            for v in (row.get("values") or [])
+            if isinstance(v, dict) and v.get("name") is not None
+        ]
+        policies[str(key)] = values
+    return policies
+
+
+def governed_tag_create_statement(tag_key: str, values: list[str]) -> str:
+    """``CREATE GOVERNED TAG `key` [VALUES ('v1', 'v2', …)]`` (FEAT-2).
+
+    Emitted per governed tag used by the migrated objects; run early on the target
+    (idempotent — a same-account target already has the tag) before any SET TAGS.
+    """
+    stmt = f"CREATE GOVERNED TAG {quote_identifier(tag_key)}"
+    if values:
+        rendered = ", ".join(f"'{escape_literal(v)}'" for v in values)
+        stmt += f" VALUES ({rendered})"
+    return stmt + ";"
+
+
 def _describe_policy(
     sql: Any, name: str, on_type: str, on_securable: str
 ) -> dict[str, str]:
