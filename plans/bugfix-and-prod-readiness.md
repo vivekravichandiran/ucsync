@@ -116,6 +116,13 @@ Status is in the heading: **FIXED**, **OPEN**, or **BY DESIGN** / **PROPOSED** (
 
 ---
 
+## Bugs found during live testing (Run 1, 2026-09-13)
+
+### 14. View names not re-qualified when a comment header precedes CREATE — **FIXED** (2026-09-13)
+1. **Bug:** Found in live Run 1 — all 7 views failed with `[SCHEMA_NOT_FOUND] catalog_ws_oesdot.analytics` (the warehouse's default catalog). Root cause: the bug #11 comment-preserving splitter now leaves the utility's `-- VIEW … / -- source= …` header lines at the START of each statement. `_CREATE_NAME_RE` and `_normalize_create_statement` were anchored on `^\s*CREATE`, so they stopped matching and the 2-part view name (SHOW CREATE VIEW emits `schema.view`, no catalog) was never re-qualified to 3-part → it resolved against the warehouse default catalog. Tables were unaffected (SHOW CREATE TABLE emits an absolute 3-part name). Exposed by FEAT-1 (all views now run on the single warehouse).
+2. **Solution:** Both the CREATE-name matcher and the normalizer now skip a leading run of `--` / `/* */` comment lines (via `_LEADING_COMMENTS`) while preserving them, so the view name is re-qualified and OR REPLACE is injected as before.
+3. **Test approach:** `test_qualify_2part_view_name_behind_comment_header`, `test_normalize_or_replace_behind_comment_header` (290 green). Live re-validation on the next run.
+
 ## By design (not a bug — noted so it isn't mistaken for one)
 
 ### 13. External volumes need a storage-path mapping file

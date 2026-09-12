@@ -57,3 +57,31 @@ def test_qualify_view_with_mixed_name():
     stmt = "CREATE VIEW cat.schema.`4g_summary` AS SELECT 1"
     out = _qualify_create_name(stmt, "tgt.schema.4g_summary")
     assert out == "CREATE VIEW `tgt`.`schema`.`4g_summary` AS SELECT 1"
+
+
+def test_qualify_2part_view_name_behind_comment_header():
+    """Regression: since #11 the splitter preserves the utility's ``-- …`` header
+    ahead of CREATE. The CREATE-name matcher must skip it and still re-qualify the
+    2-part view name (SHOW CREATE VIEW emits ``schema.view``) to 3 parts — otherwise
+    it resolves against the warehouse's default catalog (SCHEMA_NOT_FOUND)."""
+    stmt = (
+        "-- VIEW ai27_uc_gov_src.analytics.emp_summary\n"
+        "-- source=SHOW_CREATE\n"
+        "-- captured via SHOW CREATE TABLE `ai27_uc_gov_src`.`analytics`.`emp_summary`\n"
+        "CREATE VIEW analytics.emp_summary (dept, headcount)\n"
+        "AS SELECT dept, count(*) FROM ai27_uc_gov_src.hr.employees GROUP BY dept;"
+    )
+    out = _qualify_create_name(stmt, "ai27_uc_gov_src.analytics.emp_summary")
+    assert "CREATE VIEW `ai27_uc_gov_src`.`analytics`.`emp_summary`" in out
+    # The header comments are preserved (bug #11), and the body is untouched.
+    assert out.startswith("-- VIEW ai27_uc_gov_src.analytics.emp_summary")
+    assert "FROM ai27_uc_gov_src.hr.employees" in out
+
+
+def test_normalize_or_replace_behind_comment_header():
+    from uc_sync.package_import import _normalize_create_statement
+
+    stmt = "-- VIEW c.s.v\n-- source=SHOW_CREATE\nCREATE VIEW s.v AS SELECT 1;"
+    out = _normalize_create_statement(stmt)
+    assert "CREATE OR REPLACE VIEW s.v" in out
+    assert out.startswith("-- VIEW c.s.v")  # comment header preserved

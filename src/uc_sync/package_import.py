@@ -395,8 +395,18 @@ def quote_full_name(full_name: str) -> str:
 # is captured in full, not just its ``cat.schema`` prefix (which left the backticked
 # tail behind and produced a 4-part name → "requires a single-part namespace").
 # ``STORAGE CREDENTIAL`` is intentionally not matched — it is created over REST.
+# Leading whitespace + full-line ``--`` / ``/* */`` comment lines that may precede
+# the CREATE keyword. Since bug #11 the statement splitter PRESERVES comments, so a
+# captured DDL statement now carries its utility header (``-- VIEW …`` etc.) ahead of
+# CREATE; the CREATE-anchored logic must skip past these or a 2-part view name (from
+# SHOW CREATE VIEW) would never be re-qualified and would resolve against the
+# warehouse's default catalog.
+_LEADING_COMMENTS = r"(?:[ \t]*(?:--[^\n]*|/\*.*?\*/)[ \t]*\n)*[ \t\r\n]*"
+_LEADING_COMMENTS_RE = re.compile(r"^" + _LEADING_COMMENTS, re.IGNORECASE | re.DOTALL)
+
 _CREATE_NAME_RE = re.compile(
-    r"^(\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMPORARY\s+)?"
+    r"^(" + _LEADING_COMMENTS +
+    r"CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMPORARY\s+)?"
     r"(?:EXTERNAL\s+|MATERIALIZED\s+|STREAMING\s+)?"
     r"(?:TABLE|VIEW|FUNCTION|VOLUME|SCHEMA|CATALOG|LOCATION)\s+"
     r"(?:IF\s+NOT\s+EXISTS\s+)?)"
@@ -430,16 +440,22 @@ def _qualify_create_name(statement: str, target_full_name: str) -> str:
 
 
 def _normalize_create_statement(statement: str) -> str:
-    """Inject IF NOT EXISTS / OR REPLACE for idempotent CREATE_OR_SKIP imports."""
+    """Inject IF NOT EXISTS / OR REPLACE for idempotent CREATE_OR_SKIP imports.
 
-    text = statement.strip()
+    Leading ``--`` / ``/* */`` comment lines (preserved by the splitter since bug #11)
+    are skipped to locate CREATE and re-attached, so the header comment never blocks
+    the normalization."""
+
+    prefix_m = _LEADING_COMMENTS_RE.match(statement)
+    prefix = prefix_m.group(0) if prefix_m else ""
+    text = statement[len(prefix):].strip()
     if not text:
-        return text
+        return statement
     upper = text.upper()
     if not upper.startswith("CREATE"):
-        return text
+        return statement
     if " IF NOT EXISTS " in upper or upper.startswith("CREATE OR REPLACE"):
-        return text
+        return prefix + text
 
     # Views / metric views / functions: prefer OR REPLACE for re-runs.
     for kind in (
@@ -450,7 +466,7 @@ def _normalize_create_statement(statement: str) -> str:
     ):
         token = f"CREATE {kind} "
         if upper.startswith(token):
-            return "CREATE OR REPLACE " + text[len("CREATE ") :]
+            return prefix + "CREATE OR REPLACE " + text[len("CREATE ") :]
 
     # Catalogs / schemas / tables / volumes / locations / credentials.
     match = re.match(
@@ -460,8 +476,8 @@ def _normalize_create_statement(statement: str) -> str:
         text,
     )
     if match:
-        return f"{match.group(1)}IF NOT EXISTS {match.group(2)}"
-    return text
+        return f"{prefix}{match.group(1)}IF NOT EXISTS {match.group(2)}"
+    return prefix + text
 
 
 def _is_already_exists_error(message: str) -> bool:
