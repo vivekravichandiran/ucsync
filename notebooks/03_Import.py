@@ -105,9 +105,10 @@ dbutils.widgets.dropdown("dry_run", "false", ["true", "false"])
 # copy_volume_data is on (volume bytes are not in the bundle). Blank in airgap / when
 # the toggle is off.
 dbutils.widgets.text("source_workspace_url", "")
-dbutils.widgets.text("source_client_id", "")
-dbutils.widgets.text("source_secret_scope", "")
-dbutils.widgets.text("source_secret_key", "")
+dbutils.widgets.text("source_client_id", "")       # plaintext (never a secret)
+dbutils.widgets.text("source_client_secret", "")   # plaintext secret (option 1)
+dbutils.widgets.text("source_secret_scope", "")    # secret scope (option 2)
+dbutils.widgets.text("source_secret_key", "")      # secret key   (option 2)
 
 # COMMAND ----------
 
@@ -125,6 +126,7 @@ cfg = from_sources({
     "preflight_enforce": dbutils.widgets.get("preflight_enforce"),
     "source_workspace_url": dbutils.widgets.get("source_workspace_url"),
     "source_client_id": dbutils.widgets.get("source_client_id"),
+    "source_client_secret": dbutils.widgets.get("source_client_secret"),
     "source_secret_scope": dbutils.widgets.get("source_secret_scope"),
     "source_secret_key": dbutils.widgets.get("source_secret_key"),
     **{t: dbutils.widgets.get(t) for t in (*CREATE_TOGGLES, *APPLY_TOGGLES)},

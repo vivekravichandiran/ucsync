@@ -161,6 +161,7 @@
           "preflight_enforce": "${preflight_enforce}",
           "source_workspace_url": "${source_workspace_url}",
           "source_client_id": "${source_client_id}",
+          "source_client_secret": "${source_client_secret}",
           "source_secret_scope": "${source_secret_scope}",
           "source_secret_key": "${source_secret_key}"
         }

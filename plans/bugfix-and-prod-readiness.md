@@ -118,6 +118,11 @@ Status is in the heading: **FIXED**, **OPEN**, or **BY DESIGN** / **PROPOSED** (
 
 ## Bugs found during live testing (Run 1, 2026-09-13)
 
+### 15. FEAT-4 import stage couldn't authenticate to source in a plaintext-secret env — **FIXED** (2026-09-13)
+1. **Bug:** Found while wiring FEAT-4 live — notebook 03 read only `source_secret_scope`/`source_secret_key` for source auth, but this env authenticates with a plaintext `source_client_secret` (no secret scope), so the volume-copy stage had no way to reach the source. Notebook 02 already supports both; notebook 03 didn't.
+2. **Solution:** Mirror notebook 02 in notebook 03 — add the `source_client_secret` widget + `from_sources` entry (and `${source_client_secret}` on the e2e import task), so the import stage supports both plaintext-secret and secret-scope source auth.
+3. **Test approach:** 290 unit tests green; FEAT-4 live copy validated on the follow-up run.
+
 ### 14. View names not re-qualified when a comment header precedes CREATE — **FIXED** (2026-09-13)
 1. **Bug:** Found in live Run 1 — all 7 views failed with `[SCHEMA_NOT_FOUND] catalog_ws_oesdot.analytics` (the warehouse's default catalog). Root cause: the bug #11 comment-preserving splitter now leaves the utility's `-- VIEW … / -- source= …` header lines at the START of each statement. `_CREATE_NAME_RE` and `_normalize_create_statement` were anchored on `^\s*CREATE`, so they stopped matching and the 2-part view name (SHOW CREATE VIEW emits `schema.view`, no catalog) was never re-qualified to 3-part → it resolved against the warehouse default catalog. Tables were unaffected (SHOW CREATE TABLE emits an absolute 3-part name). Exposed by FEAT-1 (all views now run on the single warehouse).
 2. **Solution:** Both the CREATE-name matcher and the normalizer now skip a leading run of `--` / `/* */` comment lines (via `_LEADING_COMMENTS`) while preserving them, so the view name is re-qualified and OR REPLACE is injected as before.
