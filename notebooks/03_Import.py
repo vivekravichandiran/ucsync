@@ -331,11 +331,19 @@ if cfg.copy_volume_data:
             # FEAT-1: persist the control table through the import WAREHOUSE executor
             # (reliable), not the job-cluster Spark session. A control failure must not
             # silently fall back — surface it (a fallback would re-copy every file).
+            # The volume-copy control table lives in the same ops schema as the
+            # audit/state tables; derive its name from cfg.state_table
+            # ({ops_catalog}.{ops_schema}.uc_sync_state) — SyncConfig exposes the full
+            # table names, not ops_catalog/ops_schema separately.
+            _ctrl_table = (
+                cfg.state_table.rsplit(".", 1)[0] + ".uc_sync_volume_files"
+                if cfg.state_table else ""
+            )
             _control_kind = "warehouse"
             try:
-                _control = WarehouseVolumeCopyControl(
-                    warehouse_executor,
-                    f"{cfg.ops_catalog}.{cfg.ops_schema}.uc_sync_volume_files")
+                if not _ctrl_table:
+                    raise ValueError("no ops state_table configured")
+                _control = WarehouseVolumeCopyControl(warehouse_executor, _ctrl_table)
             except Exception as _cx:  # noqa: BLE001
                 _control_kind = f"in-memory (control table unavailable: {_cx!r})"
                 print(f"[volume-copy] {_control_kind}")
