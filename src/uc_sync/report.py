@@ -749,7 +749,7 @@ def build_report(
             # Report-only rows read as a Skipped variant (#12), never blank/SUCCESS.
             inv_status = list(_status_cells(o))
             if stage == "IMPORT" and inv_status and not inv_status[-1]:
-                inv_status[-1] = "SKIPPED (no target object)"
+                inv_status[-1] = _STATUS_STYLE["skipped_no_object"][0]
             ws_t.append([
                 o["full_name"], "false", _cell(o, "comment"), o.get("owner") or "",
                 "inventory-only — report-only Tier-A AI asset (not migrated)",
