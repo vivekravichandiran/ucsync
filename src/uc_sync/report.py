@@ -193,37 +193,31 @@ def _render_export_status(entry: Optional[dict[str, str]]) -> str:
 
 
 def _render_import_status(entry: Optional[dict[str, str]]) -> str:
-    """Human-readable import outcome for an object row.
-
-    Storage credentials / external locations created outside the utility surface
-    as ``SKIP_CREATE_DISABLED`` (create toggle off) — rendered as an explicit
-    SKIPPED so the reader never mistakes "we didn't touch it" for "it imported".
+    """Human-readable import outcome for an object row, using the ONE wsmig status
+    vocabulary (bug #19) so the per-type sheets match the Summary roll-up exactly —
+    Created / Created (warning) / Updated / Adopted (pre-existing) / Skipped (unchanged)
+    / Deferred (not selected) / Skipped (no target object) / Manual step / FAILED — and
+    a reader never sees two different labels ("SUCCESS (UNCHANGED)" vs "ALREADY EXISTS
+    (skipped)") for the same kind of outcome. Failures and manual steps keep their
+    message tail; a dry run reads as a validation.
     """
     if not entry:
         return ""  # no import in this stage (inventory/export reports)
     status, action, msg = entry["status"], entry["action"], entry["message"]
     tail = f": {msg[:200]}" if msg else ""
-    # #12 / FEAT-5: a report-only object is never "SUCCESS (REPORT_ONLY)" — it reads
-    # as a Skipped variant (nothing was applied to a target object).
-    if action in ("REPORT_ONLY", "SKIP_REPORT_ONLY"):
-        return "SKIPPED (no target object)"
-    if action == "SKIP_CREATE_DISABLED":
-        return "SKIPPED — not created by utility (create toggle off; pre-existing)"
-    if action == "SKIP_FILTERED":
-        return "SKIPPED — excluded by import scope filter"
-    if status == "FAILURE":
+    key = _wsmig_status_key(entry)
+    if key == "failed":
         return f"FAILED{tail}"
-    if status == "MANUAL_ACTION_REQUIRED":
+    if key == "manual":
         return f"MANUAL ACTION REQUIRED{tail}"
+    # Report-only objects read as "Skipped (no target object)" regardless of their
+    # PENDING status — checked before the dry-run branch below so they aren't mistaken
+    # for a dry run.
+    if key == "skipped_no_object":
+        return _STATUS_STYLE["skipped_no_object"][0]
     if status == "PENDING" or action == "DRY_RUN":
         return "DRY RUN (validated, not applied)"
-    if action == "SKIP_EXISTING":
-        return "ALREADY EXISTS (skipped)"
-    if action in ("CREATE", "CREATE_OR_SKIP"):
-        return "CREATED"
-    if status == "SUCCESS":
-        return f"SUCCESS ({action})" if action else "SUCCESS"
-    return f"{status} ({action})".strip()
+    return _STATUS_STYLE.get(key, ("", ""))[0] or (status or "")
 
 
 # --- Per-object-type sheet column specs -------------------------------------
@@ -461,22 +455,34 @@ def _wsmig_status_key(entry: Optional[dict[str, Any]]) -> str:
         return "skipped_no_object"
     status = str(entry.get("status") or "")
     action = str(entry.get("action") or "")
-    if action in ("REPORT_ONLY", "SKIP_REPORT_ONLY"):
+    delta_action = str(entry.get("delta_action") or "")
+    if action in ("REPORT_ONLY", "SKIP_REPORT_ONLY") or delta_action == "REPORT_ONLY":
         return "skipped_no_object"
     if status == "FAILURE":
         return "failed"
     if status == "MANUAL_ACTION_REQUIRED":
         return "manual"
+    if status == "SUCCESS_WITH_WARNINGS":
+        return "created_with_warning"
+    # A change applied to a PRE-EXISTING object (DDL / governance / grants / column
+    # delta) reads as "Updated" — never "Adopted"/"Skipped" (bug #19). Checked before
+    # the skip/adopt branches so a changed-but-pre-existing object isn't mislabeled.
+    if delta_action in (
+        "CHANGED", "REPLACED", "GOVERNANCE_UPDATED", "GRANTS_UPDATED", "COLUMN_ADDED"
+    ) or action == "COLUMN_ADDED":
+        return "updated"
     # Incremental skip: unchanged since a prior present run — a Skipped variant, never
-    # "Created" (bug #19: a skipped object must not read as created/applied).
-    if action == "UNCHANGED" or status == "UNCHANGED":
+    # "Created" (a skipped object must not read as created/applied).
+    if action == "UNCHANGED" or status == "UNCHANGED" or delta_action == "UNCHANGED":
+        # A pre-existing object with no delta is Adopted; a delta-gated one is Skipped.
+        if action in ("SKIP_CREATE_DISABLED", "SKIP_EXISTING"):
+            return "adopted"
         return "skipped"
+    # Pre-existing, adopted as-is (no change applied this run).
     if action in ("SKIP_CREATE_DISABLED", "SKIP_EXISTING"):
         return "adopted"
     if action == "SKIP_FILTERED":
         return "not_selected"
-    if action == "COLUMN_ADDED" or status == "SUCCESS_WITH_WARNINGS":
-        return "created_with_warning"
     if status in ("SUCCESS", "PENDING"):
         return "created"
     return "skipped"
@@ -804,7 +810,17 @@ def build_report(
         op_failed = bool(entry and str(entry.get("status")) == "FAILURE")
         if _object_rolled_back(*names) and not op_failed:
             return [_ROLLED_BACK]
-        return [_render_import_status(entry)]
+        if not entry:
+            return [""]
+        # A tag is a governance OP, not an object lifecycle event — render APPLIED /
+        # FAILED / DRY RUN (like grants), never the object create/update vocab.
+        status, action = entry.get("status"), entry.get("action")
+        if status == "PENDING" or action == "DRY_RUN":
+            return ["DRY RUN (validated, not applied)"]
+        if status == "FAILURE":
+            msg = str(entry.get("message") or "")
+            return [f"FAILED{': ' + msg[:200] if msg else ''}"]
+        return ["APPLIED"]
 
     def _grant_gov_status(*names: str) -> list[str]:
         """Grants sheet status ← APPLIED whenever the securable exists (grants run

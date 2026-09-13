@@ -335,12 +335,12 @@ def test_storage_sheets_status_skipped_vs_created(tmp_path):
     assert cred[0][-1] == "import_status"
     assert cred[1][0] == "cred_a"
     assert "/subscriptions/x/ac/conn" in cred[1]        # access connector captured
-    assert cred[1][-1] == "CREATED"
+    assert cred[1][-1] == "Created"
 
     loc = list(wb["External Locations"].iter_rows(values_only=True))
     assert loc[1][0] == "loc_a"
     assert "abfss://c@acct/p" in loc[1]                  # url captured
-    assert "SKIPPED" in loc[1][-1]                        # not created by utility
+    assert "Adopted" in loc[1][-1]                        # pre-existing; not created by utility
 
 
 def test_tags_and_grants_status_reflect_governance_not_create_skip(tmp_path):
@@ -380,7 +380,7 @@ def test_tags_and_grants_status_reflect_governance_not_create_skip(tmp_path):
     tag_rows = list(wb["Tags"].iter_rows(values_only=True))
     cat_tag = next(r for r in tag_rows[1:] if r[0] == "c")
     assert "not created by utility" not in str(cat_tag[-1])
-    assert "APPLY_TAGS" in str(cat_tag[-1]) or "SUCCESS" in str(cat_tag[-1])
+    assert "APPLIED" in str(cat_tag[-1])
     bad_tag = next(r for r in tag_rows[1:] if r[0] == "c.s.bad")
     assert "FAILED" in str(bad_tag[-1])
 
@@ -424,7 +424,7 @@ def test_stage_status_columns(tmp_path):
     )
     rows = list(load_workbook(imp)["Tables"].iter_rows(values_only=True))
     assert rows[0][-2] == "export_status" and rows[0][-1] == "import_status"
-    assert rows[1][-2] == "EXPORTED" and rows[1][-1] == "CREATED"
+    assert rows[1][-2] == "EXPORTED" and rows[1][-1] == "Created"
 
 
 def test_grants_sheet_has_level_column(tmp_path):

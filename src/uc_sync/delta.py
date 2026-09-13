@@ -35,6 +35,7 @@ REPLACED = "REPLACED"                 # view / function DDL changed → CREATE O
 CHANGED = "CHANGED"                   # table DDL changed → reported, not auto-altered
 UNCHANGED = "UNCHANGED"
 GOVERNANCE_UPDATED = "GOVERNANCE_UPDATED"
+GRANTS_UPDATED = "GRANTS_UPDATED"     # only grants changed on an existing object → "Updated"
 SOURCE_ABSENT = "SOURCE_ABSENT"       # in baseline, gone from source → reported, no drop
 
 # Prior ``last_sync_status`` values that mean the object IS present / already handled on
@@ -198,9 +199,11 @@ class DeltaPlan:
         elif governance_changed:
             action = GOVERNANCE_UPDATED
         elif grants_added or grants_removed:
-            # Only grants changed — no DDL/governance diff. Surface via grant rows;
-            # the object itself is otherwise unchanged.
-            action = UNCHANGED
+            # Only grants changed — no DDL/governance diff. The object's structure is
+            # unchanged but a grant WAS (re)applied, so this is an "Updated", not an
+            # UNCHANGED skip (bug #19: the report must not read a changed object as
+            # "Adopted"/skipped). Still surfaced via grant rows in delta_rows too.
+            action = GRANTS_UPDATED
         else:
             action = UNCHANGED
         return ObjectDelta(
