@@ -305,7 +305,9 @@ except Exception as _exc:  # noqa: BLE001 - ops tables are best-effort
 # default off; incremental via a control table (only new/modified files re-copied);
 # a >5 GB file is reported, not silently dropped. Best-effort: a copy failure is
 # recorded, never fails the governance migration itself.
+vol_copy_status = "disabled"
 if cfg.copy_volume_data:
+    vol_copy_status = "started"
     try:
         with open(f"{migrated}/inventory/objects.json") as _fh:
             _inv_rows = json.load(_fh)
@@ -314,10 +316,11 @@ if cfg.copy_volume_data:
             if str(r.get("object_type")) in ("VOLUME", "EXTERNAL_VOLUME")
         ]
         if not cfg.source_workspace_url:
-            print("[volume-copy] copy_volume_data=true but no source_workspace_url — "
-                  "cannot read source files; skipping (set source auth to enable).")
+            vol_copy_status = "skipped: no source_workspace_url (set source auth)"
+            print(f"[volume-copy] {vol_copy_status}")
         elif not _volumes:
-            print("[volume-copy] no volumes in scope to copy.")
+            vol_copy_status = "no volumes in scope"
+            print(f"[volume-copy] {vol_copy_status}")
         else:
             _secret = cfg.source_client_secret
             if not _secret and cfg.source_secret_scope and cfg.source_secret_key:
@@ -325,14 +328,17 @@ if cfg.copy_volume_data:
                     scope=cfg.source_secret_scope, key=cfg.source_secret_key)
             _src_client = WorkspaceClient(direct_workspace_auth(
                 cfg.source_workspace_url, cfg.source_client_id, _secret))
+            # FEAT-1: persist the control table through the import WAREHOUSE executor
+            # (reliable), not the job-cluster Spark session. A control failure must not
+            # silently fall back — surface it (a fallback would re-copy every file).
+            _control_kind = "warehouse"
             try:
-                # FEAT-1: persist the control table through the import WAREHOUSE
-                # executor (reliable), not the job-cluster Spark session.
                 _control = WarehouseVolumeCopyControl(
                     warehouse_executor,
                     f"{cfg.ops_catalog}.{cfg.ops_schema}.uc_sync_volume_files")
             except Exception as _cx:  # noqa: BLE001
-                print(f"[volume-copy] control table unavailable ({_cx!r}) — in-memory")
+                _control_kind = f"in-memory (control table unavailable: {_cx!r})"
+                print(f"[volume-copy] {_control_kind}")
                 _control = InMemoryVolumeCopyControl()
             _copier = VolumeDataCopier(_src_client, wc, control=_control)
             _all_copy = []
@@ -347,15 +353,25 @@ if cfg.copy_volume_data:
                     f"/Volumes/{_cat}/{_sch}/{_name}",
                     f"/Volumes/{_tgt_cat}/{_sch}/{_name}",
                 ))
+            _flush_status = "n/a"
             if isinstance(_control, WarehouseVolumeCopyControl):
-                _control.flush()
-            print(f"[volume-copy] {copy_summary(_all_copy)}")
+                try:
+                    _control.flush()
+                    _flush_status = "flushed"
+                except Exception as _fx:  # noqa: BLE001
+                    _flush_status = f"flush FAILED: {_fx!r}"
+                    print(f"[volume-copy] {_flush_status}")
+            vol_copy_status = (
+                f"control={_control_kind}; {copy_summary(_all_copy)}; flush={_flush_status}"
+            )
+            print(f"[volume-copy] {vol_copy_status}")
             for _r in _all_copy:
                 if _r.status in ("FAILED", "SKIPPED_TOO_LARGE"):
                     print(f"  [{_r.status}] {_r.source_path}: {_r.message[:160]}")
     except Exception as _exc:  # noqa: BLE001 - volume data copy is best-effort
         import traceback
-        print(f"[volume-copy] skipped: {_exc!r}")
+        vol_copy_status = f"skipped: {_exc!r}"
+        print(f"[volume-copy] {vol_copy_status}")
         traceback.print_exc()
 
 summary = {}
@@ -374,7 +390,8 @@ for r in results:
 # red job and fixes the governance prerequisite, then re-runs.
 gov_failed = governance_failures(results)
 exit_payload = {"run_id": run_id, "by_status": summary,
-                "governance_failed": len(gov_failed)}
+                "governance_failed": len(gov_failed),
+                "volume_copy": vol_copy_status}
 if gov_failed:
     print(f"\n[import] {len(gov_failed)} GOVERNANCE FAILURE(S) — job will exit non-zero:")
     for r in gov_failed:
