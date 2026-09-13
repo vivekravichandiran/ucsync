@@ -244,26 +244,59 @@ def test_full_run_seeds_then_unchanged_rerun_is_zero_writes(tmp_path: Path):
     assert tbl.delta_action == "CREATED_NEW"
     assert tbl.ddl_hash and tbl.governance_hash  # fingerprints recorded for state
 
-    # Build the baseline exactly as the state upsert would (one row per object).
+    # Build the baseline exactly as the state upsert would (one row per object). The
+    # prior status is SUCCESS (present), so unchanged objects are skippable (bug #18).
     baseline = {
         row["full_name"]: {
             "object_type": row["object_type"],
             "ddl_hash": ddl_fingerprint(row),
             "governance_hash": governance_fingerprint(row),
             "grants": grant_fingerprint_set(row),
+            "last_sync_status": "SUCCESS",
         }
         for row in inv
     }
 
     # Second run: identical source + baseline → incremental, ALL unchanged, ZERO
-    # writes (no CREATE, no GRANT, no SET TAGS, no DESCRIBE).
+    # writes (no CREATE, no GRANT, no SET TAGS, no DESCRIBE). Skipped objects now
+    # report status UNCHANGED (bug #19), not a misleading SUCCESS.
     sql2 = RecordingSql()
     r2 = PackageImportEngine(
         str(root), sql2, dry_run=False, prior_state=baseline
     ).run()
     assert sql2.statements == [], sql2.statements
-    assert all(r.status in ("SUCCESS",) for r in r2)
+    assert all(r.status in ("UNCHANGED",) for r in r2)
     assert all(r.delta_action == "UNCHANGED" for r in r2)
+
+
+def test_prior_failure_is_reattempted_not_skipped(tmp_path: Path):
+    """Bug #18: an object that FAILED last run must be re-attempted on the next
+    incremental even when the source is unchanged — never skipped as a silent
+    success that hides a missing/failed target object."""
+    inv = _inventory()
+    root = _bundle(tmp_path, inv)
+    # Baseline with identical fingerprints but the TABLE's prior status = FAILURE.
+    baseline = {
+        row["full_name"]: {
+            "object_type": row["object_type"],
+            "ddl_hash": ddl_fingerprint(row),
+            "governance_hash": governance_fingerprint(row),
+            "grants": grant_fingerprint_set(row),
+            "last_sync_status": (
+                "FAILURE" if row["object_type"] == "TABLE" else "SUCCESS"
+            ),
+        }
+        for row in inv
+    }
+    sql = RecordingSql()
+    r = PackageImportEngine(
+        str(root), sql, dry_run=False, prior_state=baseline
+    ).run()
+    tbl = next(x for x in r if x.object_type == "TABLE")
+    # Re-attempted in full (not the UNCHANGED skip), so its CREATE actually runs.
+    assert tbl.delta_action == "CREATED_NEW"
+    assert tbl.status != "UNCHANGED"
+    assert any(s.upper().startswith("CREATE TABLE") for s in sql.statements)
 
 
 def test_incremental_applies_only_governance_delta(tmp_path: Path):

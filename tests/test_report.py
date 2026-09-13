@@ -4,6 +4,53 @@ from __future__ import annotations
 from uc_sync.report import build_report
 
 
+def test_volume_data_copy_sheet_present_only_when_results_given(tmp_path):
+    """Bug #17: FEAT-4 file-copy results must surface in the report as a 'Volume Data
+    Copy' sheet (with a roll-up), and only when the caller supplies them."""
+    from openpyxl import load_workbook
+
+    objects = [{"object_type": "VOLUME", "full_name": "c.s.v", "owner": "me",
+                "tags": {}, "grants": []}]
+    copy_rows = [
+        {"volume": "c.s.v", "source_path": "/Volumes/c/s/v/a.csv",
+         "target_path": "/Volumes/c/s/v/a.csv", "status": "COPIED", "bytes_copied": 12},
+        {"volume": "c.s.v", "source_path": "/Volumes/c/s/v/b.csv",
+         "target_path": "/Volumes/c/s/v/b.csv", "status": "SKIPPED_UNCHANGED",
+         "bytes_copied": 0, "message": "unchanged since last copy"},
+        {"volume": "c.s.v", "source_path": "/Volumes/c/s/v/big.bin",
+         "target_path": "/Volumes/c/s/v/big.bin", "status": "SKIPPED_TOO_LARGE",
+         "bytes_copied": 0, "message": "> 5 GB"},
+    ]
+    # Without results → no sheet.
+    out0 = tmp_path / "no_copy.xlsx"
+    build_report(objects, str(out0), stage="IMPORT",
+                 import_results=[{"target_full_name": "c.s.v", "status": "SUCCESS"}],
+                 run_id="r1")
+    assert "Volume Data Copy" not in load_workbook(out0).sheetnames
+
+    # With results → sheet present, rows + roll-up rendered.
+    out = tmp_path / "copy.xlsx"
+    build_report(objects, str(out), stage="IMPORT",
+                 import_results=[{"target_full_name": "c.s.v", "status": "SUCCESS"}],
+                 volume_copy_results=copy_rows, run_id="r1")
+    wb = load_workbook(out)
+    assert "Volume Data Copy" in wb.sheetnames
+    text = "\n".join(
+        str(r) for r in wb["Volume Data Copy"].iter_rows(values_only=True)
+    )
+    assert "Copied" in text and "Skipped (unchanged)" in text and "Skipped (>5 GB)" in text
+    assert "bytes copied" in text  # roll-up footer
+
+
+def test_unchanged_action_reads_as_skipped_not_created(tmp_path):
+    """Bug #19: an incremental UNCHANGED skip must roll up as a Skipped variant, never
+    'Created' — otherwise a skipped (or previously-failed) object reads as applied."""
+    from uc_sync.report import _wsmig_status_key
+    assert _wsmig_status_key({"status": "UNCHANGED", "action": "UNCHANGED"}) == "skipped"
+    # (regression guard: a plain SUCCESS still reads as created)
+    assert _wsmig_status_key({"status": "SUCCESS", "action": "CREATE"}) == "created"
+
+
 def test_build_report_has_governance_sheets(tmp_path):
     objects = [
         {"object_type": "CATALOG", "full_name": "c", "owner": "me",

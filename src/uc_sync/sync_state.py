@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS {full_name} (
   grants_path STRING,
   error_code STRING,
   error_message STRING,
+  detail STRING,
   utility_version STRING,
   updated_at TIMESTAMP
 ) USING DELTA
@@ -53,6 +54,7 @@ STATE_COLUMNS = [
     "grants_path",
     "error_code",
     "error_message",
+    "detail",
     "utility_version",
     "updated_at",
 ]
@@ -62,7 +64,54 @@ _STATE_UPGRADE_COLUMNS = [
     ("ddl_hash", "STRING"),
     ("governance_hash", "STRING"),
     ("grants_json", "STRING"),
+    ("detail", "STRING"),
 ]
+
+# --- last_sync_status vocabulary (bug #19) ----------------------------------
+# The durable per-object outcome. Fuller than the old SUCCESS/FAILURE/PENDING so the
+# roll-up is honest and the table is readable:
+#   SUCCESS   - created / applied on target THIS run
+#   UNCHANGED - incremental skip: unchanged since a prior present run (zero writes)
+#   ADOPTED   - pre-existing on target and left as-is (BYO / create disabled)
+#   REPORT_ONLY - a report-only type (never migrated: streaming tables, Tier-A, etc.)
+#   SKIPPED   - deliberately not applied (filtered out / out of scope)
+#   MANUAL_ACTION_REQUIRED - needs a manual step (e.g. external object w/o mapping)
+#   PENDING   - dry-run / not yet applied
+#   FAILURE   - attempted and failed
+SYNC_STATUS_SUCCESS = "SUCCESS"
+SYNC_STATUS_UNCHANGED = "UNCHANGED"
+SYNC_STATUS_ADOPTED = "ADOPTED"
+SYNC_STATUS_REPORT_ONLY = "REPORT_ONLY"
+SYNC_STATUS_SKIPPED = "SKIPPED"
+SYNC_STATUS_MANUAL = "MANUAL_ACTION_REQUIRED"
+SYNC_STATUS_PENDING = "PENDING"
+SYNC_STATUS_FAILURE = "FAILURE"
+
+
+def _sync_status_for(result: Mapping[str, Any]) -> str:
+    """Map an import/export result's ``status`` + ``action`` to a durable state
+    status (see the vocabulary above). Kept in one place so the state table, the audit
+    table and the report all agree."""
+    status = str(result.get("status") or "").upper()
+    action = str(result.get("action") or "").upper()
+    delta_action = str(result.get("delta_action") or "").upper()
+    if action in {"REPORT_ONLY", "SKIP_REPORT_ONLY"} or delta_action == "REPORT_ONLY":
+        return SYNC_STATUS_REPORT_ONLY
+    if status in {"ERROR", "FAILED", "FAILURE"}:
+        return SYNC_STATUS_FAILURE
+    if status == "MANUAL_ACTION_REQUIRED" or action == "MANUAL_ACTION_REQUIRED":
+        return SYNC_STATUS_MANUAL
+    if action == "UNCHANGED" or delta_action == "UNCHANGED" or status == "UNCHANGED":
+        return SYNC_STATUS_UNCHANGED
+    if action in {"SKIP_EXISTING", "SKIP_CREATE_DISABLED"} or status == "SKIP_EXISTING":
+        return SYNC_STATUS_ADOPTED
+    if action == "SKIP_FILTERED" or status == "SKIP_FILTERED":
+        return SYNC_STATUS_SKIPPED
+    if status in {"SUCCESS", "MATCH", "CREATE_OR_SKIP"} or status.startswith("SUCCESS"):
+        return SYNC_STATUS_SUCCESS
+    if status in {"PENDING", "DRY_RUN", "SKIPPED"}:
+        return SYNC_STATUS_PENDING if status != "SKIPPED" else SYNC_STATUS_SKIPPED
+    return SYNC_STATUS_FAILURE
 
 
 def ensure_state_schema_sql(full_name: str) -> Optional[str]:
@@ -135,15 +184,17 @@ class SyncStateService:
         """Read the current per-object baseline for an incremental run.
 
         Returns ``{source_full_name: {object_type, ddl_hash, governance_hash,
-        grants}}`` — one row per object (the MERGE keeps the latest). ``grants`` is
-        the parsed explicit-grant set (``{principal: [privileges]}``). A missing
-        table / unreadable state yields an empty baseline → the run is **full**.
+        grants, last_sync_status}}`` — one row per object (the MERGE keeps the latest).
+        ``grants`` is the parsed explicit-grant set (``{principal: [privileges]}``);
+        ``last_sync_status`` is the prior run's outcome so the delta planner can
+        re-attempt anything not cleanly applied (bug #18). A missing table / unreadable
+        state yields an empty baseline → the run is **full**.
         """
         try:
             self.ensure_table()
             rows = self.spark.sql(
                 "SELECT source_full_name, object_type, ddl_hash, governance_hash, "
-                f"grants_json FROM {self.full_name}"
+                f"grants_json, last_sync_status FROM {self.full_name}"
             ).collect()
         except Exception:  # noqa: BLE001 - no baseline yet → full run
             return {}
@@ -163,6 +214,7 @@ class SyncStateService:
                 "ddl_hash": str(data.get("ddl_hash") or ""),
                 "governance_hash": str(data.get("governance_hash") or ""),
                 "grants": grants if isinstance(grants, dict) else {},
+                "last_sync_status": str(data.get("last_sync_status") or ""),
             }
         return baseline
 
@@ -212,13 +264,17 @@ def state_row_from_import(
     utility_version: str,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
-    status = str(result.get("status") or "").upper()
-    if status in {"SUCCESS", "MATCH", "SKIP_EXISTING"}:
-        sync_status = "SUCCESS"
-    elif status in {"PENDING", "DRY_RUN", "SKIPPED", "MANUAL_ACTION_REQUIRED"}:
-        sync_status = "PENDING" if status != "MANUAL_ACTION_REQUIRED" else "MANUAL_ACTION_REQUIRED"
+    sync_status = _sync_status_for(result)
+    # Split the two message channels (bug #19): error_message carries ONLY a real
+    # failure; detail carries informational context (skip reason, applied note, DDL).
+    err_text = str(result.get("error_message") or "")
+    info_text = str(result.get("message") or "")
+    if sync_status == SYNC_STATUS_FAILURE:
+        error_message = (err_text or info_text)[:4000]
+        detail = ""
     else:
-        sync_status = "FAILURE"
+        error_message = ""
+        detail = (info_text or err_text)[:4000]
     return {
         "batch_id": batch_id,
         "run_id": run_id,
@@ -249,9 +305,8 @@ def state_row_from_import(
         "ddl_path": str(result.get("ddl_path") or ""),
         "grants_path": str(result.get("grants_path") or ""),
         "error_code": str(result.get("error_code") or ""),
-        "error_message": str(
-            result.get("error_message") or result.get("message") or ""
-        )[:4000],
+        "error_message": error_message,
+        "detail": detail,
         "utility_version": utility_version,
         "updated_at": now,
     }

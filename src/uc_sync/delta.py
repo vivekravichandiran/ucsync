@@ -36,6 +36,15 @@ CHANGED = "CHANGED"                   # table DDL changed → reported, not auto
 UNCHANGED = "UNCHANGED"
 GOVERNANCE_UPDATED = "GOVERNANCE_UPDATED"
 SOURCE_ABSENT = "SOURCE_ABSENT"       # in baseline, gone from source → reported, no drop
+
+# Prior ``last_sync_status`` values that mean the object IS present / already handled on
+# the target, so an unchanged source may be safely skipped. ANY other definite status
+# (FAILURE, MANUAL_ACTION_REQUIRED, SKIPPED, PENDING) means it was NOT cleanly applied,
+# so it must be re-attempted even when the source fingerprint is unchanged — bug #18:
+# a green incremental run must never mask an object that is missing/failed on target.
+# A blank/unknown status (e.g. a legacy baseline written before this column existed) is
+# treated as present so the first post-upgrade incremental stays idempotent.
+_PRIOR_PRESENT_STATES = {"SUCCESS", "ADOPTED", "UNCHANGED", "REPORT_ONLY"}
 GRANT_ADDED = "GRANT_ADDED"
 GRANT_REMOVED = "GRANT_REMOVED"       # gone from source → reported, never revoked
 REPORT_ONLY = "REPORT_ONLY"           # pipeline-managed / Tier-A asset → reported, never migrated
@@ -86,10 +95,12 @@ class ObjectDelta:
 class DeltaPlan:
     """Per-object delta decisions computed from the current bundle vs. the baseline.
 
-    ``baseline`` is ``{full_name: {"ddl_hash", "governance_hash", "grants"}}`` read
-    from ``uc_sync_state`` (``grants`` is the normalised explicit-grant set dict). An
-    empty / absent baseline means a **full** run: every object is ``CREATED_NEW`` and
-    nothing is gated.
+    ``baseline`` is ``{full_name: {"ddl_hash", "governance_hash", "grants",
+    "last_sync_status"}}`` read from ``uc_sync_state`` (``grants`` is the normalised
+    explicit-grant set dict; ``last_sync_status`` is the prior run's outcome). An empty
+    / absent baseline means a **full** run: every object is ``CREATED_NEW`` and nothing
+    is gated. An object whose prior status was not "present" (bug #18) is re-attempted
+    even when unchanged, so a prior FAILURE is never skipped as a silent success.
     """
 
     def __init__(
@@ -149,6 +160,20 @@ class DeltaPlan:
                 full_name, object_type, CREATED_NEW,
                 governance_changed=bool(cur_gov and cur_gov != governance_fingerprint({})),
                 grants_added=cur_grants,
+            )
+        prior_status = str(prior.get("last_sync_status") or "").upper()
+        if prior_status and prior_status not in _PRIOR_PRESENT_STATES:
+            # Bug #18: last run did NOT cleanly apply this object (e.g. FAILURE /
+            # MANUAL_ACTION_REQUIRED). Re-attempt it in full even though the source
+            # fingerprint is unchanged — never skip it as UNCHANGED, which would leave
+            # a missing/failed target object reported as a success.
+            return ObjectDelta(
+                full_name, object_type, CREATED_NEW,
+                governance_changed=bool(
+                    cur_gov and cur_gov != governance_fingerprint({})
+                ),
+                grants_added=cur_grants,
+                reason=f"prior run status={prior_status} → re-attempt (not skipped)",
             )
         prior_grants = dict(prior.get("grants") or {})
         grants_added = {

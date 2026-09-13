@@ -341,6 +341,41 @@ def test_import_results_produce_audit_and_state_rows():
     assert bad["last_sync_status"] == "FAILURE"
 
 
+def test_state_status_vocabulary_and_message_split():
+    """Bug #19: fuller last_sync_status vocabulary + error_message reserved for real
+    failures while informational text (skip reason, etc.) goes to `detail`."""
+    from uc_sync.sync_state import state_row_from_import
+
+    def _row(**result):
+        return state_row_from_import(
+            batch_id="b", run_id="r", result=result, ran_by="me", utility_version="9",
+        )
+
+    # UNCHANGED skip → status UNCHANGED, message → detail, error_message empty.
+    unchanged = _row(
+        object_type="TABLE", source_full_name="s.s.t", action="UNCHANGED",
+        status="UNCHANGED", message="unchanged since last run (incremental: skipped)",
+    )
+    assert unchanged["last_sync_status"] == "UNCHANGED"
+    assert unchanged["error_message"] == ""
+    assert "unchanged since last run" in unchanged["detail"]
+
+    # A real failure → error_message carries the error, detail is empty.
+    failed = _row(
+        object_type="EXTERNAL_TABLE", source_full_name="s.s.e", status="FAILURE",
+        error_code="EXTERNAL_CREATE_FAILED", error_message="DELTA property mismatch",
+    )
+    assert failed["last_sync_status"] == "FAILURE"
+    assert "DELTA property mismatch" in failed["error_message"]
+    assert failed["detail"] == ""
+
+    # Pre-existing (adopted) and report-only get their own honest states.
+    assert _row(object_type="TABLE", source_full_name="s.s.a",
+                action="SKIP_EXISTING", status="SKIP_EXISTING")["last_sync_status"] == "ADOPTED"
+    assert _row(object_type="MONITOR", source_full_name="s.s.m",
+                action="REPORT_ONLY", status="PENDING")["last_sync_status"] == "REPORT_ONLY"
+
+
 def _owner_package(tmp_path: Path) -> Path:
     """An external location + a catalog whose managed location is that EL, with
     an `OWNER TO <source-owner>` grant on the EL (as the export bundle emits)."""

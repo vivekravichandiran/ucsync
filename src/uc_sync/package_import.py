@@ -1066,7 +1066,7 @@ class PackageImportEngine:
             and self.delta_plan is not None
             and self.delta_plan.should_skip_object(source_full_name)
         ):
-            result.status = "SUCCESS"
+            result.status = "UNCHANGED"
             result.action = "UNCHANGED"
             result.delta_action = "UNCHANGED"
             result.message = "unchanged since last run (incremental: skipped)"

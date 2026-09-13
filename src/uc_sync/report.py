@@ -467,6 +467,10 @@ def _wsmig_status_key(entry: Optional[dict[str, Any]]) -> str:
         return "failed"
     if status == "MANUAL_ACTION_REQUIRED":
         return "manual"
+    # Incremental skip: unchanged since a prior present run — a Skipped variant, never
+    # "Created" (bug #19: a skipped object must not read as created/applied).
+    if action == "UNCHANGED" or status == "UNCHANGED":
+        return "skipped"
     if action in ("SKIP_CREATE_DISABLED", "SKIP_EXISTING"):
         return "adopted"
     if action == "SKIP_FILTERED":
@@ -486,6 +490,7 @@ def build_report(
     export_results: Optional[list[dict[str, Any]]] = None,
     import_results: Optional[list[dict[str, Any]]] = None,
     delta_rows: Optional[list[dict[str, Any]]] = None,
+    volume_copy_results: Optional[list[dict[str, Any]]] = None,
     run_id: str = "",
     workspace_url: str = "",
 ) -> str:
@@ -937,6 +942,55 @@ def build_report(
                 g.get("principal_type"),
                 ", ".join(g.get("privileges") or []),
             ] + st)
+
+    # Volume Data Copy (FEAT-4, bug #17): the per-file source→target file copy the
+    # import performs when copy_volume_data is on. This is separate from the volume
+    # OBJECT migration above — it reports the file movement (copied / skipped-unchanged
+    # / skipped-too-large / failed) so the copy is visible in the report, not only in
+    # the run's exit payload. Only rendered when the caller supplies results.
+    if volume_copy_results is not None:
+        vc = _sheet(
+            "Volume Data Copy",
+            ["volume", "status", "source_path", "target_path", "bytes_copied", "message"],
+        )
+        _VC_STATUS_STYLE = {
+            "COPIED": ("Copied", "D1FAE5"),
+            "SKIPPED_UNCHANGED": ("Skipped (unchanged)", "E5E7EB"),
+            "SKIPPED_TOO_LARGE": ("Skipped (>5 GB)", "FDE68A"),
+            "FAILED": ("FAILED", "FEE2E2"),
+        }
+        vc_rollup: dict[str, int] = {}
+        vc_bytes = 0
+        # FAILED first, then copied, then the skip variants — mirrors the spine order.
+        _VC_ORDER = ("FAILED", "COPIED", "SKIPPED_UNCHANGED", "SKIPPED_TOO_LARGE")
+        for r in sorted(
+            volume_copy_results,
+            key=lambda x: _VC_ORDER.index(str(x.get("status")))
+            if str(x.get("status")) in _VC_ORDER else len(_VC_ORDER),
+        ):
+            st = str(r.get("status") or "")
+            vc_rollup[st] = vc_rollup.get(st, 0) + 1
+            vc_bytes += int(r.get("bytes_copied") or 0)
+            label, colour = _VC_STATUS_STYLE.get(st, (st or "—", "FFFFFF"))
+            vc.append([
+                str(r.get("volume") or ""), label,
+                str(r.get("source_path") or ""), str(r.get("target_path") or ""),
+                int(r.get("bytes_copied") or 0), str(r.get("message") or "")[:200],
+            ])
+            vc.cell(row=vc.max_row, column=2).fill = _fill(colour)
+        vc.append([])
+        hrow = vc.max_row + 1
+        vc.append(["Copy roll-up", "count"])
+        for c in vc[hrow]:
+            c.font = Font(bold=True, color="FFFFFF", name=_WSMIG_FONT)
+            c.fill = _fill(_WSMIG_SECTION_BG)
+        for key in _VC_ORDER:
+            if key in vc_rollup:
+                label, colour = _VC_STATUS_STYLE[key]
+                vc.append([label, vc_rollup[key]])
+                vc.cell(row=vc.max_row, column=1).fill = _fill(colour)
+        vc.append(["TOTAL files", sum(vc_rollup.values())])
+        vc.append(["bytes copied", vc_bytes])
 
     # UC Volumes are mounted via FUSE, which only supports sequential writes.
     # openpyxl.save() writes a ZIP archive and needs a seekable target, so it

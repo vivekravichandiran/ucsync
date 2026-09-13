@@ -221,42 +221,6 @@ print(f"delta: run mode = {_mode}"
       + (f"; {engine.delta_plan.unchanged_count()} unchanged (skipped)"
          if engine.delta_plan else ""))
 
-# Clean migration report (spine + governance sheets) under reports/. The import
-# report carries the export_status forward from stage 02 (export_results.json)
-# alongside this stage's import_status, so it is the cumulative base report.
-try:
-    from uc_sync.report import build_report_from_file
-    inv = f"{migrated}/inventory/objects.json"
-    report_path = f"{_local(base)}/reports/import.xlsx"
-    export_results = []
-    _er = f"{migrated}/export_results.json"
-    if os.path.exists(_er):
-        with open(_er) as fh:
-            export_results = json.load(fh)
-    delta_rows = engine.delta_plan.delta_rows() if engine.delta_plan else []
-    if engine.delta_plan:
-        delta_rows = delta_rows + [
-            {"action": "UNCHANGED_COUNT",
-             "detail": engine.delta_plan.unchanged_count()}
-        ]
-    build_report_from_file(
-        inv, report_path, run_id=run_id, stage="IMPORT",
-        export_results=export_results,
-        import_results=[r.to_dict() for r in results],
-        delta_rows=delta_rows,
-        workspace_url=getattr(wc.auth, "host", ""),
-    )
-    print(f"report: {report_path}")
-except Exception as _exc:  # noqa: BLE001
-    import traceback
-    traceback.print_exc()
-    # Bug #4 — every run must produce its report; there is no opt-out. A failure to
-    # write the report always fails the run.
-    raise RuntimeError(
-        "report generation failed — a run must not complete without its report. "
-        f"Root cause: {_exc!r}"
-    )
-
 # Operations tables under {ops_catalog}.{ops_schema} on THIS (target) workspace:
 #   uc_sync_audit — one IMPORT row per object (append-only history).
 #   uc_sync_state — one row per source object (MERGE upsert), the per-object
@@ -306,6 +270,7 @@ except Exception as _exc:  # noqa: BLE001 - ops tables are best-effort
 # a >5 GB file is reported, not silently dropped. Best-effort: a copy failure is
 # recorded, never fails the governance migration itself.
 vol_copy_status = "disabled"
+volume_copy_report_rows = None  # FEAT-4 copy rows for the report (bug #17); None → sheet omitted
 if cfg.copy_volume_data:
     vol_copy_status = "started"
     try:
@@ -361,6 +326,7 @@ if cfg.copy_volume_data:
                     f"/Volumes/{_cat}/{_sch}/{_name}",
                     f"/Volumes/{_tgt_cat}/{_sch}/{_name}",
                 ))
+            volume_copy_report_rows = [_r.to_dict() for _r in _all_copy]
             _flush_status = "n/a"
             if isinstance(_control, WarehouseVolumeCopyControl):
                 try:
@@ -382,12 +348,50 @@ if cfg.copy_volume_data:
         print(f"[volume-copy] {vol_copy_status}")
         traceback.print_exc()
 
+# Clean migration report (spine + governance sheets) under reports/. Written AFTER the
+# volume-data copy so the report includes the FEAT-4 copy results (bug #17). The import
+# report carries the export_status forward from stage 02 (export_results.json) alongside
+# this stage's import_status, so it is the cumulative base report.
+try:
+    from uc_sync.report import build_report_from_file
+    inv = f"{migrated}/inventory/objects.json"
+    report_path = f"{_local(base)}/reports/import.xlsx"
+    export_results = []
+    _er = f"{migrated}/export_results.json"
+    if os.path.exists(_er):
+        with open(_er) as fh:
+            export_results = json.load(fh)
+    delta_rows = engine.delta_plan.delta_rows() if engine.delta_plan else []
+    if engine.delta_plan:
+        delta_rows = delta_rows + [
+            {"action": "UNCHANGED_COUNT",
+             "detail": engine.delta_plan.unchanged_count()}
+        ]
+    build_report_from_file(
+        inv, report_path, run_id=run_id, stage="IMPORT",
+        export_results=export_results,
+        import_results=[r.to_dict() for r in results],
+        delta_rows=delta_rows,
+        volume_copy_results=volume_copy_report_rows,
+        workspace_url=getattr(wc.auth, "host", ""),
+    )
+    print(f"report: {report_path}")
+except Exception as _exc:  # noqa: BLE001
+    import traceback
+    traceback.print_exc()
+    # Bug #4 — every run must produce its report; there is no opt-out. A failure to
+    # write the report always fails the run.
+    raise RuntimeError(
+        "report generation failed — a run must not complete without its report. "
+        f"Root cause: {_exc!r}"
+    )
+
 summary = {}
 for r in results:
     summary[r.status] = summary.get(r.status, 0) + 1
 print(json.dumps({"run_id": run_id, "by_status": summary}, indent=2))
 for r in results:
-    if r.status not in ("SUCCESS", "SKIP_EXISTING", "PENDING"):
+    if r.status not in ("SUCCESS", "SKIP_EXISTING", "PENDING", "UNCHANGED"):
         print(f"  [{r.status}] {r.object_type} {r.target_full_name}: {str(r.message)[:200]}")
 
 # Task 10 — a governance failure is NEVER a silently green run. The report and the
