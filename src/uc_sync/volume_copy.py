@@ -103,6 +103,66 @@ class SparkVolumeCopyControl:
         self._dirty.clear()
 
 
+class WarehouseVolumeCopyControl:
+    """Cross-run control store persisted through the import **SQL warehouse**
+    executor (FEAT-1: all replay/persistence SQL runs on the one serverless
+    warehouse, never the job-cluster Spark session). Uses plain SELECT + a batched
+    MERGE — no Spark DataFrame API — so it is reliable on the same compute as the
+    rest of the import. ``executor`` is any object with ``execute(sql) -> rows``
+    (e.g. ``RestSqlExecutor``)."""
+
+    def __init__(self, executor: Any, table: str) -> None:
+        self.executor = executor
+        self.table = table
+        executor.execute(
+            f"CREATE TABLE IF NOT EXISTS {table} (volume STRING, path STRING, "
+            "source_mtime BIGINT, copied_at TIMESTAMP) USING DELTA"
+        )
+        self._seen: dict[tuple[str, str], int] = {}
+        self._dirty: dict[tuple[str, str], int] = {}
+        try:
+            for row in executor.execute(
+                f"SELECT volume, path, source_mtime FROM {table}"
+            ) or []:
+                self._seen[(str(row[0]), str(row[1]))] = int(row[2] or 0)
+        except Exception:  # noqa: BLE001 - empty/new table → no prior state
+            pass
+
+    def needs_copy(self, volume: str, path: str, source_mtime: int) -> bool:
+        return self._seen.get((volume, path)) != source_mtime
+
+    def record(self, volume: str, path: str, source_mtime: int) -> None:
+        self._seen[(volume, path)] = source_mtime
+        self._dirty[(volume, path)] = source_mtime
+
+    @staticmethod
+    def _lit(text: str) -> str:
+        return "'" + str(text).replace("'", "''") + "'"
+
+    def flush(self) -> None:
+        """Upsert the recorded (volume, path, mtime) rows via one MERGE (batched in
+        chunks to keep each statement bounded)."""
+        if not self._dirty:
+            return
+        items = list(self._dirty.items())
+        for start in range(0, len(items), 200):
+            chunk = items[start:start + 200]
+            values = ", ".join(
+                f"({self._lit(vol)}, {self._lit(path)}, CAST({int(mtime)} AS BIGINT))"
+                for (vol, path), mtime in chunk
+            )
+            self.executor.execute(
+                f"MERGE INTO {self.table} t "
+                f"USING (SELECT * FROM VALUES {values} AS s(volume, path, source_mtime)) s "
+                "ON t.volume = s.volume AND t.path = s.path "
+                "WHEN MATCHED THEN UPDATE SET t.source_mtime = s.source_mtime, "
+                "  t.copied_at = current_timestamp() "
+                "WHEN NOT MATCHED THEN INSERT (volume, path, source_mtime, copied_at) "
+                "  VALUES (s.volume, s.path, s.source_mtime, current_timestamp())"
+            )
+        self._dirty.clear()
+
+
 @dataclass
 class VolumeCopyResult:
     volume: str

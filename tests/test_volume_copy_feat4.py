@@ -8,8 +8,48 @@ from uc_sync.volume_copy import (
     FILES_API_MAX_BYTES,
     InMemoryVolumeCopyControl,
     VolumeDataCopier,
+    WarehouseVolumeCopyControl,
     copy_summary,
 )
+
+
+class _FakeSqlExecutor:
+    """Records executed SQL; SELECT returns the current persisted rows (simulating a
+    warehouse-backed Delta control table)."""
+
+    def __init__(self):
+        self.statements: list[str] = []
+        self._rows: dict[tuple[str, str], int] = {}
+
+    def execute(self, sql):
+        self.statements.append(sql)
+        s = sql.strip().upper()
+        if s.startswith("SELECT"):
+            return [[v, p, m] for (v, p), m in self._rows.items()]
+        if s.startswith("MERGE"):
+            # Parse the VALUES tuples ('vol','path',CAST(n AS BIGINT)).
+            import re
+            for vol, path, mtime in re.findall(
+                r"\('([^']*)',\s*'([^']*)',\s*CAST\((\d+) AS BIGINT\)\)", sql
+            ):
+                self._rows[(vol, path)] = int(mtime)
+        return []
+
+
+def test_warehouse_control_persists_and_skips_across_instances():
+    """FEAT-1/FEAT-4: the control table persists via the warehouse executor; a fresh
+    control built on the same executor sees prior rows and skips unchanged files."""
+    ex = _FakeSqlExecutor()
+    c1 = WarehouseVolumeCopyControl(ex, "ops.ops.uc_sync_volume_files")
+    assert c1.needs_copy("c.s.v", "/Volumes/c/s/v/a.txt", 100) is True
+    c1.record("c.s.v", "/Volumes/c/s/v/a.txt", 100)
+    c1.flush()
+    assert any(s.strip().upper().startswith("CREATE TABLE") for s in ex.statements)
+    assert any(s.strip().upper().startswith("MERGE") for s in ex.statements)
+    # A new control instance (next run) loads the persisted row → skips unchanged.
+    c2 = WarehouseVolumeCopyControl(ex, "ops.ops.uc_sync_volume_files")
+    assert c2.needs_copy("c.s.v", "/Volumes/c/s/v/a.txt", 100) is False
+    assert c2.needs_copy("c.s.v", "/Volumes/c/s/v/a.txt", 200) is True  # modified
 
 
 class FakeSourceClient:

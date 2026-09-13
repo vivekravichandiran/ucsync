@@ -33,7 +33,7 @@ from uc_sync.import_engine import RestSqlExecutor
 from uc_sync.auth import local_workspace_auth, direct_workspace_auth
 from uc_sync.workspace_client import WorkspaceClient
 from uc_sync.volume_copy import (
-    VolumeDataCopier, SparkVolumeCopyControl, InMemoryVolumeCopyControl, copy_summary,
+    VolumeDataCopier, WarehouseVolumeCopyControl, InMemoryVolumeCopyControl, copy_summary,
 )
 from uc_sync.audit import AuditService, stage_audit_row
 from uc_sync.sync_state import SyncStateService, state_row_from_import
@@ -326,8 +326,11 @@ if cfg.copy_volume_data:
             _src_client = WorkspaceClient(direct_workspace_auth(
                 cfg.source_workspace_url, cfg.source_client_id, _secret))
             try:
-                _control = SparkVolumeCopyControl(
-                    spark, f"{cfg.ops_catalog}.{cfg.ops_schema}.uc_sync_volume_files")
+                # FEAT-1: persist the control table through the import WAREHOUSE
+                # executor (reliable), not the job-cluster Spark session.
+                _control = WarehouseVolumeCopyControl(
+                    warehouse_executor,
+                    f"{cfg.ops_catalog}.{cfg.ops_schema}.uc_sync_volume_files")
             except Exception as _cx:  # noqa: BLE001
                 print(f"[volume-copy] control table unavailable ({_cx!r}) — in-memory")
                 _control = InMemoryVolumeCopyControl()
@@ -344,7 +347,7 @@ if cfg.copy_volume_data:
                     f"/Volumes/{_cat}/{_sch}/{_name}",
                     f"/Volumes/{_tgt_cat}/{_sch}/{_name}",
                 ))
-            if isinstance(_control, SparkVolumeCopyControl):
+            if isinstance(_control, WarehouseVolumeCopyControl):
                 _control.flush()
             print(f"[volume-copy] {copy_summary(_all_copy)}")
             for _r in _all_copy:
