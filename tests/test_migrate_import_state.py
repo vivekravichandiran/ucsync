@@ -383,6 +383,45 @@ def test_state_last_action_vocabulary_and_message_split():
                 status="SUCCESS")["last_action"] == "skipped_create_disabled"
 
 
+def test_ensure_table_backfills_last_action_from_legacy_column():
+    """Live-regression: on an OLD state table (has last_sync_status, no last_action) the
+    upgrade must ADD last_action AND backfill it from last_sync_status. A blank last_action
+    reads as 'clean' and would MASK a prior FAILURE (bug #18) — so the backfill must fire.
+    (The first fix built the ADD-COLUMNS list as 'name type' strings and then tested
+    `'last_action' in missing`, which was always False, so the UPDATE never ran.)"""
+    from uc_sync.sync_state import SyncStateService
+
+    class _Field:
+        def __init__(self, name): self.name = name
+
+    class _Table:
+        # OLD schema: last_sync_status present, last_action + parity cols absent.
+        schema = [_Field(n) for n in (
+            "batch_id", "run_id", "object_type", "source_full_name", "target_full_name",
+            "source_object_id", "source_definition_hash", "ddl_hash", "governance_hash",
+            "grants_json", "source_last_modified_at", "last_sync_status", "last_sync_at",
+            "last_synced_by", "ddl_path", "grants_path", "error_code", "error_message",
+            "detail", "utility_version", "updated_at",
+        )]
+
+    class _FakeSpark:
+        def __init__(self): self.sql_log = []
+        def sql(self, sql): self.sql_log.append(sql); return None
+        def table(self, name): return _Table()
+
+    spark = _FakeSpark()
+    SyncStateService(spark, "ops.ops.uc_sync_state").ensure_table()
+    joined = "\n".join(spark.sql_log)
+    assert "ADD COLUMNS" in joined and "last_action STRING" in joined
+    # The backfill UPDATE actually fires (the regression: it didn't).
+    assert any(
+        s.strip().upper().startswith("UPDATE")
+        and "LAST_ACTION" in s.upper()
+        and "LAST_SYNC_STATUS" in s.upper()
+        for s in spark.sql_log
+    ), spark.sql_log
+
+
 def test_state_parity_columns_populated():
     """Part D: first_seen / connectivity_mode / failure_category / last_error_raw are
     written, and the row still matches STATE_COLUMNS exactly."""

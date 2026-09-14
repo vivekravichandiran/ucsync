@@ -175,20 +175,24 @@ class SyncStateService:
             existing = {f.name for f in self.spark.table(self.full_name).schema}
         except Exception:  # noqa: BLE001 - if we cannot read schema, skip upgrade
             return
-        missing = [
-            f"{name} {sql_type}"
-            for name, sql_type in _STATE_UPGRADE_COLUMNS
-            if name not in existing
+        missing_names = [
+            name for name, _sql_type in _STATE_UPGRADE_COLUMNS if name not in existing
         ]
-        if missing:
+        if missing_names:
+            add = ", ".join(
+                f"{name} {sql_type}"
+                for name, sql_type in _STATE_UPGRADE_COLUMNS
+                if name in missing_names
+            )
             self.spark.sql(
-                f"ALTER TABLE {self.full_name} ADD COLUMNS ({', '.join(missing)})"
+                f"ALTER TABLE {self.full_name} ADD COLUMNS ({add})"
             )
         # last_action rename backfill: an older table carried last_sync_status; map its
         # legacy values into the new last_action column (once, where still NULL) so a
-        # pre-existing baseline reads in the unified vocabulary. The legacy column is
-        # left in place (harmless) — never read once last_action is populated.
-        if "last_action" in missing and "last_sync_status" in existing:
+        # pre-existing baseline reads in the unified vocabulary and a prior FAILURE is
+        # still seen as non-clean (bug #18) rather than a blank that reads as clean. The
+        # legacy column is left in place (harmless) — never read once last_action is set.
+        if "last_action" in missing_names and "last_sync_status" in existing:
             cases = " ".join(
                 f"WHEN '{legacy}' THEN '{action}'"
                 for legacy, action in vocab._LEGACY_STATUS_TO_ACTION.items()
