@@ -19,20 +19,22 @@ class _FakeSqlExecutor:
 
     def __init__(self):
         self.statements: list[str] = []
-        self._rows: dict[tuple[str, str], int] = {}
+        self._rows: dict[tuple[str, str], tuple[int, str]] = {}
 
     def execute(self, sql):
         self.statements.append(sql)
         s = sql.strip().upper()
         if s.startswith("SELECT"):
-            return [[v, p, m] for (v, p), m in self._rows.items()]
+            # (volume, path, source_mtime, status) — the control's load query shape.
+            return [[v, p, m, st] for (v, p), (m, st) in self._rows.items()]
         if s.startswith("MERGE"):
-            # Parse the VALUES tuples ('vol','path',CAST(n AS BIGINT)).
+            # Parse the VALUES tuples ('vol','path',CAST(n AS BIGINT),'status','msg').
             import re
-            for vol, path, mtime in re.findall(
-                r"\('([^']*)',\s*'([^']*)',\s*CAST\((\d+) AS BIGINT\)\)", sql
+            for vol, path, mtime, status in re.findall(
+                r"\('([^']*)',\s*'([^']*)',\s*CAST\((\d+) AS BIGINT\),\s*'([^']*)'",
+                sql,
             ):
-                self._rows[(vol, path)] = int(mtime)
+                self._rows[(vol, path)] = (int(mtime), status)
         return []
 
 
@@ -139,6 +141,49 @@ def test_oversize_file_reported_not_dropped():
     assert copy_summary(results) == {"SKIPPED_TOO_LARGE": 1}
     assert "5 GB" in results[0].message
     assert tgt.uploaded == {}  # never attempted
+
+
+class _RecordingControl(InMemoryVolumeCopyControl):
+    """Captures every record() call so we can assert status/message are persisted (C1)."""
+
+    def __init__(self):
+        super().__init__()
+        self.records: list[tuple] = []
+
+    def record(self, volume, path, source_mtime, status="COPIED", message=""):
+        self.records.append((path, source_mtime, status, message))
+        super().record(volume, path, source_mtime, status, message)
+
+
+def test_control_records_status_for_every_outcome():
+    """C1: the control store records COPIED, FAILED and SKIPPED_TOO_LARGE (so the
+    uc_sync_volume_files table shows what happened), and a FAILED / too-large outcome
+    does NOT advance the incremental watermark (so it is retried next run)."""
+    tree = {"/Volumes/c/s/v": [
+        _entry("/Volumes/c/s/v/ok.txt", 2, 100),
+        _entry("/Volumes/c/s/v/bad.txt", 2, 200),
+        _entry("/Volumes/c/s/v/big.bin", FILES_API_MAX_BYTES + 1, 300),
+    ]}
+
+    class FlakySource(FakeSourceClient):
+        def download_file(self, file_path):
+            if file_path.endswith("bad.txt"):
+                raise RuntimeError("HTTP 500: transient")
+            return b"ok"
+
+    control = _RecordingControl()
+    VolumeDataCopier(FlakySource(tree, {}), FakeTargetClient(),
+                     control=control).copy_volume(
+        "c.s.v", "/Volumes/c/s/v", "/Volumes/t/s/v")
+
+    by_path = {p: (m, st) for (p, m, st, _msg) in control.records}
+    assert by_path["/Volumes/c/s/v/ok.txt"] == (100, "COPIED")
+    assert by_path["/Volumes/c/s/v/bad.txt"][1] == "FAILED"
+    assert by_path["/Volumes/c/s/v/big.bin"][1] == "SKIPPED_TOO_LARGE"
+    # Only the successful copy advanced the watermark → the two others are retried.
+    assert control.needs_copy("c.s.v", "/Volumes/c/s/v/ok.txt", 100) is False
+    assert control.needs_copy("c.s.v", "/Volumes/c/s/v/bad.txt", 200) is True
+    assert control.needs_copy("c.s.v", "/Volumes/c/s/v/big.bin", 300) is True
 
 
 def test_download_failure_recorded_run_continues():

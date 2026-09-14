@@ -37,7 +37,7 @@ def _import_results():
     ]
 
 
-def test_report_only_reads_skipped_and_counted_outside_success(tmp_path: Path):
+def test_report_only_reads_manual_and_counted_outside_success(tmp_path: Path):
     out = tmp_path / "r.xlsx"
     build_report(_objects(), str(out), stage="IMPORT",
                  import_results=_import_results(), workspace_url="https://ws.example")
@@ -51,11 +51,12 @@ def test_report_only_reads_skipped_and_counted_outside_success(tmp_path: Path):
 
     summary = [tuple(r) for r in wb["Summary"].iter_rows(values_only=True)]
     flat = {r[0]: r[1] for r in summary if r and len(r) >= 2}
-    # 2 created (catalog + table), 2 report-only skipped (streaming table + model).
+    # 2 created (catalog + table), 2 report-only inventory-only → Manual step (B4).
     assert flat.get("Created") == 2
-    assert flat.get("Skipped (no target object)") == 2
+    assert flat.get("Manual step") == 2
     assert flat.get("applied (created/updated/adopted)") == 2
-    assert flat.get("skipped (incl. report-only)") == 2
+    # The two report-only assets are listed under "Manual steps required (2)".
+    assert any(str(r[0] or "").startswith("Manual steps required (2)") for r in summary)
     # A TOTAL row is present and covers every counted object.
     assert flat.get("TOTAL") == 4
 

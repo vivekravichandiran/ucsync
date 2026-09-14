@@ -78,6 +78,112 @@ def test_changed_preexisting_object_reads_updated_through_report(tmp_path):
     assert rows["c.s.new"] == "Created"
 
 
+def test_source_absent_shows_on_own_type_sheet_and_summary(tmp_path):
+    """B2 + SOURCE_ABSENT visibility fix: a dropped source object (present in the
+    baseline, gone from source) is shown as 'Deleted in source' on its OWN per-type
+    sheet AND in the Summary 'Deleted in source — review' section — no Delta sheet."""
+    from openpyxl import load_workbook
+    objects = [
+        {"object_type": "TABLE", "full_name": "c.s.keep", "owner": "me",
+         "tags": {}, "grants": []},
+    ]
+    import_results = [
+        {"object_type": "TABLE", "target_full_name": "c.s.keep", "full_name": "c.s.keep",
+         "status": "SUCCESS", "action": "CREATE_OR_SKIP"},
+    ]
+    delta_rows = [
+        {"action": "SOURCE_ABSENT", "object_type": "TABLE", "object": "c.s.gone",
+         "detail": "reported, not actioned — never dropped"},
+        {"action": "UNCHANGED_COUNT", "detail": 4},
+    ]
+    out = tmp_path / "r.xlsx"
+    build_report(objects, str(out), stage="IMPORT", import_results=import_results,
+                 delta_rows=delta_rows, run_id="r1")
+    wb = load_workbook(out)
+    assert "Delta" not in wb.sheetnames
+
+    # The dropped table appears on the Tables sheet with a Deleted-in-source status.
+    tables = {r[0]: r[-1] for r in wb["Tables"].iter_rows(values_only=True)}
+    assert tables.get("c.s.gone") == "Deleted in source"
+    assert tables.get("c.s.keep") == "Created"
+
+    # Summary carries the review section + the unchanged tally (moved off the Delta sheet).
+    summary = [str(c) for row in wb["Summary"].iter_rows(values_only=True)
+               for c in row if c is not None]
+    assert any(s.startswith("Deleted in source — review (1)") for s in summary)
+    assert any("unchanged" in s for s in summary)
+
+
+def test_outstanding_sheet_lists_cumulative_failures_from_state(tmp_path):
+    """Part E: the Outstanding sheet lists cumulative still-broken objects from state
+    (last_action=failed) across ALL runs — the second failure surface after Summary."""
+    from openpyxl import load_workbook
+    objects = [{"object_type": "TABLE", "full_name": "c.s.t", "owner": "me",
+                "tags": {}, "grants": []}]
+    import_results = [{"object_type": "TABLE", "target_full_name": "c.s.t",
+                       "full_name": "c.s.t", "status": "SUCCESS", "action": "CREATE_OR_SKIP"}]
+    # State says an object from an EARLIER run (out of this run's scope) is still failed.
+    outstanding = [
+        {"source_full_name": "c.other.broken", "object_type": "EXTERNAL_TABLE",
+         "last_action": "failed", "error_code": "EXTERNAL_CREATE_FAILED",
+         "error_message": "DELTA property mismatch", "run_id": "r0",
+         "last_sync_at": "2026-09-10T00:00:00Z"},
+    ]
+    out = tmp_path / "r.xlsx"
+    build_report(objects, str(out), stage="IMPORT", import_results=import_results,
+                 outstanding=outstanding, run_id="r1")
+    wb = load_workbook(out)
+    assert "Outstanding" in wb.sheetnames
+    rows = list(wb["Outstanding"].iter_rows(values_only=True))
+    assert rows[0][0] == "object"
+    body = [r for r in rows[1:] if r[0] == "c.other.broken"]
+    assert len(body) == 1
+    assert body[0][2] == "FAILED"  # last_action rendered via shared vocab label
+    assert "DELTA property mismatch" in str(body[0][4])
+    # No Outstanding sheet when the caller supplies none (inventory/export stages).
+    out2 = tmp_path / "inv.xlsx"
+    build_report(objects, str(out2), stage="INVENTORY")
+    assert "Outstanding" not in load_workbook(out2).sheetnames
+
+
+def test_governed_tags_sheet_replaces_other_objects(tmp_path):
+    """B5: governed-tag definitions get a first-class 'Governed Tags' sheet, not the
+    generic 'Other Objects' catch-all."""
+    from openpyxl import load_workbook
+    objects = [
+        {"object_type": "GOVERNED_TAG", "full_name": "pii", "owner": "me",
+         "tags": {}, "grants": [],
+         "definition": {"allowed_values": ["SSN", "EMAIL"]}},
+    ]
+    import_results = [{"object_type": "GOVERNED_TAG", "full_name": "pii",
+                       "target_full_name": "pii", "status": "SUCCESS",
+                       "action": "CREATE_OR_SKIP"}]
+    out = tmp_path / "r.xlsx"
+    build_report(objects, str(out), stage="IMPORT", import_results=import_results,
+                 run_id="r1")
+    wb = load_workbook(out)
+    assert "Governed Tags" in wb.sheetnames and "Other Objects" not in wb.sheetnames
+    rows = list(wb["Governed Tags"].iter_rows(values_only=True))
+    assert rows[0][0] == "tag_key"
+    body = rows[1]
+    assert body[0] == "pii" and "SSN" in body[1] and "EMAIL" in body[1]
+
+
+def test_tags_applied_gap_reads_explicit_no_op(tmp_path):
+    """B6: a governed-tag row with no tag op recorded reads an explicit note, not blank."""
+    from openpyxl import load_workbook
+    objects = [{"object_type": "TABLE", "full_name": "c.s.t", "owner": "me",
+                "tags": {"cls": "OK"}, "grants": []}]
+    # An object create result, but NO APPLY_TAGS op for it.
+    import_results = [{"object_type": "TABLE", "target_full_name": "c.s.t",
+                       "full_name": "c.s.t", "status": "SUCCESS", "action": "CREATE_OR_SKIP"}]
+    out = tmp_path / "r.xlsx"
+    build_report(objects, str(out), stage="IMPORT", import_results=import_results,
+                 run_id="r1")
+    tag_rows = list(load_workbook(out)["Tags Applied"].iter_rows(values_only=True))
+    assert tag_rows[1][-1] == "— (no tag op this run)"
+
+
 def test_build_report_has_governance_sheets(tmp_path):
     objects = [
         {"object_type": "CATALOG", "full_name": "c", "owner": "me",
@@ -103,31 +209,33 @@ def test_build_report_has_governance_sheets(tmp_path):
     assert out.exists()
     from openpyxl import load_workbook
     wb = load_workbook(out)
-    # Per-type sheets appear only for types present; governance sheets always do.
-    # The IMPORT stage adds an Issues sheet (right after Summary).
+    # Per-type sheets appear only for types present; governance sheets always do. There
+    # is no standalone Issues sheet (B1) and no Delta sheet (B2) — failures live on the
+    # Summary, changes are folded into the per-type sheets.
     assert set(wb.sheetnames) == {
-        "Summary", "Issues", "Catalogs", "Tables", "Tags",
+        "Summary", "Catalogs", "Tables", "Tags Applied",
         "Column Masks & Row Filters",
         "ABAC Policies", "Policy Matched Columns", "Grants",
     }
-    # Issues is the second sheet (right after Summary).
-    assert wb.sheetnames[:2] == ["Summary", "Issues"]
+    assert "Issues" not in wb.sheetnames and "Delta" not in wb.sheetnames
+    # Summary is first.
+    assert wb.sheetnames[0] == "Summary"
     # ABAC sheet carries the policy with its EXCEPT.
     abac_rows = list(wb["ABAC Policies"].iter_rows(values_only=True))
     assert any("svc@x.com" in str(r) for r in abac_rows)
     # Tags sheet has the column tag.
-    tag_rows = list(wb["Tags"].iter_rows(values_only=True))
+    tag_rows = list(wb["Tags Applied"].iter_rows(values_only=True))
     assert any("SSN" in str(r) for r in tag_rows)
     # The table's per-type sheet carries its import status.
     table_rows = list(wb["Tables"].iter_rows(values_only=True))
     assert any("c.s.t" in str(r) for r in table_rows)
 
 
-def test_issues_sheet_counts_split_and_governance_status(tmp_path):
-    """The Issues sheet lists every non-success op (FAILURE first); the Summary has a
-    single per-object tally (ABAC policies counted as objects; a governance failure
-    folds into its object) with no separate governance section; governance sheets
-    carry an import_status column."""
+def test_summary_failures_section_and_no_issues_sheet(tmp_path):
+    """B1: there is NO standalone Issues sheet — current-run failures live in the
+    Summary "Failures (N)" section. The Summary keeps a single per-object tally (ABAC
+    policies counted as objects; a governance failure folds into its object) with no
+    separate governance section; governance sheets carry an import_status column."""
     objects = [
         {"object_type": "TABLE", "full_name": "c.s.t", "owner": "me",
          "tags": {"cls": "OK"}, "grants": []},
@@ -160,18 +268,11 @@ def test_issues_sheet_counts_split_and_governance_status(tmp_path):
     from openpyxl import load_workbook
     wb = load_workbook(out)
 
-    # Issues sheet is second, header exact, and FAILURE rows present.
-    assert wb.sheetnames[1] == "Issues"
-    issues = list(wb["Issues"].iter_rows(values_only=True))
-    assert issues[0] == (
-        "status", "object_type", "object", "action", "error_code", "message"
-    )
-    assert any(r[0] == "FAILURE" and r[2] == "c.s.bad" for r in issues[1:])
-    # The two non-success ops (dropped table + failed tag), no SUCCESS ones.
-    assert len(issues) - 1 == 2
+    # No standalone Issues sheet, no Delta sheet (B1/B2).
+    assert "Issues" not in wb.sheetnames and "Delta" not in wb.sheetnames
 
-    # Summary: a SINGLE per-object outcome roll-up (wsmig vocabulary, FEAT-5), no
-    # separate governance section.
+    # Summary: a SINGLE per-object outcome roll-up (wsmig vocabulary), no separate
+    # governance section, plus a "Failures (N)" section listing the failed object.
     summary = [tuple(r) for r in wb["Summary"].iter_rows(values_only=True)]
     flat = [str(c) for row in summary for c in row if c is not None]
     assert "Outcome roll-up" in flat
@@ -181,9 +282,16 @@ def test_issues_sheet_counts_split_and_governance_status(tmp_path):
     sflat = {summary[i][0]: summary[i][1] for i in range(len(summary))
              if summary[i][0] in ("Created", "FAILED")}
     assert sflat.get("Created") == 2 and sflat.get("FAILED") == 1
+    # A "Failures (1)" section lists the fail-closed table.
+    assert any(str(c or "").startswith("Failures (1)") for c in flat)
+    fail_names = [
+        summary[i][0] for i in range(len(summary))
+        if str(summary[i][0] or "") == "c.s.bad"
+    ]
+    assert fail_names  # the failed object is named in the Failures section
 
     # Tags sheet carries import_status; the bad table's tag reads FAILED.
-    tag_rows = list(wb["Tags"].iter_rows(values_only=True))
+    tag_rows = list(wb["Tags Applied"].iter_rows(values_only=True))
     assert tag_rows[0][-1] == "import_status"
     bad_tag = next(r for r in tag_rows[1:] if r[0] == "c.s.bad")
     assert "FAILED" in str(bad_tag[-1])
@@ -225,17 +333,17 @@ def test_governance_rows_read_rolled_back_when_object_dropped_failclosed(tmp_pat
     from openpyxl import load_workbook
     wb = load_workbook(out)
 
-    tag_rows = list(wb["Tags"].iter_rows(values_only=True))
+    tag_rows = list(wb["Tags Applied"].iter_rows(values_only=True))
     tag = next(r for r in tag_rows[1:] if r[0] == "c.s.dropped")
-    assert tag[-1] == "ROLLED BACK (object dropped)"
+    assert tag[-1] == "Rolled back (table dropped fail-closed)"
 
     mask_rows = list(wb["Column Masks & Row Filters"].iter_rows(values_only=True))
     mask = next(r for r in mask_rows[1:] if r[0] == "c.s.dropped")
-    assert mask[-1] == "ROLLED BACK (object dropped)"
+    assert mask[-1] == "Rolled back (table dropped fail-closed)"
 
     grant_rows = list(wb["Grants"].iter_rows(values_only=True))
     grant = next(r for r in grant_rows[1:] if r[0] == "c.s.dropped")
-    assert grant[-1] == "ROLLED BACK (object dropped)"
+    assert grant[-1] == "Rolled back (table dropped fail-closed)"
 
 
 def test_abac_counts_as_object_so_export_and_import_totals_match(tmp_path):
@@ -367,7 +475,8 @@ def test_storage_sheets_status_skipped_vs_created(tmp_path):
     loc = list(wb["External Locations"].iter_rows(values_only=True))
     assert loc[1][0] == "loc_a"
     assert "abfss://c@acct/p" in loc[1]                  # url captured
-    assert "Adopted" in loc[1][-1]                        # pre-existing; not created by utility
+    # create toggle off (BYO) → its own Skipped variant (B3), distinct from adopted/unchanged.
+    assert "create disabled" in loc[1][-1]
 
 
 def test_tags_and_grants_status_reflect_governance_not_create_skip(tmp_path):
@@ -404,7 +513,7 @@ def test_tags_and_grants_status_reflect_governance_not_create_skip(tmp_path):
     wb = load_workbook(out)
 
     # Tags: the catalog tag reads applied (APPLY_TAGS), NOT "not created by utility".
-    tag_rows = list(wb["Tags"].iter_rows(values_only=True))
+    tag_rows = list(wb["Tags Applied"].iter_rows(values_only=True))
     cat_tag = next(r for r in tag_rows[1:] if r[0] == "c")
     assert "not created by utility" not in str(cat_tag[-1])
     assert "APPLIED" in str(cat_tag[-1])

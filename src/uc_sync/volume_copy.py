@@ -29,13 +29,40 @@ SKIPPED_UNCHANGED = "SKIPPED_UNCHANGED"
 SKIPPED_TOO_LARGE = "SKIPPED_TOO_LARGE"
 FAILED = "FAILED"
 
+# Columns added to the control table beyond the original (volume, path, source_mtime):
+# status/message + a created_at/updated_at split (C1). Appended in place on a
+# pre-existing table so an older control table (which had only copied_at) gains them.
+_VOLUME_CONTROL_UPGRADE_COLUMNS = [
+    ("status", "STRING"),
+    ("message", "STRING"),
+    ("created_at", "TIMESTAMP"),
+    ("updated_at", "TIMESTAMP"),
+]
+
+
+def _upgrade_volume_control(exec_fn: Any, table: str) -> None:
+    """Add the C1 columns to a pre-existing control table (idempotent). Each ADD COLUMN
+    is attempted independently; an 'already exists' error is swallowed so a table that
+    already has the column is fine. ``exec_fn`` runs one SQL statement (spark.sql or an
+    executor's execute)."""
+    for name, sql_type in _VOLUME_CONTROL_UPGRADE_COLUMNS:
+        try:
+            exec_fn(f"ALTER TABLE {table} ADD COLUMNS ({name} {sql_type})")
+        except Exception:  # noqa: BLE001 - column already present (or unsupported) → skip
+            pass
+
 
 class VolumeCopyControl(Protocol):
-    """Records the last-copied source mtime per (volume, file path) for incremental
-    copies. ``needs_copy`` returns True when the file is new or modified."""
+    """Records the per-file outcome for incremental copies. ``needs_copy`` returns True
+    when the file is new or modified. ``record`` persists the outcome (``status`` /
+    ``message``); only a COPIED outcome advances the incremental mtime watermark, so a
+    FAILED / too-large file is retried on the next run rather than silently skipped."""
 
     def needs_copy(self, volume: str, path: str, source_mtime: int) -> bool: ...
-    def record(self, volume: str, path: str, source_mtime: int) -> None: ...
+    def record(
+        self, volume: str, path: str, source_mtime: int,
+        status: str = COPIED, message: str = "",
+    ) -> None: ...
 
 
 class InMemoryVolumeCopyControl:
@@ -48,8 +75,14 @@ class InMemoryVolumeCopyControl:
         prior = self._seen.get((volume, path))
         return prior is None or prior != source_mtime
 
-    def record(self, volume: str, path: str, source_mtime: int) -> None:
-        self._seen[(volume, path)] = source_mtime
+    def record(
+        self, volume: str, path: str, source_mtime: int,
+        status: str = COPIED, message: str = "",
+    ) -> None:
+        # Only a successful copy advances the incremental watermark (so a failure /
+        # too-large file is retried next run). status/message are not persisted in-memory.
+        if status == COPIED:
+            self._seen[(volume, path)] = source_mtime
 
 
 class SparkVolumeCopyControl:
@@ -62,43 +95,63 @@ class SparkVolumeCopyControl:
         self.table = table
         spark.sql(
             f"CREATE TABLE IF NOT EXISTS {table} (volume STRING, path STRING, "
-            "source_mtime BIGINT, copied_at TIMESTAMP) USING DELTA"
+            "source_mtime BIGINT, status STRING, message STRING, "
+            "created_at TIMESTAMP, updated_at TIMESTAMP) USING DELTA"
         )
+        _upgrade_volume_control(lambda sql: spark.sql(sql), table)
+        # (volume, path) -> (mtime, status, message) recorded this run; only COPIED
+        # advances the watermark used by needs_copy.
         self._seen: dict[tuple[str, str], int] = {}
-        self._dirty: dict[tuple[str, str], int] = {}
+        self._dirty: dict[tuple[str, str], tuple[int, str, str]] = {}
         try:
             for r in spark.sql(
-                f"SELECT volume, path, source_mtime FROM {table}"
+                f"SELECT volume, path, source_mtime, status FROM {table}"
             ).collect():
-                self._seen[(r["volume"], r["path"])] = int(r["source_mtime"] or 0)
+                # Only a prior COPIED sets the incremental watermark — a FAILED / skipped
+                # row must not suppress a retry.
+                if str(r["status"] or COPIED) == COPIED:
+                    self._seen[(r["volume"], r["path"])] = int(r["source_mtime"] or 0)
         except Exception:  # noqa: BLE001 - empty/new table → no prior state
             pass
 
     def needs_copy(self, volume: str, path: str, source_mtime: int) -> bool:
         return self._seen.get((volume, path)) != source_mtime
 
-    def record(self, volume: str, path: str, source_mtime: int) -> None:
-        self._seen[(volume, path)] = source_mtime
-        self._dirty[(volume, path)] = source_mtime
+    def record(
+        self, volume: str, path: str, source_mtime: int,
+        status: str = COPIED, message: str = "",
+    ) -> None:
+        if status == COPIED:
+            self._seen[(volume, path)] = source_mtime
+        # A non-COPIED outcome must not persist the new mtime (else needs_copy would
+        # skip the retry) — store 0 so the next run re-evaluates the file.
+        self._dirty[(volume, path)] = (
+            source_mtime if status == COPIED else 0, status, message[:500],
+        )
 
     def flush(self) -> None:
-        """Upsert every recorded (volume, path, mtime) into the control table."""
+        """Upsert every recorded (volume, path) outcome into the control table.
+        created_at is set once (on insert); updated_at is refreshed every merge."""
         if not self._dirty:
             return
         rows = [
-            (vol, path, mtime) for (vol, path), mtime in self._dirty.items()
+            (vol, path, mtime, status, message)
+            for (vol, path), (mtime, status, message) in self._dirty.items()
         ]
-        df = self.spark.createDataFrame(rows, ["volume", "path", "source_mtime"])
+        df = self.spark.createDataFrame(
+            rows, ["volume", "path", "source_mtime", "status", "message"]
+        )
         df.createOrReplaceTempView("_uc_sync_volume_updates")
         self.spark.sql(
             f"MERGE INTO {self.table} t USING ("
-            "  SELECT volume, path, source_mtime, current_timestamp() AS copied_at "
-            "  FROM _uc_sync_volume_updates) s "
+            "  SELECT volume, path, source_mtime, status, message, "
+            "         current_timestamp() AS now FROM _uc_sync_volume_updates) s "
             "ON t.volume = s.volume AND t.path = s.path "
             "WHEN MATCHED THEN UPDATE SET t.source_mtime = s.source_mtime, "
-            "  t.copied_at = s.copied_at "
-            "WHEN NOT MATCHED THEN INSERT (volume, path, source_mtime, copied_at) "
-            "  VALUES (s.volume, s.path, s.source_mtime, s.copied_at)"
+            "  t.status = s.status, t.message = s.message, t.updated_at = s.now "
+            "WHEN NOT MATCHED THEN INSERT (volume, path, source_mtime, status, message, "
+            "  created_at, updated_at) "
+            "  VALUES (s.volume, s.path, s.source_mtime, s.status, s.message, s.now, s.now)"
         )
         self._dirty.clear()
 
@@ -116,49 +169,63 @@ class WarehouseVolumeCopyControl:
         self.table = table
         executor.execute(
             f"CREATE TABLE IF NOT EXISTS {table} (volume STRING, path STRING, "
-            "source_mtime BIGINT, copied_at TIMESTAMP) USING DELTA"
+            "source_mtime BIGINT, status STRING, message STRING, "
+            "created_at TIMESTAMP, updated_at TIMESTAMP) USING DELTA"
         )
+        _upgrade_volume_control(lambda sql: executor.execute(sql), table)
         self._seen: dict[tuple[str, str], int] = {}
-        self._dirty: dict[tuple[str, str], int] = {}
+        self._dirty: dict[tuple[str, str], tuple[int, str, str]] = {}
         try:
             for row in executor.execute(
-                f"SELECT volume, path, source_mtime FROM {table}"
+                f"SELECT volume, path, source_mtime, status FROM {table}"
             ) or []:
-                self._seen[(str(row[0]), str(row[1]))] = int(row[2] or 0)
+                if str((row[3] if len(row) > 3 else COPIED) or COPIED) == COPIED:
+                    self._seen[(str(row[0]), str(row[1]))] = int(row[2] or 0)
         except Exception:  # noqa: BLE001 - empty/new table → no prior state
             pass
 
     def needs_copy(self, volume: str, path: str, source_mtime: int) -> bool:
         return self._seen.get((volume, path)) != source_mtime
 
-    def record(self, volume: str, path: str, source_mtime: int) -> None:
-        self._seen[(volume, path)] = source_mtime
-        self._dirty[(volume, path)] = source_mtime
+    def record(
+        self, volume: str, path: str, source_mtime: int,
+        status: str = COPIED, message: str = "",
+    ) -> None:
+        if status == COPIED:
+            self._seen[(volume, path)] = source_mtime
+        self._dirty[(volume, path)] = (
+            source_mtime if status == COPIED else 0, status, message[:500],
+        )
 
     @staticmethod
     def _lit(text: str) -> str:
         return "'" + str(text).replace("'", "''") + "'"
 
     def flush(self) -> None:
-        """Upsert the recorded (volume, path, mtime) rows via one MERGE (batched in
-        chunks to keep each statement bounded)."""
+        """Upsert the recorded (volume, path) outcomes via one MERGE per chunk.
+        created_at is set once (on insert); updated_at is refreshed every merge."""
         if not self._dirty:
             return
         items = list(self._dirty.items())
         for start in range(0, len(items), 200):
             chunk = items[start:start + 200]
             values = ", ".join(
-                f"({self._lit(vol)}, {self._lit(path)}, CAST({int(mtime)} AS BIGINT))"
-                for (vol, path), mtime in chunk
+                f"({self._lit(vol)}, {self._lit(path)}, CAST({int(mtime)} AS BIGINT), "
+                f"{self._lit(status)}, {self._lit(message)})"
+                for (vol, path), (mtime, status, message) in chunk
             )
             self.executor.execute(
                 f"MERGE INTO {self.table} t "
-                f"USING (SELECT * FROM VALUES {values} AS s(volume, path, source_mtime)) s "
+                f"USING (SELECT * FROM VALUES {values} "
+                "AS s(volume, path, source_mtime, status, message)) s "
                 "ON t.volume = s.volume AND t.path = s.path "
                 "WHEN MATCHED THEN UPDATE SET t.source_mtime = s.source_mtime, "
-                "  t.copied_at = current_timestamp() "
-                "WHEN NOT MATCHED THEN INSERT (volume, path, source_mtime, copied_at) "
-                "  VALUES (s.volume, s.path, s.source_mtime, current_timestamp())"
+                "  t.status = s.status, t.message = s.message, "
+                "  t.updated_at = current_timestamp() "
+                "WHEN NOT MATCHED THEN INSERT (volume, path, source_mtime, status, "
+                "  message, created_at, updated_at) "
+                "  VALUES (s.volume, s.path, s.source_mtime, s.status, s.message, "
+                "  current_timestamp(), current_timestamp())"
             )
         self._dirty.clear()
 
@@ -222,11 +289,15 @@ class VolumeDataCopier:
         size = int(entry.get("file_size") or 0)
         mtime = int(entry.get("last_modified") or entry.get("modification_time") or 0)
         if size > self.max_bytes:
+            msg = f"file is {size} bytes > Files API 5 GB limit — copy it out of band"
+            # Record the too-large outcome so the control table shows WHY it wasn't
+            # copied (C1); mtime not advanced, so it is re-evaluated next run.
+            self.control.record(volume, source_path, mtime, SKIPPED_TOO_LARGE, msg)
             return VolumeCopyResult(
-                volume, source_path, target_path, SKIPPED_TOO_LARGE, 0,
-                f"file is {size} bytes > Files API 5 GB limit — copy it out of band",
+                volume, source_path, target_path, SKIPPED_TOO_LARGE, 0, msg,
             )
         if not self.control.needs_copy(volume, source_path, mtime):
+            # Already copied (watermark matches) — leave its prior COPIED control row.
             return VolumeCopyResult(
                 volume, source_path, target_path, SKIPPED_UNCHANGED, 0,
                 "unchanged since last copy",
@@ -235,10 +306,14 @@ class VolumeDataCopier:
             data = self.source_client.download_file(source_path)
             self.target_client.upload_file(target_path, data, overwrite=True)
         except Exception as exc:  # noqa: BLE001 - one file's failure never aborts the rest
+            msg = str(exc)[:300]
+            # Record the failure (C1: "know if something failed"); mtime NOT advanced,
+            # so the file is retried on the next run rather than silently skipped.
+            self.control.record(volume, source_path, mtime, FAILED, msg)
             return VolumeCopyResult(
-                volume, source_path, target_path, FAILED, 0, str(exc)[:300]
+                volume, source_path, target_path, FAILED, 0, msg,
             )
-        self.control.record(volume, source_path, mtime)
+        self.control.record(volume, source_path, mtime, COPIED)
         return VolumeCopyResult(volume, source_path, target_path, COPIED, len(data))
 
 

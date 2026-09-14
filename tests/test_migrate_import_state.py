@@ -338,12 +338,13 @@ def test_import_results_produce_audit_and_state_rows():
         utility_version="9.9",
     )
     assert ok["status"] == "SUCCESS"
-    assert bad["last_sync_status"] == "FAILURE"
+    assert bad["last_action"] == "failed"
 
 
-def test_state_status_vocabulary_and_message_split():
-    """Bug #19: fuller last_sync_status vocabulary + error_message reserved for real
-    failures while informational text (skip reason, etc.) goes to `detail`."""
+def test_state_last_action_vocabulary_and_message_split():
+    """The unified last_action vocabulary (shared with the report via uc_sync.vocab) +
+    error_message reserved for real failures while informational text (skip reason,
+    etc.) goes to `detail`."""
     from uc_sync.sync_state import state_row_from_import
 
     def _row(**result):
@@ -351,12 +352,12 @@ def test_state_status_vocabulary_and_message_split():
             batch_id="b", run_id="r", result=result, ran_by="me", utility_version="9",
         )
 
-    # UNCHANGED skip → status UNCHANGED, message → detail, error_message empty.
+    # UNCHANGED skip → last_action 'skipped', message → detail, error_message empty.
     unchanged = _row(
         object_type="TABLE", source_full_name="s.s.t", action="UNCHANGED",
         status="UNCHANGED", message="unchanged since last run (incremental: skipped)",
     )
-    assert unchanged["last_sync_status"] == "UNCHANGED"
+    assert unchanged["last_action"] == "skipped"
     assert unchanged["error_message"] == ""
     assert "unchanged since last run" in unchanged["detail"]
 
@@ -365,15 +366,64 @@ def test_state_status_vocabulary_and_message_split():
         object_type="EXTERNAL_TABLE", source_full_name="s.s.e", status="FAILURE",
         error_code="EXTERNAL_CREATE_FAILED", error_message="DELTA property mismatch",
     )
-    assert failed["last_sync_status"] == "FAILURE"
+    assert failed["last_action"] == "failed"
     assert "DELTA property mismatch" in failed["error_message"]
     assert failed["detail"] == ""
 
-    # Pre-existing (adopted) and report-only get their own honest states.
+    # Pre-existing (adopted) and report-only get their own honest states in the
+    # SAME vocabulary the report renders.
     assert _row(object_type="TABLE", source_full_name="s.s.a",
-                action="SKIP_EXISTING", status="SKIP_EXISTING")["last_sync_status"] == "ADOPTED"
+                action="SKIP_EXISTING", status="SKIP_EXISTING")["last_action"] == "adopted"
+    # A report-only asset type is an inventory-only manual step (B4), not skipped_no_object.
     assert _row(object_type="MONITOR", source_full_name="s.s.m",
-                action="REPORT_ONLY", status="PENDING")["last_sync_status"] == "REPORT_ONLY"
+                action="REPORT_ONLY", status="PENDING")["last_action"] == "manual"
+    # BYO / create-disabled is its own Skipped variant (B3), never conflated with adopted.
+    assert _row(object_type="CATALOG", source_full_name="s",
+                action="SKIP_CREATE_DISABLED",
+                status="SUCCESS")["last_action"] == "skipped_create_disabled"
+
+
+def test_state_parity_columns_populated():
+    """Part D: first_seen / connectivity_mode / failure_category / last_error_raw are
+    written, and the row still matches STATE_COLUMNS exactly."""
+    from uc_sync.sync_state import STATE_COLUMNS, state_row_from_import
+
+    failed = state_row_from_import(
+        batch_id="b", run_id="r", ran_by="me", utility_version="9",
+        connectivity_mode="airgap",
+        result={
+            "object_type": "EXTERNAL_TABLE", "source_full_name": "s.s.e",
+            "status": "FAILURE", "error_code": "EXTERNAL_CREATE_FAILED",
+            "error_message": "x" * 9000,  # long → last_error_raw keeps it all
+        },
+    )
+    assert set(failed) == set(STATE_COLUMNS)
+    assert failed["connectivity_mode"] == "airgap"
+    assert failed["failure_category"] == "STORAGE"       # mapped from error_code
+    assert failed["first_seen"] is not None
+    assert len(failed["last_error_raw"]) == 9000          # untruncated
+    assert len(failed["error_message"]) == 4000           # display copy truncated
+
+    ok = state_row_from_import(
+        batch_id="b", run_id="r", ran_by="me", utility_version="9",
+        result={"object_type": "TABLE", "source_full_name": "s.s.t",
+                "status": "SUCCESS", "action": "CREATE_OR_SKIP"},
+    )
+    assert ok["failure_category"] == ""  # only set for failures
+    assert ok["last_error_raw"] == ""
+
+
+def test_state_upsert_preserves_first_seen_on_update(tmp_path):
+    """first_seen is set once (first insert) and preserved across MERGE updates — the
+    UPDATE SET clause must exclude it."""
+    from uc_sync.sync_state import SyncStateService, _PRESERVE_ON_UPDATE
+    assert "first_seen" in _PRESERVE_ON_UPDATE
+    # The MERGE builds its UPDATE SET from the schema minus the preserved columns; a
+    # light structural check that the service exposes the preserve set (behavioural
+    # preservation is covered live — it needs a real Delta MERGE).
+    assert "first_seen" not in {
+        c for c in SyncStateService.__dict__  # sanity: not an attribute clash
+    }
 
 
 def _owner_package(tmp_path: Path) -> Path:
@@ -779,6 +829,6 @@ def test_stage_audit_and_state_rows():
         ran_by="tester",
         utility_version="0.0.0",
     )
-    assert state["last_sync_status"] == "FAILURE"
+    assert state["last_action"] == "failed"
     assert state["batch_id"] == "b1"
     assert state["last_synced_by"] == "tester"

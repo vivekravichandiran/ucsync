@@ -17,6 +17,8 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from uc_sync import vocab
+
 # ABAC MATCH COLUMNS predicates. ``has_tag_value('k','v')`` matches a column
 # tagged k=v; ``has_tag('k')`` matches any column carrying key k. The ``has_tag(``
 # pattern deliberately requires a ``(`` right after, so it never matches inside
@@ -126,6 +128,10 @@ def _tag_op_index(
             continue
         if str(r.get("object_type")) == "ABAC_POLICY":
             continue
+        # A classic mask / row filter op (Phase 1c) also carries a policies_path but is
+        # NOT a governed-tag op — exclude it so it never renders as a table's tag status.
+        if str(r.get("action")) == "APPLY_POLICY":
+            continue
         entry = {
             "status": str(r.get("status") or ""),
             "action": str(r.get("action") or ""),
@@ -208,6 +214,10 @@ def _render_import_status(entry: Optional[dict[str, str]]) -> str:
         return ""  # no import in this stage (inventory/export reports)
     status, action, msg = entry["status"], entry["action"], entry["message"]
     tail = f": {msg[:200]}" if msg else ""
+    # A CHANGED table skipped because its only diff is a column drop / type change
+    # (A3/A4) reads a Skipped variant WITH the reason, not a blanket "Updated".
+    if str(entry.get("delta_action")) == "CHANGED_SKIPPED":
+        return f"Skipped — {msg}" if msg else _STATUS_STYLE["skipped"][0]
     key = _wsmig_status_key(entry)
     if key == "failed":
         return f"FAILED{tail}"
@@ -403,30 +413,13 @@ _INVENTORY_ONLY = [
 
 
 # --- FEAT-5: workspace-migration (wsmig) report vocabulary --------------------
-# Status key -> (display label, cell fill hex). Mirrors wsmig's _STATUS_STYLE so
-# operators read a familiar report; supersedes #12 (report-only reads as a Skipped
-# variant, never "SUCCESS (REPORT_ONLY)", and is counted outside success).
-_STATUS_STYLE: dict[str, tuple[str, str]] = {
-    "created": ("Created", "D1FAE5"),
-    "created_with_warning": ("Created (warning)", "FDE68A"),
-    "updated": ("Updated", "DBEAFE"),
-    "adopted": ("Adopted (pre-existing)", "CFFAFE"),
-    "skipped": ("Skipped (unchanged)", "E5E7EB"),
-    "manual": ("Manual step", "FEF3C7"),
-    "not_selected": ("Deferred (not selected)", "F1F5F9"),
-    "skipped_no_object": ("Skipped (no target object)", "EDE9FE"),
-    "deleted_in_source": ("Deleted in source", "FFE4E6"),
-    "failed": ("FAILED", "FEE2E2"),
-    "": ("—", "FFFFFF"),
-}
-# Summary roll-up order — FAILURES FIRST, then created/updated/adopted, then the
-# skip/defer variants (report-only counted here, outside success).
-_SUMMARY_ORDER = (
-    "failed", "created", "created_with_warning", "updated", "adopted",
-    "skipped", "skipped_no_object", "not_selected", "manual", "deleted_in_source",
-)
-# Which roll-up buckets count as "actually applied" vs. skipped (honest totals, #12).
-_SUCCESS_STATUSES = {"created", "created_with_warning", "updated", "adopted"}
+# The status vocabulary is now a single source of truth in uc_sync.vocab, shared by
+# BOTH this report and uc_sync_state.last_action (the "constant naming + vocab"
+# unification) — so a reader never sees one word in the workbook and a different one
+# in the state table for the same outcome. Aliased here for readability.
+_STATUS_STYLE = vocab.STATUS_STYLE
+_SUMMARY_ORDER = vocab.SUMMARY_ORDER
+_SUCCESS_STATUSES = vocab.SUCCESS_STATUSES
 
 # wsmig palette / fonts.
 _WSMIG_HEADER_BG = "1E3A5F"   # deep navy
@@ -451,44 +444,9 @@ def _is_report_only_object(o: dict[str, Any]) -> bool:
 
 
 def _wsmig_status_key(entry: Optional[dict[str, Any]]) -> str:
-    """Map an internal import-result entry to a wsmig status key. A report-only /
-    never-created object (no import result, or a REPORT_ONLY action) reads as
-    ``skipped_no_object`` — counted outside success (#12)."""
-    if not entry:
-        return "skipped_no_object"
-    status = str(entry.get("status") or "")
-    action = str(entry.get("action") or "")
-    delta_action = str(entry.get("delta_action") or "")
-    if action in ("REPORT_ONLY", "SKIP_REPORT_ONLY") or delta_action == "REPORT_ONLY":
-        return "skipped_no_object"
-    if status == "FAILURE":
-        return "failed"
-    if status == "MANUAL_ACTION_REQUIRED":
-        return "manual"
-    if status == "SUCCESS_WITH_WARNINGS":
-        return "created_with_warning"
-    # A change applied to a PRE-EXISTING object (DDL / governance / grants / column
-    # delta) reads as "Updated" — never "Adopted"/"Skipped" (bug #19). Checked before
-    # the skip/adopt branches so a changed-but-pre-existing object isn't mislabeled.
-    if delta_action in (
-        "CHANGED", "REPLACED", "GOVERNANCE_UPDATED", "GRANTS_UPDATED", "COLUMN_ADDED"
-    ) or action == "COLUMN_ADDED":
-        return "updated"
-    # Incremental skip: unchanged since a prior present run — a Skipped variant, never
-    # "Created" (a skipped object must not read as created/applied).
-    if action == "UNCHANGED" or status == "UNCHANGED" or delta_action == "UNCHANGED":
-        # A pre-existing object with no delta is Adopted; a delta-gated one is Skipped.
-        if action in ("SKIP_CREATE_DISABLED", "SKIP_EXISTING"):
-            return "adopted"
-        return "skipped"
-    # Pre-existing, adopted as-is (no change applied this run).
-    if action in ("SKIP_CREATE_DISABLED", "SKIP_EXISTING"):
-        return "adopted"
-    if action == "SKIP_FILTERED":
-        return "not_selected"
-    if status in ("SUCCESS", "PENDING"):
-        return "created"
-    return "skipped"
+    """Map an internal import-result entry to a status key. Thin alias over the shared
+    ``uc_sync.vocab.status_key`` so the report and ``uc_sync_state`` agree exactly."""
+    return vocab.status_key(entry)
 
 
 def build_report(
@@ -500,6 +458,7 @@ def build_report(
     import_results: Optional[list[dict[str, Any]]] = None,
     delta_rows: Optional[list[dict[str, Any]]] = None,
     volume_copy_results: Optional[list[dict[str, Any]]] = None,
+    outstanding: Optional[list[dict[str, Any]]] = None,
     run_id: str = "",
     workspace_url: str = "",
 ) -> str:
@@ -557,6 +516,38 @@ def build_report(
             )
         return cells
 
+    # Fold the incremental delta rows into the object sheets (the Delta sheet is gone —
+    # B2): SOURCE_ABSENT objects become a "Deleted in source" row on their own per-type
+    # sheet (fixing the visibility gap where they showed ONLY on the Delta sheet), a
+    # removed grant is a note on the Grants sheet, and the UNCHANGED tally moves to the
+    # Summary. GRANT_ADDED / changed-object rows already read "Updated" per-type.
+    source_absent_by_type: dict[str, list[dict[str, Any]]] = {}
+    grant_removed_rows: list[dict[str, Any]] = []
+    unchanged_count: Optional[int] = None
+    for r in (delta_rows or []):
+        act = str(r.get("action") or "")
+        if act == "SOURCE_ABSENT":
+            source_absent_by_type.setdefault(
+                str(r.get("object_type") or ""), []
+            ).append(r)
+        elif act == "GRANT_REMOVED":
+            grant_removed_rows.append(r)
+        elif act == "UNCHANGED_COUNT":
+            try:
+                unchanged_count = int(r.get("detail") or 0)
+            except (TypeError, ValueError):
+                unchanged_count = None
+    source_absent_total = sum(len(v) for v in source_absent_by_type.values())
+
+    def _absent_status_cells() -> list[str]:
+        """Status column(s) for a Deleted-in-source row (import stage only)."""
+        cells: list[str] = []
+        if stage in ("EXPORT", "IMPORT"):
+            cells.append("")
+        if stage == "IMPORT":
+            cells.append(_STATUS_STYLE["deleted_in_source"][0])
+        return cells
+
     wb = Workbook()
 
     def _sheet(title: str, headers: list[str]):
@@ -566,6 +557,8 @@ def build_report(
         for cell in ws[1]:
             cell.font = Font(bold=True, color="FFFFFF", name=_WSMIG_FONT)
             cell.fill = _fill(_WSMIG_HEADER_BG)
+        # Freeze the header row so it stays visible while scrolling (wsmig parity).
+        ws.freeze_panes = "A2"
         return ws
 
     # Summary — title bar (workspace URL + generated timestamp) in the wsmig style.
@@ -613,15 +606,24 @@ def build_report(
             rollup[key] = rollup.get(key, 0) + 1
             imported_names.add(str(r.get("target_full_name") or r.get("full_name") or ""))
             imported_names.add(str(r.get("source_full_name") or ""))
-        # #12 / FEAT-5: report-only inventory objects (never imported) are counted as
-        # a Skipped variant, OUTSIDE success — never "SUCCESS (REPORT_ONLY)".
+        # Report-only inventory objects (never imported: Tier-A AI assets, Lakebase /
+        # pipeline tables) are inventory-only → counted as a MANUAL step (B4 / confirmed
+        # decision), OUTSIDE success. Collected so the Manual-steps section lists them.
+        report_only_manual: list[dict[str, Any]] = []
         for o in objects:
             if o["full_name"] in imported_names or str(
                 o.get("target_full_name") or ""
             ) in imported_names:
                 continue
             if _is_report_only_object(o):
-                rollup["skipped_no_object"] = rollup.get("skipped_no_object", 0) + 1
+                rollup["manual"] = rollup.get("manual", 0) + 1
+                report_only_manual.append(o)
+        # Objects present in the baseline but gone from source (SOURCE_ABSENT) →
+        # deleted_in_source, surfaced both here and on the object's own per-type sheet.
+        if source_absent_total:
+            rollup["deleted_in_source"] = (
+                rollup.get("deleted_in_source", 0) + source_absent_total
+            )
         ws.append([])
         hdr_row = ws.max_row + 1
         ws.append(["Outcome roll-up", "count"])
@@ -641,18 +643,38 @@ def build_report(
         for c in ws[trow]:
             c.font = Font(bold=True, name=_WSMIG_FONT)
         applied = sum(v for k, v in rollup.items() if k in _SUCCESS_STATUSES)
-        skipped = sum(
-            v for k, v in rollup.items()
-            if k in ("skipped", "skipped_no_object", "not_selected")
-        )
+        skipped = sum(v for k, v in rollup.items() if k in vocab.SKIP_STATUSES)
         ws.append(["applied (created/updated/adopted)", applied])
-        ws.append(["skipped (incl. report-only)", skipped])
-        # Manual-steps section (wsmig parity): objects needing an operator action.
+        ws.append(["skipped (unchanged / BYO / deferred)", skipped])
+        # The UNCHANGED tally (used to live on the now-removed Delta sheet) as a stat.
+        if unchanged_count is not None:
+            ws.append(["unchanged (incremental: skipped, zero writes)", unchanged_count])
+
+        # Failures (N) — CURRENT-run failures, FAILURES FIRST (wsmig Summary parity).
+        # This + the Outstanding sheet (cumulative from state) are the ONLY failure
+        # surfaces; the standalone Issues sheet is gone (B1).
+        failures = [r for r in object_results if _wsmig_status_key(r) == "failed"]
+        if failures:
+            ws.append([])
+            frow = ws.max_row + 1
+            ws.append([f"Failures ({len(failures)})", ""])
+            for c in ws[frow]:
+                c.font = Font(bold=True, color="FFFFFF", name=_WSMIG_FONT)
+                c.fill = _fill(_WSMIG_DB_RED)
+            for r in failures:
+                ws.append([
+                    str(r.get("target_full_name") or r.get("full_name") or ""),
+                    _truncate(r.get("error_message") or r.get("message"), 300),
+                ])
+
+        # Manual-steps section (wsmig parity): objects the operator must migrate by hand
+        # — a governance step needing a manual prerequisite, plus report-only assets.
         manual = [r for r in object_results if _wsmig_status_key(r) == "manual"]
-        if manual:
+        manual_total = len(manual) + len(report_only_manual)
+        if manual_total:
             ws.append([])
             mrow = ws.max_row + 1
-            ws.append([f"Manual steps required ({len(manual)})", ""])
+            ws.append([f"Manual steps required ({manual_total})", ""])
             for c in ws[mrow]:
                 c.font = Font(bold=True, color="FFFFFF", name=_WSMIG_FONT)
                 c.fill = _fill(_WSMIG_DB_RED)
@@ -661,66 +683,51 @@ def build_report(
                     str(r.get("target_full_name") or r.get("full_name") or ""),
                     str(r.get("message") or "")[:200],
                 ])
+            for o in report_only_manual:
+                ws.append([
+                    o["full_name"],
+                    f"inventory-only ({o.get('object_type')}) — migrate manually",
+                ])
 
-    # Issues sheet (right after Summary): every non-success import op — a table
-    # dropped fail-closed (PROTECTION_FAILED), a view that failed on its dropped
-    # table, a failed/manual governance op. Built from raw results so nothing
-    # hides. FAILURE first.
-    if stage == "IMPORT":
-        issues = _sheet(
-            "Issues",
-            ["status", "object_type", "object", "action", "error_code", "message"],
-        )
-        issue_rows = [
-            r for r in (import_results or [])
-            if str(r.get("status") or "")
-            not in ("SUCCESS", "SKIP_EXISTING", "PENDING")
-        ]
-        issue_rows.sort(key=lambda r: 0 if str(r.get("status")) == "FAILURE" else 1)
-        for r in issue_rows:
-            issues.append([
-                r.get("status"), r.get("object_type"),
-                r.get("target_full_name") or r.get("full_name"),
-                r.get("action"), r.get("error_code"),
-                _truncate(r.get("message"), 400),
-            ])
+        # Deleted-in-source — review (N): objects gone from source, reported never
+        # dropped (wsmig "Deleted in source — review" parity).
+        if source_absent_total:
+            ws.append([])
+            drow = ws.max_row + 1
+            ws.append([f"Deleted in source — review ({source_absent_total})", ""])
+            for c in ws[drow]:
+                c.font = Font(bold=True, color="FFFFFF", name=_WSMIG_FONT)
+                c.fill = _fill(_WSMIG_SECTION_BG)
+            for rows in source_absent_by_type.values():
+                for r in rows:
+                    ws.append([
+                        str(r.get("object") or ""),
+                        str(r.get("detail") or "reported, not dropped"),
+                    ])
 
-    # Delta sheet (incremental sync, task 1): only the objects / grants where a
-    # change was detected this run — one row each with its action. UNCHANGED objects
-    # are summarised as a count, not listed, so this stays a focused "what changed"
-    # view. GRANT_REMOVED and SOURCE_ABSENT are informational ("reported, not
-    # actioned"); a governance failure adds a GOVERNANCE_FAILED row.
-    if stage == "IMPORT" and delta_rows is not None:
-        delta = _sheet("Delta", ["action", "object_type", "object", "detail"])
-        rows = [r for r in delta_rows if r.get("action") != "UNCHANGED_COUNT"]
-        # Fold governance failures (task 10) into the Delta sheet as GOVERNANCE_FAILED.
-        for r in import_results or []:
-            if str(r.get("error_code") or "") in (
-                "PROTECTION_FAILED", "GOVERNANCE_FAILED", "ABAC_WAREHOUSE_REQUIRED"
-            ):
-                rows.append({
-                    "action": "GOVERNANCE_FAILED",
-                    "object_type": r.get("object_type"),
-                    "object": r.get("target_full_name") or r.get("full_name"),
-                    "detail": _truncate(r.get("message"), 300),
-                })
-        # GOVERNANCE_FAILED first, then the rest in the order supplied.
-        rows.sort(key=lambda r: 0 if r.get("action") == "GOVERNANCE_FAILED" else 1)
-        for r in rows:
-            delta.append([
-                r.get("action"), r.get("object_type"), r.get("object"),
-                _truncate(r.get("detail"), 400),
-            ])
-        # UNCHANGED objects are not listed row-by-row — only a count line (the caller
-        # supplies it as an UNCHANGED_COUNT pseudo-row so the sheet stays a focused
-        # "what changed" view).
-        count_row = next(
-            (r for r in delta_rows if r.get("action") == "UNCHANGED_COUNT"), None
+    # Outstanding sheet (Part E): CUMULATIVE still-broken objects read from uc_sync_state
+    # (last_action = failed) across ALL runs — independent of this run's scope. The
+    # Summary "Failures (N)" section is THIS run's failures; this is the authoritative
+    # "everything still broken" view (wsmig OUTSTANDING_ACTIONS parity). Rendered right
+    # after the Summary as the second failure surface (the Issues sheet is gone — B1).
+    if stage == "IMPORT" and outstanding is not None:
+        out_sheet = _sheet(
+            "Outstanding",
+            ["object", "object_type", "last_action", "error_code", "error_message",
+             "last_run_id", "last_sync_at"],
         )
-        if count_row is not None:
-            delta.append([
-                "UNCHANGED", "", f"{count_row.get('detail') or 0} objects unchanged",
-                "not listed (summarised)",
+        for r in sorted(
+            outstanding, key=lambda x: str(x.get("source_full_name") or x.get("object") or "")
+        ):
+            out_sheet.append([
+                str(r.get("source_full_name") or r.get("object") or ""),
+                str(r.get("object_type") or ""),
+                _STATUS_STYLE.get(str(r.get("last_action") or ""),
+                                  (str(r.get("last_action") or ""), ""))[0],
+                str(r.get("error_code") or ""),
+                _truncate(r.get("error_message") or r.get("detail"), 400),
+                str(r.get("run_id") or ""),
+                str(r.get("last_sync_at") or ""),
             ])
 
     # One sheet per object type, each carrying that type's captured detail plus
@@ -732,12 +739,19 @@ def build_report(
     status_headers = _status_headers()
 
     for obj_type, title, cols in _TYPE_SHEETS:
-        rows = by_type.get(obj_type)
-        if not rows:
+        rows = by_type.get(obj_type) or []
+        absent = source_absent_by_type.get(obj_type) or []
+        if not rows and not absent:
             continue
         ws_t = _sheet(title, [h for h, _ in cols] + status_headers)
         for o in sorted(rows, key=lambda x: x["full_name"]):
             ws_t.append([fn(o) for _, fn in cols] + _status_cells(o))
+        # SOURCE_ABSENT objects (gone from source) are shown on their OWN type sheet
+        # with a "Deleted in source" status — the Delta sheet used to be their only
+        # home (the visibility gap). Only the name column is known; the rest is blank.
+        for r in sorted(absent, key=lambda x: str(x.get("object") or "")):
+            pad = [""] * (len(cols) - 1)
+            ws_t.append([str(r.get("object") or "")] + pad + _absent_status_cells())
 
     for obj_type, title in _INVENTORY_ONLY:
         rows = by_type.get(obj_type)
@@ -749,18 +763,40 @@ def build_report(
             + status_headers,
         )
         for o in sorted(rows, key=lambda x: x["full_name"]):
-            # Report-only rows read as a Skipped variant (#12), never blank/SUCCESS.
+            # Report-only inventory rows are a MANUAL step (B4), never blank/SUCCESS.
             inv_status = list(_status_cells(o))
             if stage == "IMPORT" and inv_status and not inv_status[-1]:
-                inv_status[-1] = _STATUS_STYLE["skipped_no_object"][0]
+                inv_status[-1] = _STATUS_STYLE["manual"][0]
             ws_t.append([
                 o["full_name"], "false", _cell(o, "comment"), o.get("owner") or "",
-                "inventory-only — report-only Tier-A AI asset (not migrated)",
+                "inventory-only — report-only Tier-A AI asset (migrate manually)",
             ] + inv_status)
 
-    # Catch-all for any present type not explicitly modeled above (never drop an
-    # object silently). ABAC policies have their own dedicated sheets below.
-    _known = {t for t, _, _ in _TYPE_SHEETS} | {t for t, _ in _INVENTORY_ONLY} | {"ABAC_POLICY"}
+    # Governed Tags (B5): the governed-tag DEFINITIONS the utility creates before any
+    # SET TAGS (allowed-value lists), one row per tag key — with the create/adopt
+    # outcome. Formerly folded into a generic "Other Objects" catch-all.
+    governed_tags = [o for o in objects if o["object_type"] == "GOVERNED_TAG"]
+    if governed_tags:
+        ws_t = _sheet(
+            "Governed Tags",
+            ["tag_key", "allowed_values", "comment", "owner"] + status_headers,
+        )
+        for o in sorted(governed_tags, key=lambda x: x["full_name"]):
+            allowed = (o.get("definition") or {}).get("allowed_values") or []
+            ws_t.append([
+                o["full_name"],
+                ", ".join(str(v) for v in allowed),
+                _cell(o, "comment"), o.get("owner") or "",
+            ] + _status_cells(o))
+
+    # Catch-all safety net for any present type not explicitly modeled above (never
+    # drop an object silently). Governed tags + ABAC policies have their own sheets, so
+    # in practice this appears only if a genuinely new/unmodeled type shows up.
+    _known = (
+        {t for t, _, _ in _TYPE_SHEETS}
+        | {t for t, _ in _INVENTORY_ONLY}
+        | {"ABAC_POLICY", "GOVERNED_TAG"}
+    )
     other = [o for o in objects if o["object_type"] not in _known]
     if other:
         ws_t = _sheet("Other Objects", ["object", "type", "comment", "owner"] + status_headers)
@@ -782,7 +818,7 @@ def build_report(
     # exec-time SUCCESS the op result still carries (task 6). A genuine create
     # FAILURE (e.g. a bad inline mask fails CREATE TABLE atomically — a different
     # action) is NOT a rollback: the governance never applied, so it reads FAILED.
-    _ROLLED_BACK = "ROLLED BACK (object dropped)"
+    _ROLLED_BACK = "Rolled back (table dropped fail-closed)"
 
     def _object_rolled_back(*names: str) -> bool:
         entry = next((idx.get(n) for n in names if n and idx.get(n)), None)
@@ -814,7 +850,7 @@ def build_report(
         if _object_rolled_back(*names) and not op_failed:
             return [_ROLLED_BACK]
         if not entry:
-            return [""]
+            return ["— (no tag op this run)"]
         # A tag is a governance OP, not an object lifecycle event — render APPLIED /
         # FAILED / DRY RUN (like grants), never the object create/update vocab.
         status, action = entry.get("status"), entry.get("action")
@@ -845,8 +881,12 @@ def build_report(
             return ["FAILED (object not created)"]
         return ["APPLIED"]
 
-    # Tags (object + column grain)
-    tags = _sheet("Tags", ["object", "level", "column", "key", "value"] + _gov_status_header())
+    # Tags Applied (object + column grain) — the governed tags this run SET on each
+    # securable, with the actual APPLY_TAGS outcome per row (B6 rename from "Tags").
+    tags = _sheet(
+        "Tags Applied",
+        ["object", "level", "column", "key", "value"] + _gov_status_header(),
+    )
     for o in objects:
         st = _tag_gov_status(o["full_name"], str(o.get("target_full_name") or ""))
         for k, v in (o.get("tags") or {}).items():
@@ -961,6 +1001,16 @@ def build_report(
                 g.get("principal_type"),
                 ", ".join(g.get("privileges") or []),
             ] + st)
+    # A grant removed on source is reported, NEVER revoked (confirmed decision) — shown
+    # here (its former home was the now-removed Delta sheet) so the change stays visible
+    # on the object's own governance sheet. Import stage only (incremental delta).
+    if stage == "IMPORT" and grant_removed_rows:
+        removed_status = ["Removed in source (not revoked)"] if _gov_status_header() else []
+        for r in grant_removed_rows:
+            grants.append([
+                str(r.get("object") or ""), str(r.get("object_type") or ""),
+                str(r.get("detail") or ""), "", "",
+            ] + removed_status)
 
     # Volume Data Copy (FEAT-4, bug #17): the per-file source→target file copy the
     # import performs when copy_volume_data is on. This is separate from the volume

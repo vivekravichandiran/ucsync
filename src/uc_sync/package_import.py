@@ -487,6 +487,13 @@ def _is_already_exists_error(message: str) -> bool:
     return any(marker in upper for marker in _ALREADY_EXISTS_MARKERS)
 
 
+def _normalize_type(type_text: str) -> str:
+    """Canonicalise a column type for equality (A4 type-change check): lower-cased with
+    all whitespace stripped, so ``DECIMAL(10, 2)`` == ``decimal(10,2)`` and ``INT`` !=
+    ``bigint`` (a real type change) but formatting noise never reads as a change."""
+    return re.sub(r"\s+", "", str(type_text or "").strip().lower())
+
+
 def _is_location_conflict_error(message: str) -> bool:
     upper = str(message or "").upper()
     return any(marker in upper for marker in _LOCATION_CONFLICT_MARKERS)
@@ -904,6 +911,15 @@ class PackageImportEngine:
         # before the tag phase (so a governed tag on a new column applies). A same-tag
         # new column is auto-covered by the existing ABAC policy (no new policy).
         results.extend(self._replay_schema_evolution(by_target, len(results)))
+
+        # Phase 1c — classic mask / row filter re-apply (bug A1/A2): apply the exported
+        # policies/ dir (standalone SET MASK / SET ROW FILTER) to PRE-EXISTING tables
+        # whose DDL changed on an incremental run. Fresh tables carry masks inline in
+        # CREATE (Phase 1); a newly-added column got its mask in Phase 1b. The gap this
+        # closes is a mask/row filter added to an ALREADY-migrated column of an existing
+        # table — it lands only in ddl_hash (CHANGED + SKIP_EXISTING), so the engine
+        # never applied it and it falsely read "Updated". Fail-closed on failure.
+        results.extend(self._apply_policies(inventory, by_target, len(results)))
 
         # Phase 2 — governed tags on non-view objects. A tag failure on a TABLE
         # records that table for the drop sweep (fail-closed).
@@ -1444,6 +1460,187 @@ class PackageImportEngine:
             cols.add(name.lower())
         return cols
 
+    def _describe_columns_typed(self, target_full_name: str) -> dict[str, str]:
+        """``{lower(name): normalised_type}`` of an existing target table, for the A4
+        column-type-change check. Empty on any read error (the check then no-ops)."""
+        try:
+            rows = self.sql.execute(
+                f"DESCRIBE TABLE {quote_full_name(target_full_name)}"
+            )
+        except Exception:  # noqa: BLE001 - can't read → skip the type-change check
+            return {}
+        out: dict[str, str] = {}
+        for row in rows or []:
+            if not isinstance(row, (list, tuple)):
+                break  # no type column available
+            name = str(row[0] or "").strip()
+            if not name or name.startswith("#"):
+                break
+            out[name.lower()] = _normalize_type(str(row[1] or "")) if len(row) > 1 else ""
+        return out
+
+    def _changed_table_noop_reason(
+        self,
+        target_full_name: str,
+        target_cols: set[str],
+        source_names: set[str],
+        definition: dict[str, Any],
+    ) -> str:
+        """Why a ``CHANGED`` table produced no actionable column ADD (A3/A4).
+
+        Returns a human comment for a column DROP or a column TYPE CHANGE (both out of
+        scope — non-destructive / unsupported ALTER), or ``""`` when the diff is a
+        mask / row-filter change (applied by the policies phase, so it reads "Updated")
+        or some other in-scope change.
+        """
+        # A column present on target but gone from source → deleted on source (A3).
+        dropped = sorted(target_cols - source_names)
+        if dropped:
+            return (
+                f"column deleted on source ({', '.join(dropped)}); not dropped on "
+                "target (non-destructive)"
+            )
+        # Column set is identical. A mask / row-filter change is applied by the policies
+        # phase and reads "Updated" — so only an actual column TYPE change is flagged.
+        has_policies = bool(
+            (definition.get("column_masks") or [])
+            or (
+                isinstance(definition.get("row_filter"), dict)
+                and definition["row_filter"].get("function_name")
+            )
+        )
+        if has_policies:
+            return ""
+        typed = self._describe_columns_typed(target_full_name)
+        for col in definition.get("columns") or []:
+            name = str(col.get("name") or "").lower()
+            src_type = _normalize_type(str(col.get("type_text") or col.get("type") or ""))
+            tgt_type = typed.get(name, "")
+            if name in typed and src_type and tgt_type and src_type != tgt_type:
+                return (
+                    f"column type changed on source ({name}: {tgt_type} → {src_type}); "
+                    "not altered on target (out of scope)"
+                )
+        return ""
+
+    def _apply_policies(
+        self,
+        inventory: dict[str, dict[str, Any]],
+        by_target: dict[str, dict[str, Any]],
+        order_start: int,
+    ) -> list["PackageImportResult"]:
+        """Phase 1c (bug A1/A2): apply the exported classic ``SET MASK`` / ``SET ROW
+        FILTER`` statements (``policies/`` dir) to PRE-EXISTING tables whose DDL changed
+        on an incremental run.
+
+        The gap this closes: a mask or row filter added to an ALREADY-migrated column of
+        an existing table lands only in ``ddl_hash`` (masks/filters ride inline in
+        ``SHOW CREATE``), so the table is ``CHANGED`` but ``SKIP_EXISTING`` — the active
+        engine never re-issued the standalone ``SET MASK`` and the object falsely read
+        "Updated". Fresh tables get their masks inline in ``CREATE TABLE`` (Phase 1); a
+        newly-ADDED column gets its mask in schema evolution (Phase 1b) — so only a
+        ``CHANGED`` pre-existing table needs this pass.
+
+        Idempotent: an already-bound mask/filter is a skip. Fail-closed: a mask/filter
+        that cannot be applied records the table for the fail-closed sweep (dropped if
+        it were a fresh shell, marked FAILURE in place if pre-existing) and the op reads
+        FAILURE (``PROTECTION_FAILED``) — never a silent success. A removed mask/filter
+        is report-only (its SET statement is simply absent from ``policies/``; the engine
+        never emits ``DROP MASK`` / ``DROP ROW FILTER`` — confirmed decision).
+        """
+        policies_dir = self.root / "policies"
+        if not policies_dir.exists():
+            return []
+        # On a full run masks ride inline in CREATE TABLE; on a dry run nothing is
+        # applied — so a separate policy pass only exists for an incremental re-apply.
+        if self.dry_run or self.delta_plan is None or not self.delta_plan.incremental:
+            return []
+        files = sorted(
+            path for path in policies_dir.glob("*.sql")
+            if path.is_file() and not path.name.startswith("all_")
+        )
+        results: list[PackageImportResult] = []
+        offset = 0
+        for path in files:
+            object_type, parsed_name = _parse_sql_filename(path.name)
+            target_full_name = self._map_name(parsed_name)
+            if not self._in_scope(object_type, target_full_name):
+                continue
+            # Never act on an object that was not created this run (create FAILURE /
+            # MANUAL skip) — its own row already carries the accurate status (task 5).
+            if target_full_name in self._absent_objects:
+                continue
+            inventory_row = (
+                by_target.get(target_full_name) or inventory.get(parsed_name) or {}
+            )
+            source_full_name = str(
+                inventory_row.get("source_full_name")
+                or inventory_row.get("full_name")
+                or parsed_name
+            )
+            # Only a CHANGED (ddl differs) pre-existing table needs a re-apply. A fresh
+            # table is CREATED_NEW (masks inline); an UNCHANGED one already has them.
+            if self.delta_plan.action(source_full_name) != CHANGED:
+                continue
+            offset += 1
+            result = PackageImportResult(
+                object_type=object_type,
+                source_full_name=source_full_name,
+                target_full_name=target_full_name,
+                full_name=source_full_name,
+                action="APPLY_POLICY",
+                status="PENDING",
+                policies_path=str(path),
+                dependency_level=_type_rank(object_type),
+                import_order=order_start + offset,
+            )
+            try:
+                statements = [
+                    s for s in _split_statements(path.read_text(encoding="utf-8"))
+                    if s.strip()
+                ]
+                failed = ""
+                skipped = False
+                for statement in statements:
+                    try:
+                        self.sql.execute(statement)
+                    except Exception as exec_exc:  # noqa: BLE001
+                        msg = str(exec_exc)
+                        if _is_policy_exists_error(msg) or _is_already_exists_error(msg):
+                            skipped = True
+                            continue
+                        failed = msg
+                        break
+                if failed:
+                    # Fail-closed: record the table (marked FAILURE in place in Phase 7,
+                    # since a CHANGED table is pre-existing and never dropped).
+                    self._record_governance_failure(
+                        object_type, target_full_name, "APPLY_POLICY", None, failed
+                    )
+                    result.status = "FAILURE"
+                    result.action = "APPLY_POLICY"
+                    result.error_code = "PROTECTION_FAILED"
+                    result.message = (
+                        "classic mask / row filter failed to apply; table marked "
+                        f"FAILURE fail-closed: {failed[:400]}"
+                    )
+                elif not statements:
+                    # No policy statements in the file (defensive) — nothing to apply.
+                    result.status = "SUCCESS"
+                    result.message = "no classic mask / row filter statements"
+                else:
+                    result.status = "SUCCESS"
+                    result.message = (
+                        ("already applied; " if skipped else "applied; ")
+                        + statements[0][:300]
+                    )
+            except Exception as exc:  # noqa: BLE001
+                result.status = "FAILURE"
+                result.error_code = type(exc).__name__
+                result.message = str(exc)
+            results.append(result)
+        return results
+
     def _replay_schema_evolution(
         self, by_target: dict[str, dict[str, Any]], order_start: int
     ) -> list["PackageImportResult"]:
@@ -1474,11 +1671,25 @@ class PackageImportEngine:
             target_cols = self._describe_columns(target_full_name)
             if target_cols is None:
                 continue
+            source_names = {str(c.get("name") or "").lower() for c in source_columns}
             added = [
                 c for c in source_columns
                 if str(c.get("name") or "").lower() not in target_cols
             ]
             if not added:
+                # CHANGED but nothing to ADD: classify the diff so the report label is
+                # honest (A3/A4) instead of a blanket "Updated". A column DROP or TYPE
+                # CHANGE is out of scope (non-destructive / unsupported) → the object's
+                # own row reads a Skipped variant with a comment; a mask / row-filter
+                # change is applied by the policies phase (Phase 1c) and reads "Updated".
+                reason = self._changed_table_noop_reason(
+                    target_full_name, target_cols, source_names, definition
+                )
+                if reason:
+                    create = self._created_objects.get(target_full_name)
+                    if create is not None and create.status != "FAILURE":
+                        create.delta_action = "CHANGED_SKIPPED"
+                        create.message = reason
                 continue
             # Build a synthetic object so the existing mask/row-filter builders emit
             # the correctly-quoted ALTER statements against the target name.

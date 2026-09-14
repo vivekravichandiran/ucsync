@@ -252,7 +252,7 @@ def test_full_run_seeds_then_unchanged_rerun_is_zero_writes(tmp_path: Path):
             "ddl_hash": ddl_fingerprint(row),
             "governance_hash": governance_fingerprint(row),
             "grants": grant_fingerprint_set(row),
-            "last_sync_status": "SUCCESS",
+            "last_action": "created",
         }
         for row in inv
     }
@@ -275,15 +275,15 @@ def test_prior_failure_is_reattempted_not_skipped(tmp_path: Path):
     success that hides a missing/failed target object."""
     inv = _inventory()
     root = _bundle(tmp_path, inv)
-    # Baseline with identical fingerprints but the TABLE's prior status = FAILURE.
+    # Baseline with identical fingerprints but the TABLE's prior action = failed.
     baseline = {
         row["full_name"]: {
             "object_type": row["object_type"],
             "ddl_hash": ddl_fingerprint(row),
             "governance_hash": governance_fingerprint(row),
             "grants": grant_fingerprint_set(row),
-            "last_sync_status": (
-                "FAILURE" if row["object_type"] == "TABLE" else "SUCCESS"
+            "last_action": (
+                "failed" if row["object_type"] == "TABLE" else "created"
             ),
         }
         for row in inv

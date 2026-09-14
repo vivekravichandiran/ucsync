@@ -190,7 +190,7 @@ def test_failclosed_drops_and_propagates(tmp_path: Path):
             batch_id="b", run_id="r1", result=r.to_dict(), ran_by="me",
             utility_version="1",
         )
-        assert state["last_sync_status"] == "FAILURE"
+        assert state["last_action"] == "failed"
 
 
 def test_governance_failures_helper_drives_the_hard_fail(tmp_path: Path):
@@ -689,13 +689,14 @@ def test_full_happy_path_no_drops(tmp_path: Path):
     assert any("GRANT SELECT" in s for s in main.statements)
     assert any("SET TAGS" in s for s in main.statements)
 
-    # Report: object count matches the inventory, Issues sheet is empty.
+    # Report: object count matches the inventory, and there is NO Failures section on
+    # the Summary (the standalone Issues sheet is gone — B1; failures live in Summary).
     out = tmp_path / "import.xlsx"
     build_report(inventory, str(out), stage="IMPORT", run_id="r1",
                  import_results=[r.to_dict() for r in results])
     from openpyxl import load_workbook
     wb = load_workbook(out)
-    issues = list(wb["Issues"].iter_rows(values_only=True))
-    assert len(issues) == 1  # header only, no problems
+    assert "Issues" not in wb.sheetnames
     summary = [c for row in wb["Summary"].iter_rows(values_only=True) for c in row]
     assert len(inventory) in summary  # "objects" == inventory count
+    assert not any(str(c or "").startswith("Failures (") for c in summary)  # clean run

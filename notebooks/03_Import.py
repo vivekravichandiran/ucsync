@@ -226,6 +226,7 @@ print(f"delta: run mode = {_mode}"
 #   uc_sync_state — one row per source object (MERGE upsert), the per-object
 #     last-sync record that a future incremental run would diff against.
 # Best-effort: audit/state logging must never fail the migration itself.
+outstanding_rows = None  # cumulative failures from state (Part E) → report Outstanding sheet
 try:
     if cfg.audit_table or cfg.state_table:
         result_dicts = [r.to_dict() for r in results]
@@ -251,14 +252,24 @@ try:
                 rd for rd in result_dicts
                 if not (rd.get("policies_path") and rd.get("object_type") != "ABAC_POLICY")
             ]
-            SyncStateService(spark, cfg.state_table).upsert(
+            _state_svc = SyncStateService(spark, cfg.state_table)
+            _state_svc.upsert(
                 state_row_from_import(
                     batch_id=batch_id, run_id=run_id, result=rd,
                     ran_by=ran_by, utility_version=__version__,
+                    connectivity_mode=cfg.connectivity_mode,
                 )
                 for rd in state_dicts
             )
             print(f"state: upserted {len(state_dicts)} object rows into {cfg.state_table}")
+            # Outstanding (Part E): cumulative still-broken objects from state across ALL
+            # runs, read AFTER this run's upsert so the report's Outstanding sheet is the
+            # authoritative "everything still broken" view. Best-effort.
+            try:
+                outstanding_rows = _state_svc.outstanding_rows()
+                print(f"state: {len(outstanding_rows)} outstanding (cumulative failures)")
+            except Exception as _ox:  # noqa: BLE001
+                print(f"outstanding read skipped: {_ox!r}")
 except Exception as _exc:  # noqa: BLE001 - ops tables are best-effort
     import traceback
     print(f"ops audit/state write skipped: {_exc!r}")
@@ -373,6 +384,7 @@ try:
         import_results=[r.to_dict() for r in results],
         delta_rows=delta_rows,
         volume_copy_results=volume_copy_report_rows,
+        outstanding=outstanding_rows,
         workspace_url=getattr(wc.auth, "host", ""),
     )
     print(f"report: {report_path}")

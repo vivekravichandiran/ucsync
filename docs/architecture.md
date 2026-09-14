@@ -72,8 +72,9 @@ or governed tag) that cannot be fully protected never survives. A classic
 mask/filter failure fails `CREATE TABLE` atomically; a governed-tag or ABAC failure
 drops the freshly-created table (`DROP TABLE IF EXISTS`) and marks it `FAILURE`
 (`error_code=PROTECTION_FAILED`) — the failure is written onto the object's result
-in place, so it shows in the Tables sheet, the Issues sheet, `uc_sync_audit` and
-`uc_sync_state`. Pre-existing tables are `SKIP_EXISTING` and never dropped.
+in place, so it shows in the Tables sheet, the Summary **Failures** section, the
+**Outstanding** sheet (cumulative across runs), `uc_sync_audit` and `uc_sync_state`.
+Pre-existing tables are `SKIP_EXISTING` and never dropped.
 
 **ABAC needs a SQL warehouse:** `CREATE POLICY` is rejected at parse on a classic
 Spark cluster, so the ABAC phase runs on `import_warehouse_id`. If a bundle carries

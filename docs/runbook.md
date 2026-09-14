@@ -89,9 +89,21 @@ ABAC and no masked-table views.
 partially-protected table survive. Classic masks / row filters ride **inline** in
 the `CREATE TABLE` (a missing mask function fails the CREATE atomically); a
 governed-tag or ABAC failure **drops** the freshly-created table and marks it
-`FAILURE` (`PROTECTION_FAILED`) — visible in the Tables + Issues sheets, `uc_sync_audit`
-and `uc_sync_state`. Pre-existing tables (`SKIP_EXISTING`) are never dropped. Views
-are created last, so a view on a dropped table simply fails to create.
+`FAILURE` (`PROTECTION_FAILED`) — visible in the Tables sheet, the Summary **Failures**
+section, the **Outstanding** sheet, `uc_sync_audit` and `uc_sync_state`. Pre-existing
+tables (`SKIP_EXISTING`) are never dropped. Views are created last, so a view on a
+dropped table simply fails to create.
+
+**Report vocabulary + state parity.** The report and `uc_sync_state.last_action` share
+one status vocabulary (`uc_sync.vocab`): `created` / `created_with_warning` / `updated`
+/ `adopted` / `skipped` / `skipped_create_disabled` (BYO) / `not_selected` /
+`skipped_no_object` / `deleted_in_source` / `manual` / `failed`. `uc_sync_state` records
+three per-object fingerprints — `source_definition_hash` (whole-object canonical hash),
+`ddl_hash` (structural DDL incl. inline classic masks/row filters; drives CHANGED),
+`governance_hash` (governed tags only; drives GOVERNANCE_UPDATED) — plus `first_seen`,
+`connectivity_mode`, `failure_category` and `last_error_raw`. `uc_sync_volume_files`
+records each copied file with `status` (COPIED / FAILED / SKIPPED_*), `message`,
+`created_at` and `updated_at`.
 
 Import-only extras (all optional): `filter_tables` (import a subset of tables),
 `catalog_mapping_json` (recreate a source catalog under a different target name — or
