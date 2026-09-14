@@ -51,6 +51,33 @@ def test_unchanged_action_reads_as_skipped_not_created(tmp_path):
     assert _wsmig_status_key({"status": "SUCCESS", "action": "CREATE"}) == "created"
 
 
+def test_changed_preexisting_object_reads_updated_through_report(tmp_path):
+    """Bug #19 integration: a governance/grants change on a PRE-EXISTING object must
+    read 'Updated' on its per-type sheet — end to end through build_report (regression
+    for _import_index dropping delta_action, which made it read 'Adopted')."""
+    from openpyxl import load_workbook
+    objects = [
+        {"object_type": "TABLE", "full_name": "c.s.upd", "owner": "me",
+         "tags": {}, "grants": []},
+        {"object_type": "TABLE", "full_name": "c.s.new", "owner": "me",
+         "tags": {}, "grants": []},
+    ]
+    import_results = [
+        # pre-existing table whose grants changed → GRANTS_UPDATED + SKIP_EXISTING.
+        {"object_type": "TABLE", "target_full_name": "c.s.upd", "full_name": "c.s.upd",
+         "status": "SUCCESS", "action": "SKIP_EXISTING", "delta_action": "GRANTS_UPDATED"},
+        # a genuinely new table.
+        {"object_type": "TABLE", "target_full_name": "c.s.new", "full_name": "c.s.new",
+         "status": "SUCCESS", "action": "CREATE_OR_SKIP", "delta_action": "CREATED_NEW"},
+    ]
+    out = tmp_path / "r.xlsx"
+    build_report(objects, str(out), stage="IMPORT",
+                 import_results=import_results, run_id="r1")
+    rows = {r[0]: r[-1] for r in load_workbook(out)["Tables"].iter_rows(values_only=True)}
+    assert rows["c.s.upd"] == "Updated"
+    assert rows["c.s.new"] == "Created"
+
+
 def test_build_report_has_governance_sheets(tmp_path):
     objects = [
         {"object_type": "CATALOG", "full_name": "c", "owner": "me",

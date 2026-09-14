@@ -97,6 +97,9 @@ def _import_index(
             "status": str(r.get("status") or ""),
             "action": str(r.get("action") or ""),
             "message": str(r.get("message") or ""),
+            # delta_action is required by _wsmig_status_key to tell an "Updated"
+            # (a change applied to a pre-existing object) from an "Adopted" — bug #19.
+            "delta_action": str(r.get("delta_action") or ""),
         }
         for key in (r.get("target_full_name"), r.get("full_name")):
             key = str(key or "")
