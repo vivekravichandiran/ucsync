@@ -169,8 +169,9 @@ Spark cluster, so the classic-Spark capture path **does not exist**.
 
 | Object family | Capture | On failure |
 |---------------|---------|-----------|
-| **Table / view family** (`TABLE`, `EXTERNAL_TABLE`, `VIEW`, `DYNAMIC_VIEW`, `MATERIALIZED_VIEW`, `STREAMING_TABLE`) | `SHOW CREATE` on the warehouse (retries + backoff) — the **only** full-fidelity source: columns/types/nullability, comments, **inline `MASK` / `WITH ROW FILTER`**, `TBLPROPERTIES`, partitioning, clustering, constraints, generated & identity columns | **Hard `FAILURE`** (`DDL_CAPTURE_FAILED`) — **no** synthesized fallback (that would silently drop masks / filters / constraints). Re-run once the warehouse is warm. |
-| **Functions** | Reassembled from `information_schema.routines` + `.parameters` (lossless; `SHOW CREATE FUNCTION` is unsupported in Databricks SQL) | reported failure |
+| **Table / view family** (`TABLE`, `EXTERNAL_TABLE`, `VIEW`, `DYNAMIC_VIEW`, `MATERIALIZED_VIEW`) | `SHOW CREATE` on the warehouse (retries + backoff) — the **only** full-fidelity source: columns/types/nullability, comments, **inline `MASK` / `WITH ROW FILTER`**, `TBLPROPERTIES`, partitioning, clustering, constraints, generated & identity columns | **Hard `FAILURE`** (`DDL_CAPTURE_FAILED`) — **no** synthesized fallback (that would silently drop masks / filters / constraints). Re-run once the warehouse is warm. |
+| **Functions** | Reassembled from `information_schema.routines` + `.parameters` — SQL scalar UDFs, **SQL table-valued functions** (`RETURNS TABLE(...)`) and **Python UDFs** (`LANGUAGE PYTHON … AS $$…$$`); `SHOW CREATE FUNCTION` is unsupported in Databricks SQL | reported failure |
+| **Report-only tables** (`STREAMING_TABLE`, `MONITOR_METRIC_TABLE`, Tier-A FOREIGN/pipeline tables) | **No capture** — never migrated, so no `SHOW CREATE` is run (inventory-listed only) | — |
 | **Catalogs / schemas / volumes / external locations** | Metadata-based (complete — no `SHOW CREATE` needed) | — |
 | **Storage credentials** | REST / API only (`CREATE STORAGE CREDENTIAL` has no SQL form; secrets are never exported) | non-MI → `MANUAL_ACTION_REQUIRED` |
 
@@ -325,7 +326,7 @@ change) · `created_with_warning` · `manual` · `deleted_in_source` · `skipped
 |--------|---------------|
 | **Structure** | Storage credentials (MI, from an access-connector id), external locations, catalogs, schemas, volumes (managed + external) |
 | **Tables** | **Full definitions, no data** — via `SHOW CREATE` on a warehouse |
-| **Functions** | incl. mask/filter UDFs (reassembled losslessly), created **before** the tables that reference them |
+| **Functions** | SQL scalar + table-valued (`RETURNS TABLE`) UDFs and Python UDFs (`LANGUAGE PYTHON`), reassembled from `information_schema`; created **before** the tables that reference them |
 | **Views** | views, dynamic views, metric views — created on the SQL warehouse |
 | **Governance** | governed-tag **definitions** (recreated via `CREATE GOVERNED TAG`, idempotent) **+ assignments**, ABAC policies (verbatim, incl. each `EXCEPT`), classic column masks / row filters, grants & ownership |
 
@@ -335,7 +336,8 @@ change) · `created_with_warning` · `manual` · `deleted_in_source` · `skipped
 |--------|-----|--------|
 | **Storage-credential secrets** | Secrets are never exported | non-MI credentials → `MANUAL_ACTION_REQUIRED`; recreate by hand |
 | **Governed-tag definitions** | Recreated by this tool in **Phase 0** (best-effort, idempotent) from the source's captured definitions | Usually automatic. Falls back to a prerequisite only if the source definitions can't be **captured** (no permission / API absent) or `CREATE GOVERNED TAG` can't run on the target — then define them (workspace-migration utility) first, or `SET TAGS` reports `GOVERNANCE_PREREQ_MISSING` |
-| **Materialized views / streaming tables** | DLT/SDP-pipeline-managed (re-issuing DDL would spin a new pipeline) | **Report-only**; MV only when `migrate_materialized_views=true`; streaming tables always report-only |
+| **Materialized views / streaming tables** | DLT/SDP-pipeline-managed (re-issuing DDL would spin a new pipeline) | **Report-only**; MV only when `migrate_materialized_views=true` (MV DDL is captured); streaming tables always report-only (no DDL captured) |
+| **Monitor metric tables** | A Lakehouse monitor's `*_profile_metrics` / `*_drift_metrics` — plain Delta tables the monitor regenerates | **Report-only** (own report tab); detected from the monitor's declared metric-table names, never migrated as empty copies |
 | **Volume file contents** | A data-plane concern | Definitions migrate; bytes only when `copy_volume_data=true` |
 
 ### ❌ Out of scope entirely

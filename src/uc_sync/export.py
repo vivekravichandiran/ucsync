@@ -49,8 +49,11 @@ _HARD_FAIL_SHOW_CREATE_TYPES = {
     "EXTERNAL_TABLE",
     "VIEW",
     "DYNAMIC_VIEW",
+    # Materialized views are conditionally migratable (migrate_materialized_views), so
+    # their DDL is still captured. Streaming tables are ALWAYS report-only (pipeline-
+    # owned) — capturing their SHOW CREATE was wasted work; they are in the report-only
+    # no-DDL set below instead.
     "MATERIALIZED_VIEW",
-    "STREAMING_TABLE",
 }
 
 # Report-only types that must never have DDL captured — they are reported but never
@@ -65,6 +68,10 @@ _REPORT_ONLY_NO_DDL_TYPES = {
     "MONITOR",
     "UC_SECRET",
     "MODEL",
+    # Always report-only: streaming tables (pipeline-owned) and monitor metric tables
+    # (regenerated when the monitor is recreated). Never capture DDL for these.
+    "STREAMING_TABLE",
+    "MONITOR_METRIC_TABLE",
 }
 
 
@@ -297,7 +304,6 @@ class ExportService:
                         "DYNAMIC_VIEW",
                         "METRIC_VIEW",
                         "MATERIALIZED_VIEW",
-                        "STREAMING_TABLE",
                         "FUNCTION",
                     }:
                         all_table_ddls.append(ddl_sql.rstrip() + "\n")

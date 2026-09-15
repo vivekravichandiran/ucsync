@@ -138,6 +138,7 @@ SECURABLE_TYPE_FOR_OBJECT = {
     ObjectType.METRIC_VIEW: "table",
     ObjectType.MATERIALIZED_VIEW: "table",
     ObjectType.STREAMING_TABLE: "table",
+    ObjectType.MONITOR_METRIC_TABLE: "table",
     ObjectType.VOLUME: "volume",
     ObjectType.EXTERNAL_VOLUME: "volume",
     ObjectType.FUNCTION: "function",
@@ -269,6 +270,29 @@ class InventoryService:
         # none" vs "we never looked"); every row carries in_scope_for_migration=false.
         # Migration scope is unchanged — nothing here is ever created on the target.
         tier_a = self._iter_tier_a_assets(catalogs, filtered)
+        # Reclassify monitor metric tables (profile/drift) — ordinary Delta tables the
+        # inventory picked up as TABLE, but a Lakehouse monitor owns and regenerates them
+        # when recreated. Detected AUTHORITATIVELY from each monitor's declared
+        # profile_metrics/drift_metrics table names (NOT a `_*_metrics` name heuristic),
+        # so they become report-only and are never migrated as empty copies.
+        metric_tables: set[str] = set()
+        for a in tier_a:
+            if a.object_type == ObjectType.MONITOR:
+                for key in ("profile_metrics_table_name", "drift_metrics_table_name"):
+                    val = (a.definition or {}).get(key)
+                    if val:
+                        metric_tables.add(str(val))
+        if metric_tables:
+            for obj in filtered:
+                if (
+                    obj.object_type == ObjectType.TABLE
+                    and obj.full_name in metric_tables
+                ):
+                    obj.object_type = ObjectType.MONITOR_METRIC_TABLE
+                    obj.definition = {
+                        **(obj.definition or {}),
+                        "in_scope_for_migration": False,
+                    }
         # Governed-tag definitions (FEAT-2): the account-level tag policies actually
         # used by the in-scope objects, captured so the import can CREATE them on the
         # target before any SET TAGS (idempotent for a same-account target).

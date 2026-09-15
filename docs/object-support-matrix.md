@@ -16,7 +16,7 @@ matter. This is the quick reference behind [Architecture › Scope](ARCHITECTURE
 | **Schema** | ✅ same name (`create_schemas`) | grants, tags, ABAC | `MANAGED LOCATION` from `object_locations.csv` or the catalog root. |
 | **Volume (managed)** | ✅ (`create_volumes`) | grants, tags | Files not copied (unless `copy_volume_data=true`). |
 | **External volume** | ✅ (`create_volumes`) | grants, tags | `CREATE EXTERNAL VOLUME` at the path-rewritten target location; its covering EL created too (create mode). Files not copied unless `copy_volume_data=true`. |
-| **Function** (incl. mask/filter UDFs) | ✅ (`create_functions`) | grants | Reassembled losslessly from `information_schema.routines`+`.parameters` over the warehouse. Created **before** the masks/policies that reference them. |
+| **Function** (incl. mask/filter UDFs) | ✅ (`create_functions`) | grants | Reassembled from `information_schema.routines`+`.parameters` over the warehouse: SQL scalar UDFs, **SQL table-valued functions** (`RETURNS TABLE(...)`), and **Python UDFs** (`LANGUAGE PYTHON … AS $$…$$`). Created **before** the masks/policies that reference them. |
 | **Managed table** (full definition, no data) | ✅ (`create_tables`) | tags, ABAC, classic masks/filters (**INLINE**), grants | Full fidelity via `SHOW CREATE` **on the SQL warehouse**: columns/types/nullability, comments, inline `MASK`/`WITH ROW FILTER`, `TBLPROPERTIES`, partitioning, clustering, constraints (PK/CHECK), generated & identity columns. A failed capture is a **hard `FAILURE`** (`DDL_CAPTURE_FAILED`) — no synthesized fallback. Data out of scope. |
 | **External table** | ✅ (`create_tables`) | grants | Path rewritten; requires a location mapping. `SHOW CREATE` on the warehouse (hard-fail, as above). |
 | **View / dynamic view** | ✅ (`create_views`) | grants, tags | Definition from `SHOW CREATE`. **Created on the SQL warehouse** (`import_warehouse_id`) — classic Spark errors on a view over a masked/row-filtered table. Fails naturally if a referenced object isn't present. |
@@ -32,9 +32,10 @@ matter. This is the quick reference behind [Architecture › Scope](ARCHITECTURE
 | Object | Handling |
 |--------|----------|
 | **Materialized view** | Report-only by default (DLT/SDP pipeline would re-spin). Migrated only with `migrate_materialized_views=true`. |
-| **Streaming table** | Always report-only (pipeline-managed). |
+| **Streaming table** | Always report-only (pipeline-managed). **No DDL captured** — never `SHOW CREATE`d (nothing to import), so no export work is wasted. |
 | **Volume file contents** | Definitions migrate; **bytes** only when `copy_volume_data=true` (recorded in `uc_sync_volume_files`). |
-| **Registered models, vector-search indexes, online tables, monitors, UC secrets** (Tier-A) | **Inventoried & reported** (`in_scope_for_migration=false`), not migrated. |
+| **Registered models, vector-search indexes, online tables, monitors, UC secrets** (Tier-A) | **Inventoried & reported** (`in_scope_for_migration=false`), not migrated. No DDL captured. |
+| **Monitor metric tables** (a monitor's `*_profile_metrics` / `*_drift_metrics`) | **Report-only** — plain Delta tables a Lakehouse monitor owns; recreating the monitor regenerates them, so they are **not** migrated as empty copies. Detected from each monitor's declared metric-table names (its own **Monitor Metric Tables** report tab). |
 | **Connections / shares / recipients / providers** | Inventory-only, flagged `MANUAL` — carry remote secrets/endpoints; recreate by hand. |
 
 ## ❌ Out of scope entirely

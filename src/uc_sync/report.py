@@ -409,6 +409,9 @@ _INVENTORY_ONLY = [
     ("LAKEBASE_TABLE", "Lakebase Tables"),
     # Pipeline-managed tables (event logs / outputs) — reported, never migrated (#8).
     ("PIPELINE_TABLE", "Pipeline Tables"),
+    # Monitor-owned metric tables (profile/drift) — regenerated when the monitor is
+    # recreated, so reported, never migrated as empty copies.
+    ("MONITOR_METRIC_TABLE", "Monitor Metric Tables"),
 ]
 
 
@@ -431,7 +434,7 @@ _WSMIG_FONT = "Calibri"
 
 _REPORT_ONLY_TYPES_REPORT = {
     "STREAMING_TABLE", "MODEL", "ONLINE_TABLE", "VECTOR_INDEX", "MONITOR",
-    "UC_SECRET", "LAKEBASE_TABLE", "PIPELINE_TABLE",
+    "UC_SECRET", "LAKEBASE_TABLE", "PIPELINE_TABLE", "MONITOR_METRIC_TABLE",
 }
 
 
@@ -505,14 +508,22 @@ def build_report(
     def _status_cells(o: dict[str, Any]) -> list[str]:
         name = o["full_name"]
         tname = str(o.get("target_full_name") or "")
+        # Report-only objects have no DDL captured and are never imported — the export
+        # column must not claim "EXPORTED" (it didn't), and import is a manual step.
+        report_only = (
+            o.get("object_type") in _REPORT_ONLY_TYPES_REPORT
+            or (o.get("definition") or {}).get("in_scope_for_migration") is False
+        )
         cells: list[str] = []
         if stage in ("EXPORT", "IMPORT"):
             cells.append(
-                _render_export_status(export_idx.get(name) or export_idx.get(tname))
+                "Skipped (report-only)" if report_only
+                else _render_export_status(export_idx.get(name) or export_idx.get(tname))
             )
         if stage == "IMPORT":
             cells.append(
-                _render_import_status(idx.get(name) or idx.get(tname))
+                _STATUS_STYLE["manual"][0] if report_only
+                else _render_import_status(idx.get(name) or idx.get(tname))
             )
         return cells
 
@@ -762,6 +773,12 @@ def build_report(
             ["object", "in_scope_for_migration", "comment", "owner", "note"]
             + status_headers,
         )
+        note = (
+            "monitor-managed metric table — regenerated when the monitor is recreated; "
+            "not migrated"
+            if obj_type == "MONITOR_METRIC_TABLE"
+            else "inventory-only — report-only Tier-A AI asset (migrate manually)"
+        )
         for o in sorted(rows, key=lambda x: x["full_name"]):
             # Report-only inventory rows are a MANUAL step (B4), never blank/SUCCESS.
             inv_status = list(_status_cells(o))
@@ -769,7 +786,7 @@ def build_report(
                 inv_status[-1] = _STATUS_STYLE["manual"][0]
             ws_t.append([
                 o["full_name"], "false", _cell(o, "comment"), o.get("owner") or "",
-                "inventory-only — report-only Tier-A AI asset (migrate manually)",
+                note,
             ] + inv_status)
 
     # Governed Tags (B5): the governed-tag DEFINITIONS the utility creates before any

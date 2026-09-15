@@ -70,6 +70,8 @@ _ALWAYS_REPORT_ONLY_TYPES = {
     "LAKEBASE_TABLE",
     # Pipeline-managed tables (bug #8): reported, never migrated.
     "PIPELINE_TABLE",
+    # Monitor-owned metric tables: regenerated when the monitor is recreated.
+    "MONITOR_METRIC_TABLE",
 }
 
 

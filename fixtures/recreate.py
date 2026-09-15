@@ -40,6 +40,8 @@ TC_SQL_STAGES = {
     "tc_acl":       ["65_testcat_acl.sql"],
     "tc_negative":  ["66_testcat_negative.sql"],
     "tc_metric":    ["67_testcat_metric_view.sql"],
+    # NOT in TC_ORDER — apply only AFTER a baseline migration, then re-migrate
+    "tc_incremental": ["68_testcat_incremental.sql"],
 }
 # Target-run SQL stages (BYO shell — execute on the TARGET ws/warehouse)
 TC_SQL_STAGES_TGT = {

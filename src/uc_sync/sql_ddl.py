@@ -440,7 +440,7 @@ def function_ddl_from_information_schema(
     cat_q = quote_identifier(catalog)
     routine_sql = (
         "SELECT specific_name, data_type, full_data_type, routine_definition, "
-        "routine_body, is_deterministic, comment "
+        "routine_body, external_language, is_deterministic, comment "
         f"FROM {cat_q}.information_schema.routines "
         f"WHERE routine_schema = '{escape_literal(schema)}' "
         f"AND routine_name = '{escape_literal(name)}' "
@@ -449,12 +449,28 @@ def function_ddl_from_information_schema(
     rows = _rows(sql, routine_sql)
     if not rows:
         return None
-    row = (list(rows[0]) + [None] * 7)[:7]
-    specific_name, data_type, full_data_type, routine_definition, _body, _det, comment = row
+    row = (list(rows[0]) + [None] * 8)[:8]
+    (specific_name, data_type, full_data_type, routine_definition,
+     routine_body, external_language, _det, comment) = row
     return_type = str(full_data_type or data_type or "").strip()
     body = str(routine_definition or "").strip()
     if not return_type or not body:
         return None
+    # A table-valued function's return type is a column list; information_schema reports
+    # data_type='TABLE' (full_data_type='(col type, ...)') WITHOUT the TABLE keyword, so
+    # emit RETURNS TABLE(...). A Python (or other external-language) UDF carries its body
+    # in a LANGUAGE <lang> AS $$...$$ block, NOT a SQL `RETURN <expr>` (bug: both were
+    # rebuilt as scalar SQL UDFs → PARSE_SYNTAX_ERROR).
+    is_table_return = (
+        str(data_type or "").strip().upper() in {"TABLE", "TABLE_TYPE"}
+        or return_type.startswith("(")
+    )
+    returns_clause = f"TABLE {return_type}" if is_table_return else return_type
+    language = str(external_language or "").strip()
+    if str(routine_body or "").strip().upper() == "EXTERNAL" and language:
+        body_clause = f" LANGUAGE {language.upper()} AS $$\n{body}\n$$"
+    else:
+        body_clause = f" RETURN {body}"
 
     declarations: list[str] = []
     if specific_name:
@@ -496,8 +512,8 @@ def function_ddl_from_information_schema(
     # correctly marked it REPLACED (bug: incremental function update lost).
     return (
         f"CREATE OR REPLACE FUNCTION {target}"
-        f"({', '.join(declarations)}) RETURNS {return_type}"
-        f"{comment_clause(comment)} RETURN {body};"
+        f"({', '.join(declarations)}) RETURNS {returns_clause}"
+        f"{comment_clause(comment)}{body_clause};"
     )
 
 

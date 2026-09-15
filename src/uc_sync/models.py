@@ -36,6 +36,12 @@ class ObjectType(str, Enum):
     # from the tables API) — a pipeline event-log table or output. Reported, never
     # migrated (bug #8): the pipeline recreates its own event logs on the target.
     PIPELINE_TABLE = "PIPELINE_TABLE"
+    # A metric table (profile/drift) owned by a Lakehouse quality monitor — a plain
+    # Delta table the monitor manages. Recreating the monitor on the target regenerates
+    # it, so it is reported, never migrated as an empty copy. Detected authoritatively
+    # from each monitor's declared profile_metrics/drift_metrics table names (not a name
+    # heuristic).
+    MONITOR_METRIC_TABLE = "MONITOR_METRIC_TABLE"
     STORAGE_CREDENTIAL = "STORAGE_CREDENTIAL"
     SERVICE_CREDENTIAL = "SERVICE_CREDENTIAL"
     EXTERNAL_LOCATION = "EXTERNAL_LOCATION"
