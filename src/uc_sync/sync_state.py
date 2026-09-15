@@ -301,14 +301,18 @@ class SyncStateService:
             .createOrReplaceTempView(temp_view)
         )
         # MERGE keeps one row per source object for incremental planning. first_seen is
-        # PRESERVED on update (set once, on the first insert) — so the UPDATE lists every
-        # column EXCEPT the preserved ones; INSERT still writes them all.
-        update_cols = [
-            f.name for f in schema.fields if f.name not in _PRESERVE_ON_UPDATE
-        ]
-        set_clause = ", ".join(
-            f"target.{c} = source.{c}" for c in update_cols
-        )
+        # set ONCE and preserved thereafter — but a row that predates the column (legacy
+        # upgrade) has first_seen NULL, so use coalesce(existing, now) to fill it on the
+        # next update while never overwriting an existing value. INSERT writes it fresh.
+        set_parts = []
+        for f in schema.fields:
+            if f.name in _PRESERVE_ON_UPDATE:
+                set_parts.append(
+                    f"target.{f.name} = coalesce(target.{f.name}, source.{f.name})"
+                )
+            else:
+                set_parts.append(f"target.{f.name} = source.{f.name}")
+        set_clause = ", ".join(set_parts)
         self.spark.sql(
             f"""
             MERGE INTO {self.full_name} AS target

@@ -332,6 +332,39 @@ def test_incremental_applies_only_governance_delta(tmp_path: Path):
     assert tbl.delta_action == "GOVERNANCE_UPDATED"
 
 
+def test_byo_create_disabled_unchanged_reads_create_disabled_not_unchanged(tmp_path: Path):
+    """B3 on an incremental run: a BYO (create-disabled) object that is unchanged keeps
+    its salient status 'SKIP_CREATE_DISABLED' (→ 'Skipped (create disabled — BYO)'),
+    never the generic UNCHANGED — the utility never creates it, so that fact wins. Still
+    zero writes (the object is not re-created)."""
+    from uc_sync.vocab import status_key
+    inv = _inventory()
+    baseline = {
+        row["full_name"]: {
+            "object_type": row["object_type"],
+            "ddl_hash": ddl_fingerprint(row),
+            "governance_hash": governance_fingerprint(row),
+            "grants": grant_fingerprint_set(row),
+            "last_action": "adopted",
+        }
+        for row in inv
+    }
+    root = _bundle(tmp_path, inv)
+    sql = RecordingSql()
+    results = PackageImportEngine(
+        str(root), sql, dry_run=False, prior_state=baseline,
+        toggles={"create_catalogs": False},
+    ).run()
+    cat = next(r for r in results if r.object_type == "CATALOG")
+    assert cat.action == "SKIP_CREATE_DISABLED"
+    assert status_key(cat.to_dict()) == "skipped_create_disabled"
+    # Unchanged catalog with create disabled → no CREATE CATALOG issued (zero writes).
+    assert not any(s.upper().startswith("CREATE CATALOG") for s in sql.statements)
+    # A create-ENABLED unchanged object still reads plain unchanged → 'skipped'.
+    tbl = next(r for r in results if r.object_type == "TABLE")
+    assert tbl.action == "UNCHANGED" and status_key(tbl.to_dict()) == "skipped"
+
+
 def test_incremental_never_revokes_removed_grant(tmp_path: Path):
     inv = _inventory()
     baseline = {

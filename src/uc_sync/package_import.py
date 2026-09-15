@@ -1083,9 +1083,19 @@ class PackageImportEngine:
             and self.delta_plan.should_skip_object(source_full_name)
         ):
             result.status = "UNCHANGED"
-            result.action = "UNCHANGED"
             result.delta_action = "UNCHANGED"
-            result.message = "unchanged since last run (incremental: skipped)"
+            # A BYO / create-disabled object (the utility never creates it) keeps that
+            # as its salient status even when unchanged — the confirmed B3 decision:
+            # "Skipped (create disabled — BYO)", never conflated with "Skipped
+            # (unchanged)". Still zero writes (we return here). Only the label differs.
+            if not self._create_enabled(object_type):
+                result.action = "SKIP_CREATE_DISABLED"
+                result.message = (
+                    "create disabled (BYO) — pre-existing on target, unchanged"
+                )
+            else:
+                result.action = "UNCHANGED"
+                result.message = "unchanged since last run (incremental: skipped)"
             if target_full_name:
                 self._created_objects[target_full_name] = result
             return result
