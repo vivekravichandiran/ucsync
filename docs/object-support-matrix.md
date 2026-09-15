@@ -35,7 +35,7 @@ matter. This is the quick reference behind [Architecture › Scope](ARCHITECTURE
 | **Streaming table** | Always report-only (pipeline-managed). **No DDL captured** — never `SHOW CREATE`d (nothing to import), so no export work is wasted. |
 | **Volume file contents** | Definitions migrate; **bytes** only when `copy_volume_data=true` (recorded in `uc_sync_volume_files`). |
 | **Registered models, vector-search indexes, online tables, monitors, UC secrets** (Tier-A) | **Inventoried & reported** (`in_scope_for_migration=false`), not migrated. No DDL captured. |
-| **Monitor metric tables** (a monitor's `*_profile_metrics` / `*_drift_metrics`) | **Report-only** — plain Delta tables a Lakehouse monitor owns; recreating the monitor regenerates them, so they are **not** migrated as empty copies. Detected from each monitor's declared metric-table names (its own **Monitor Metric Tables** report tab). |
+| **Monitor metric tables** (a monitor's `*_profile_metrics` / `*_drift_metrics`) | **Report-only** — plain Delta tables a Lakehouse monitor owns; recreating the monitor regenerates them, so they are **not** migrated as empty copies. Detected from each monitor's declared metric-table names (its own **Monitor Metric Tables** report tab). *If an older tool version had migrated one, the next run self-heals its state row; the orphan copy on target must be dropped by hand — see [Runbook › manual actions](RUNBOOK.md#-handling-failures--manual-actions).* |
 | **Connections / shares / recipients / providers** | Inventory-only, flagged `MANUAL` — carry remote secrets/endpoints; recreate by hand. |
 
 ## ❌ Out of scope entirely

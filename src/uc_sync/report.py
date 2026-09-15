@@ -102,6 +102,9 @@ def _import_index(
             # delta_action is required by _wsmig_status_key to tell an "Updated"
             # (a change applied to a pre-existing object) from an "Adopted" — bug #19.
             "delta_action": str(r.get("delta_action") or ""),
+            # A non-destructive skip (column drop / type change) riding alongside an
+            # applied change — appended to the "Updated" label so it's never silent.
+            "caveat": str(r.get("caveat") or ""),
         }
         for key in (r.get("target_full_name"), r.get("full_name")):
             key = str(key or "")
@@ -230,7 +233,14 @@ def _render_import_status(entry: Optional[dict[str, str]]) -> str:
         return _STATUS_STYLE["skipped_no_object"][0]
     if status == "PENDING" or action == "DRY_RUN":
         return "DRY RUN (validated, not applied)"
-    return _STATUS_STYLE.get(key, ("", ""))[0] or (status or "")
+    label = _STATUS_STYLE.get(key, ("", ""))[0] or (status or "")
+    # A non-destructive skip (column drop / type change) that rode alongside an applied
+    # change: keep the headline (e.g. "Updated") but append the caveat so the skip is
+    # never silent (change b).
+    caveat = str(entry.get("caveat") or "")
+    if caveat and key not in ("failed", "manual"):
+        return f"{label} — {caveat}"
+    return label
 
 
 # --- Per-object-type sheet column specs -------------------------------------

@@ -236,6 +236,7 @@ cause, then re-run; the re-run is additive and idempotent, so only outstanding u
 | **`PARSE_SYNTAX_ERROR`** replaying DDL | Handled by the replay sanitizers; if it recurs, capture the DDL and extend `rewrite.py`. |
 | **Storage credential `MANUAL_ACTION_REQUIRED`** | Secrets are never exported — recreate the (non-MI) credential by hand. |
 | **A view is `PENDING` / fails** | Its referenced object isn't present yet — re-run (incremental) after the dependency exists. |
+| **Orphan copy of a now-report-only object on target** (e.g. a monitor's `*_profile_metrics` / `*_drift_metrics` migrated by an **older** tool version, since reclassified report-only) | The next run **self-heals** its `uc_sync_state` row to `manual (reclassified)` — no manual state edit needed. But the tool **never auto-drops** the leftover empty copy the older run created (additive-only, the same safety rule that never drops a data-bearing table). **Ops must delete the orphan table(s) on the target by hand — *before* recreating the owning object (e.g. the monitor), or the recreation collides with the leftover.** |
 
 Permission-specific symptoms → [Permissions › Troubleshooting](PERMISSIONS_GUIDE.md#-troubleshooting-symptom--cause--fix).
 

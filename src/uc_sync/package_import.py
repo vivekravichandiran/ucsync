@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from uc_sync import vocab
 from uc_sync.delta import CHANGED, DeltaPlan
 from uc_sync.dependency import _TYPE_RANK
 from uc_sync.fingerprints import (
@@ -62,6 +63,11 @@ class PackageImportResult:
     governance_hash: str = ""
     grants_json: str = ""
     delta_action: str = ""
+    # A non-destructive change detected but deliberately NOT applied (e.g. a column
+    # type change on an existing table) that rides ALONGSIDE an applied change. The
+    # headline status stays "Updated"; the report appends this so the skip is never
+    # silent (change b).
+    caveat: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -975,7 +981,75 @@ class PackageImportEngine:
         # governance is applied, so the run principal never loses privileges it
         # still needs mid-run.
         self._apply_deferred_ownership()
+
+        # Phase 8 — self-heal state for objects a newer tool version now classifies
+        # report-only but an OLDER version had migrated (change a). Corrects the stale
+        # non-report-only uc_sync_state row and flags the orphan copy on target.
+        results.extend(
+            self._selfheal_reclassified_report_only(inventory, len(results))
+        )
         return results
+
+    def _selfheal_reclassified_report_only(
+        self, inventory: dict[str, dict[str, Any]], order_start: int
+    ) -> list["PackageImportResult"]:
+        """Change (a): an object a newer tool version classifies report-only, but an
+        OLDER version had migrated (e.g. a monitor's metric tables recorded 'created').
+
+        It now carries no DDL, so no phase reprocesses it and its stale
+        (non-report-only) uc_sync_state row would persist forever. Emit a synthetic
+        REPORT_ONLY result so the row self-heals to 'manual (reclassified)', and flag
+        the ORPHAN copy the older run left on target — the tool never auto-drops it, so
+        the operator removes it by hand (e.g. before recreating the owning monitor).
+
+        Fires ONLY for objects with a prior MATERIALIZED state (created/updated/adopted)
+        that are now report-only — never for report-only objects that were always
+        inventory-only (those correctly keep no state row).
+        """
+        from uc_sync.delta import _ALWAYS_REPORT_ONLY_TYPES
+
+        materialized = {
+            vocab.CREATED, vocab.CREATED_WITH_WARNING, vocab.UPDATED, vocab.ADOPTED,
+            "success",  # legacy last_sync_status value
+        }
+        out: list[PackageImportResult] = []
+        for src_key, row in inventory.items():
+            otype = str(row.get("object_type") or "")
+            report_only = (
+                otype in _ALWAYS_REPORT_ONLY_TYPES
+                or (row.get("definition") or {}).get("in_scope_for_migration") is False
+            )
+            if not report_only:
+                continue
+            source_full = str(
+                row.get("source_full_name") or row.get("full_name") or src_key
+            )
+            target_full = str(row.get("target_full_name") or "")
+            # Already produced a result this run (e.g. a report-only MV via its DDL)? skip.
+            if target_full and target_full in self._created_objects:
+                continue
+            prior = self.prior_state.get(source_full) or {}
+            prior_action = str(
+                prior.get("last_action") or prior.get("last_sync_status") or ""
+            ).strip().lower()
+            if prior_action not in materialized:
+                continue  # never materialized → correctly has no/again report-only row
+            out.append(PackageImportResult(
+                object_type=otype,
+                source_full_name=source_full,
+                target_full_name=target_full,
+                full_name=source_full,
+                action="REPORT_ONLY",
+                status="SUCCESS",
+                delta_action="REPORT_ONLY",
+                message=(
+                    f"reclassified report-only (was '{prior_action}'); an orphan copy "
+                    "from an earlier tool version remains on the target — remove it "
+                    "manually (e.g. before recreating the owning monitor)"
+                ),
+                import_order=order_start + len(out),
+            ))
+        return out
 
     def _import_ddl_file(
         self,
@@ -1510,17 +1584,10 @@ class PackageImportEngine:
                 f"column deleted on source ({', '.join(dropped)}); not dropped on "
                 "target (non-destructive)"
             )
-        # Column set is identical. A mask / row-filter change is applied by the policies
-        # phase and reads "Updated" — so only an actual column TYPE change is flagged.
-        has_policies = bool(
-            (definition.get("column_masks") or [])
-            or (
-                isinstance(definition.get("row_filter"), dict)
-                and definition["row_filter"].get("function_name")
-            )
-        )
-        if has_policies:
-            return ""
+        # Column set is identical — look for a column TYPE change (out of scope). This is
+        # computed even when the table has masks/filters: the caller keeps the "Updated"
+        # headline (governance applied) but surfaces this as a caveat so the skipped type
+        # change is never silent (change b).
         typed = self._describe_columns_typed(target_full_name)
         for col in definition.get("columns") or []:
             name = str(col.get("name") or "").lower()
@@ -1698,8 +1765,21 @@ class PackageImportEngine:
                 if reason:
                     create = self._created_objects.get(target_full_name)
                     if create is not None and create.status != "FAILURE":
-                        create.delta_action = "CHANGED_SKIPPED"
-                        create.message = reason
+                        has_policies = bool(
+                            (definition.get("column_masks") or [])
+                            or (
+                                isinstance(definition.get("row_filter"), dict)
+                                and definition["row_filter"].get("function_name")
+                            )
+                        )
+                        if has_policies:
+                            # Governance WAS applied (Phase 1c) → headline stays "Updated";
+                            # attach the skipped drop/type change as a caveat (change b).
+                            create.caveat = reason
+                        else:
+                            # Nothing applied — the drop/type change is the whole story.
+                            create.delta_action = "CHANGED_SKIPPED"
+                            create.message = reason
                 continue
             # Build a synthetic object so the existing mask/row-filter builders emit
             # the correctly-quoted ALTER statements against the target name.
