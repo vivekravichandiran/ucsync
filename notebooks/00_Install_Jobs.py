@@ -41,13 +41,11 @@ dbutils.widgets.text("schemas", "")             # csv catalog.schema; blank = al
 dbutils.widgets.text("output_volume_path", "")  # /Volumes/<c>/<s>/<vol>
 dbutils.widgets.text("ops_catalog", "")
 dbutils.widgets.text("ops_schema", "")
-dbutils.widgets.text("mapping_file_path", "")   # legacy storage-cred + location mapping CSV (back-compat)
 # The single external-storage mapping file (task 2). Column shape auto-selects:
 # 2 cols (source_base_path,target_base_path) → BYO (storage credential + external
 # location are prerequisites; only prefix-swap external LOCATIONs); 3 cols
 # (+access_connector_id) → the utility creates the storage credential + external
-# location. Supersedes mapping_file_path; drives export path-rewrite AND the
-# import-time base-path swap. Blank = none.
+# location. Drives export path-rewrite AND the import-time base-path swap. Blank = none.
 dbutils.widgets.text("external_locations_path", "")
 dbutils.widgets.text("run_id", "")              # Airgap Import: source bundle id (job param default)
 
@@ -115,8 +113,8 @@ dbutils.widgets.text("node_type_id", "Standard_DS3_v2")
 # *.azuredatabricks.net + *.databricks.azure.com) plus Azure storage
 # (*.dfs/*.blob.core.windows.net, so external-volume/table DATA-PLANE access is NOT sent
 # through the proxy) plus loopback/metadata. Harmless when no proxy URL is set.
-dbutils.widgets.text("http_proxy", "http://databricksproxy.jio.com:8080")   # customer proxy; blank = none
-dbutils.widgets.text("https_proxy", "http://databricksproxy.jio.com:8080")  # customer proxy; blank = none
+dbutils.widgets.text("http_proxy", "")   # customer proxy URL; blank = none
+dbutils.widgets.text("https_proxy", "")  # customer proxy URL; blank = none
 dbutils.widgets.text(
     "no_proxy",
     "localhost,127.0.0.1,169.254.169.254,*.databricks.com,*.azuredatabricks.net,"
@@ -157,7 +155,7 @@ notebook_dir = dirname(ctx.notebookPath().get())
 
 _simple = (
     "connectivity_mode", "catalogs", "schemas", "output_volume_path",
-    "ops_catalog", "ops_schema", "mapping_file_path", "external_locations_path",
+    "ops_catalog", "ops_schema", "external_locations_path",
     "run_id",
     "source_workspace_url", "source_client_id", "source_client_secret",
     "source_secret_scope", "source_secret_key", "source_warehouse_id",

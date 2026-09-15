@@ -37,7 +37,6 @@ dbutils.widgets.text("output_volume_path", "")
 dbutils.widgets.text("ops_catalog", "")
 dbutils.widgets.text("ops_schema", "")
 dbutils.widgets.text("run_id", "")
-dbutils.widgets.text("mapping_file_path", "")   # legacy storage-cred + location mapping CSV
 # The single external-storage mapping file (task 2). Drives the export-time path
 # rewrite (source→target external LOCATIONs + external-location URLs). 2-col = BYO,
 # 3-col = create SC/EL on import. Blank = none.
@@ -64,7 +63,6 @@ cfg = from_sources({
     "output_volume_path": dbutils.widgets.get("output_volume_path"),
     "ops_catalog": dbutils.widgets.get("ops_catalog"),
     "ops_schema": dbutils.widgets.get("ops_schema"),
-    "mapping_file_path": dbutils.widgets.get("mapping_file_path"),
     "external_locations_path": dbutils.widgets.get("external_locations_path"),
     "source_workspace_url": dbutils.widgets.get("source_workspace_url"),
     "source_client_id": dbutils.widgets.get("source_client_id"),

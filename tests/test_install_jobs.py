@@ -27,7 +27,6 @@ def _values(**overrides):
         "output_volume_path": "/Volumes/ops/uc/exports",
         "ops_catalog": "ops",
         "ops_schema": "uc",
-        "mapping_file_path": "/Volumes/ops/uc/config/mapping.csv",
         "run_id": "12345",
         "source_workspace_url": "",
         "source_oauth_secret_scope": "",

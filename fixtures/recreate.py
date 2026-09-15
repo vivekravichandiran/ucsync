@@ -21,12 +21,36 @@ Usage:
 import argparse, json, os, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+# --- Legacy 3-catalog fixture (gov_src / finance / sales) — runs on the SOURCE ws ---
 SQL_STAGES = {
     "catalogs": ["30_catalogs.sql"],
     "objects": ["40_gov_src.sql", "41_finance.sql", "42_sales.sql"],
     "negative": ["50_negative.sql"],
 }
 ORDER = ["azure", "storage", "catalogs", "objects", "negative"]
+
+# --- ai27_ucsync_testcatalog — single comprehensive bed. Source-run SQL stages ---
+TC_SQL_STAGES = {
+    "tc_catalog":   ["31_testcat_catalog.sql"],
+    "tc_functions": ["60_testcat_functions.sql"],
+    "tc_core":      ["61_testcat_core.sql"],
+    "tc_governed":  ["62_testcat_governed.sql"],
+    "tc_external":  ["63_testcat_external.sql"],
+    "tc_acl":       ["65_testcat_acl.sql"],
+    "tc_negative":  ["66_testcat_negative.sql"],
+    "tc_metric":    ["67_testcat_metric_view.sql"],
+}
+# Target-run SQL stages (BYO shell — execute on the TARGET ws/warehouse)
+TC_SQL_STAGES_TGT = {
+    "tc_target_byo": ["32_testcat_target_byo.sql"],
+}
+# testcat meta-stage expands to this full ordered build
+TC_ORDER = [
+    "tc_azure", "tc_storage", "tc_catalog", "tc_target_byo",
+    "tc_functions", "tc_core", "tc_governed", "tc_external", "tc_files",
+    "tc_metric", "tc_acl", "tc_negative", "tc_reportonly",
+]
 
 
 def load_config():
@@ -43,8 +67,11 @@ def load_config():
 
 
 def substitute(text, cfg):
-    for key in ("GOV_ACCOUNT", "FIN_ACCOUNT", "SALES_ACCOUNT", "EXPORT_SP"):
-        text = text.replace("{{" + key + "}}", cfg.get(key, ""))
+    # Replace any {{KEY}} for which config.env exports KEY. Longest keys first so a
+    # key that is a prefix of another (e.g. FOO vs FOO_BAR) can't partially match.
+    for key in sorted(cfg, key=len, reverse=True):
+        if "{{" + key + "}}" in text:
+            text = text.replace("{{" + key + "}}", cfg[key])
     return text
 
 
@@ -101,8 +128,9 @@ def run_sql(profile, wh, statement):
     return "SUCCEEDED", None
 
 
-def run_sql_stage(files, cfg, dry_run):
-    profile, wh = cfg["SRC_PROFILE"], cfg["SRC_WAREHOUSE"]
+def run_sql_stage(files, cfg, dry_run, profile=None, wh=None):
+    profile = profile or cfg["SRC_PROFILE"]
+    wh = wh or cfg["SRC_WAREHOUSE"]
     failed = 0
     for fname in files:
         path = os.path.join(HERE, fname)
@@ -132,16 +160,37 @@ def run_script(script, args, cfg, dry_run):
     return r.returncode
 
 
+def run_py_stage(script, cfg, dry_run):
+    """Run a python fixture stage with config.env exported into its environment."""
+    path = os.path.join(HERE, script)
+    print(f"\n### {script} (python) ###")
+    if dry_run:
+        print(f"  [DRY] would run: python3 {path}")
+        return 0
+    env = {**os.environ, **cfg}
+    return subprocess.run([sys.executable, path], env=env).returncode
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("stages", nargs="+",
-                    help="any of: all azure storage catalogs objects negative")
+                    help="legacy: all azure storage catalogs objects negative | "
+                         "testcat build: testcat (or a single tc_* stage)")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--azure-scope", default="both",
                     choices=["source", "target", "both"])
     args = ap.parse_args()
     cfg = load_config()
-    stages = ORDER if "all" in args.stages else args.stages
+
+    # Expand meta-stages
+    stages = []
+    for s in args.stages:
+        if s == "all":
+            stages += ORDER
+        elif s == "testcat":
+            stages += TC_ORDER
+        else:
+            stages.append(s)
 
     rc = 0
     for stage in stages:
@@ -149,8 +198,21 @@ def main():
             rc += run_script("10_provision_azure.sh", [args.azure_scope], cfg, args.dry_run)
         elif stage == "storage":
             rc += run_script("20_uc_storage.sh", [], cfg, args.dry_run)
+        elif stage == "tc_azure":
+            rc += run_script("11_provision_azure_testcat.sh", [args.azure_scope], cfg, args.dry_run)
+        elif stage == "tc_storage":
+            rc += run_script("21_uc_storage_testcat.sh", [], cfg, args.dry_run)
+        elif stage == "tc_files":
+            rc += run_script("63_testcat_files.sh", [], cfg, args.dry_run)
+        elif stage == "tc_reportonly":
+            rc += run_py_stage("64_testcat_reportonly.py", cfg, args.dry_run)
         elif stage in SQL_STAGES:
             rc += run_sql_stage(SQL_STAGES[stage], cfg, args.dry_run)
+        elif stage in TC_SQL_STAGES:
+            rc += run_sql_stage(TC_SQL_STAGES[stage], cfg, args.dry_run)
+        elif stage in TC_SQL_STAGES_TGT:
+            rc += run_sql_stage(TC_SQL_STAGES_TGT[stage], cfg, args.dry_run,
+                                profile=cfg["TGT_PROFILE"], wh=cfg["TGT_WAREHOUSE"])
         else:
             print(f"unknown stage: {stage}", file=sys.stderr); rc += 1
     print(f"\n=== done (failures/non-zero: {rc}) ===")

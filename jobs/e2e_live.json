@@ -93,7 +93,6 @@
           "output_volume_path": "${output_volume_path}",
           "ops_catalog": "${ops_catalog}",
           "ops_schema": "${ops_schema}",
-          "mapping_file_path": "${mapping_file_path}",
           "external_locations_path": "${external_locations_path}",
           "source_workspace_url": "${source_workspace_url}",
           "source_client_id": "${source_client_id}",

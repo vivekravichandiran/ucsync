@@ -380,6 +380,11 @@ def from_sources(
     ).lower()
     if connectivity_mode not in CONNECTIVITY_MODES:
         raise ValueError(f"connectivity_mode must be one of {CONNECTIVITY_MODES}")
+    # RETIRED WIDGET (kept as inert dead code — full removal backlogged in
+    # plans/remove-mapping-file-path.md). The `mapping_file_path` widget was removed
+    # from 00_Install_Jobs / 02_Export and the job specs, so this now always resolves
+    # to "" for widget/job-param runs and is a no-op. A legacy CSV can still be
+    # supplied via the YAML `location_mapping_csv_path` input (independent path above).
     mapping_file_path = str(
         pick("mapping_file_path", runtime.get("mapping_file_path"))
     )
