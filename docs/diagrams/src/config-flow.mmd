@@ -1,0 +1,14 @@
+graph LR
+    W["Widgets<br/>(01 / 02 / 03)"] --> R
+    J["00 Install Jobs<br/>bakes values into<br/>jobs/*.json base_parameters"] --> R
+    R["from_sources()<br/>→ Config"] --> V{"Config.validate()<br/>fail fast"}
+    V -->|"bad combo"| ERR["stop at config time<br/>(e.g. dry_run=false, no ops_catalog)"]
+    V -->|"ok"| RUN["stage runs"]
+    classDef in fill:#E3F2FD,stroke:#1565C0,stroke-width:2px,color:#0D47A1;
+    classDef proc fill:#E8F5E9,stroke:#2E7D32,stroke-width:2px,color:#1B5E20;
+    classDef gate fill:#FFF8E1,stroke:#F57F17,stroke-width:2px,color:#E65100;
+    classDef danger fill:#FFEBEE,stroke:#C62828,stroke-width:2px,color:#B71C1C;
+    class W,J in
+    class R,RUN proc
+    class V gate
+    class ERR danger

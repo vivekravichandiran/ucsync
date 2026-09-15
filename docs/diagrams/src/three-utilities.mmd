@@ -1,0 +1,9 @@
+graph LR
+    W["<b>Workspace-migration utility</b><br/>identities (users / groups / SPs)<br/>+ account governed-<b>tag definitions</b>"]
+    U["<b>THIS utility</b><br/>UC Governance Migration<br/>structure + full table definitions<br/>+ governance (tags · ABAC · masks · grants)<br/><i>never moves table data</i>"]
+    D["<b>Data-migration utility</b><br/>table DATA via<br/>Delta Share + Deep Clone<br/>(ABAC-exempt principal)"]
+    W ==>|"first"| U ==>|"then"| D
+    classDef other fill:#ECEFF1,stroke:#455A64,stroke-width:1.5px,color:#263238;
+    classDef me fill:#F3E5F5,stroke:#6A1B9A,stroke-width:3px,color:#4A148C;
+    class W,D other
+    class U me

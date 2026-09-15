@@ -1,0 +1,15 @@
+graph LR
+    RUN["03 Import (live)"] --> R["Read import.xlsx<br/>+ Outstanding sheet"]
+    R --> Q{"Any FAILURE /<br/>manual outstanding?"}
+    Q -->|"none"| DONE(["Done"])
+    Q -->|"yes"| FIX["Fix the prerequisite<br/>(tag def · function · EL · grant)"]
+    FIX --> RERUN["Re-run the same stage<br/><b>additive + idempotent</b><br/>only outstanding units act"]
+    RERUN --> RUN
+    classDef step fill:#E8F5E9,stroke:#2E7D32,stroke-width:2px,color:#1B5E20;
+    classDef gate fill:#FFF8E1,stroke:#F57F17,stroke-width:2px,color:#E65100;
+    classDef fix fill:#FFEBEE,stroke:#C62828,stroke-width:2px,color:#B71C1C;
+    classDef done fill:#F3E5F5,stroke:#6A1B9A,stroke-width:2px,color:#4A148C;
+    class RUN,R,RERUN step
+    class Q gate
+    class FIX fix
+    class DONE done

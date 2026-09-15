@@ -1,0 +1,16 @@
+graph TB
+    subgraph SRC["SOURCE workspace"]
+        SP1["<b>Source read SPN</b><br/>read-only<br/>USE CATALOG · SELECT · EXECUTE · READ VOLUME<br/>+ <b>MANAGE</b> (read grants/ACLs)<br/>+ CAN USE on source warehouse"]
+    end
+    subgraph TGT["TARGET workspace"]
+        SP2["<b>Target run SPN</b><br/>ALL PRIVILEGES + <b>MANAGE</b> + APPLY TAG on catalog<br/>CREATE EXTERNAL TABLE/VOLUME on the EL<br/>USE/CREATE TABLE/MODIFY/SELECT on ops schema<br/>+ CAN USE on import warehouse"]
+    end
+    NOTE["<b>Hard constraint:</b> neither SPN is ever a<br/>metastore or account admin — every grant is<br/>issued by the catalog owner (+ EL owner)"]
+    SP1 -.->|"catalog-scoped only"| NOTE
+    SP2 -.->|"catalog-scoped only"| NOTE
+    classDef src fill:#E3F2FD,stroke:#1565C0,stroke-width:2px,color:#0D47A1;
+    classDef tgt fill:#E8F5E9,stroke:#2E7D32,stroke-width:2px,color:#1B5E20;
+    classDef note fill:#FFF8E1,stroke:#F57F17,stroke-width:2px,color:#E65100;
+    class SP1 src
+    class SP2 tgt
+    class NOTE note

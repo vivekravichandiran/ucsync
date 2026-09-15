@@ -1,0 +1,16 @@
+graph TD
+    START["03 Import — per object"] --> B{"Baseline in<br/>uc_sync_state?"}
+    B -->|"no baseline"| FULL["FULL run — create + govern,<br/>seed state (first_seen set)"]
+    B -->|"baseline present"| DIFF{"Fingerprints changed?<br/>ddl · governance · grants"}
+    DIFF -->|"new object"| CRE["created"]
+    DIFF -->|"changed"| UPD["updated<br/>(masks/filters re-applied,<br/>fail-closed)"]
+    DIFF -->|"unchanged"| SKP["skipped — zero writes"]
+    DIFF -->|"gone from source"| DEL["deleted_in_source<br/><b>report-only, never dropped</b>"]
+    classDef start fill:#ECEFF1,stroke:#455A64,stroke-width:2px,color:#263238;
+    classDef gate fill:#FFF8E1,stroke:#F57F17,stroke-width:2px,color:#E65100;
+    classDef act fill:#E8F5E9,stroke:#2E7D32,stroke-width:2px,color:#1B5E20;
+    classDef rep fill:#E3F2FD,stroke:#1565C0,stroke-width:2px,color:#0D47A1;
+    class START start
+    class B,DIFF gate
+    class FULL,CRE,UPD,SKP act
+    class DEL rep

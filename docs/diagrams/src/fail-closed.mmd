@@ -1,0 +1,28 @@
+graph TD
+    T["A table is processed on target"] --> Q1{"Pre-existing on target?"}
+
+    Q1 -->|"yes — has data"| C{"Changed on source?<br/>(fingerprint)"}
+    C -->|"no"| SKIP["skipped<br/>(SKIP_EXISTING, unchanged)"]
+    C -->|"yes"| UPD["update — re-apply<br/>masks / row filters / tags"]
+    UPD --> UQ{"Applied?"}
+    UQ -->|"yes"| UOK["updated (SUCCESS)"]
+    UQ -->|"no"| UFAIL["FAILURE (PROTECTION_FAILED)<br/><b>reported — table NOT dropped</b><br/>(pre-existing → has data)"]
+
+    Q1 -->|"no — freshly created"| M{"Inline mask / row filter<br/>function resolves?"}
+    M -->|"no"| FAILC["CREATE TABLE fails atomically<br/>→ FAILURE"]
+    M -->|"yes"| G{"Governed tags + ABAC apply?"}
+    G -->|"yes"| OK["fully governed → SUCCESS"]
+    G -->|"no"| DROP["DROP TABLE IF EXISTS<br/>→ FAILURE (PROTECTION_FAILED)"]
+
+    UFAIL --> REP["Reported in Tables sheet,<br/>Outstanding sheet, audit + state"]
+    FAILC --> REP
+    DROP --> REP
+
+    classDef ok fill:#E8F5E9,stroke:#2E7D32,stroke-width:2px,color:#1B5E20;
+    classDef danger fill:#FFEBEE,stroke:#C62828,stroke-width:2px,color:#B71C1C;
+    classDef gate fill:#FFF8E1,stroke:#F57F17,stroke-width:2px,color:#E65100;
+    classDef neu fill:#ECEFF1,stroke:#455A64,stroke-width:2px,color:#263238;
+    class OK,SKIP,UOK,UPD ok
+    class FAILC,DROP,UFAIL danger
+    class Q1,C,UQ,M,G gate
+    class T,REP neu
