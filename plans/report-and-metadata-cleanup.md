@@ -10,11 +10,27 @@ on target must NEVER read as success.
 
 ---
 
-## IMPLEMENTATION STATUS (2026-09-15) — CODE COMPLETE, unit-tested (313 green)
+## STATUS (2026-09-15) — ✅ CERTIFIED PROD-READY (unit-tested 316 green + 4 live E2E runs)
 
-All six steps implemented on `feature/abac_refactor`; `PYTHONPATH=src python3 -m pytest -q`
-= **313 passed**. Live E2E validation is the only remaining gate (needs the user to push
-first — my SSH push is blocked). Summary of what landed:
+All six steps implemented + **live-certified** on `feature/abac_refactor` @ `0851cc6`
+(job `917270847282133`, target_ws). `PYTHONPATH=src python3 -m pytest -q` = **316 passed**.
+
+**Live validation (Runs 1–4):** A1/A2 masks/filters apply on pre-existing columns
+(`dept_lookup` masked + row-filtered on target); A3/A4 read "Skipped — column deleted/type
+changed" and target is non-destructive; Outstanding sheet lists the 2 ai_27 ABAC negatives;
+no Issues/Delta sheets; Governed Tags + Tags Applied sheets; report-only → Manual step;
+SOURCE_ABSENT (`cert_new`) → "Deleted in source" on the Tables sheet; `uc_sync_volume_files`
+gained status/message/created_at/updated_at via live ALTER; `last_action` fully populated
+(backfill self-heals); `first_seen`/`connectivity_mode`/`failure_category` populated. Import
+RED-with-only-the-2-negatives is the CORRECT certified outcome (fail-closed by design).
+
+**4 upgrade-path bugs found + fixed during live testing:** backfill matched "name type"
+strings not names (`12d00ed`); backfill not self-healing (`ec3f005`); `first_seen` NULL for
+legacy rows → coalesce MERGE (`690b7ae`); B3 label lost on incremental unchanged objects
+(`690b7ae`). **B3 label finalized as "Skipped (create disabled)" — dropped "BYO" as
+customer-confusing (`0851cc6`)**; "Adopted (pre-existing)" stays for create-ON-but-exists.
+
+Summary of what landed:
 
 - **NEW `src/uc_sync/vocab.py`** — single source of truth for the status vocabulary
   (wsmig `LAST_ACTIONS`), `status_key()`, `STATUS_STYLE`, `SUMMARY_ORDER`,
