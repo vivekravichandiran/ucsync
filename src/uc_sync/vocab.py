@@ -20,10 +20,10 @@ CREATED_WITH_WARNING = "created_with_warning"
 UPDATED = "updated"
 ADOPTED = "adopted"
 SKIPPED = "skipped"
-# BYO / existing-catalog: the create toggle for this type is OFF, so the utility did
-# not create it (a Skipped variant, distinct from "unchanged" and from "adopted" — the
-# confirmed B3 decision). UC-specific (wsmig has no BYO concept), so it extends the
-# shared set rather than renaming a wsmig key.
+# The create toggle for this object type is OFF (the customer pre-provisioned it), so
+# the utility did not create it — a Skipped variant, distinct from "unchanged" and from
+# "adopted" (create was ON but the object already existed). Customer-facing label:
+# "Skipped (create disabled)". UC-specific, so it extends the shared set.
 SKIPPED_CREATE_DISABLED = "skipped_create_disabled"
 NOT_SELECTED = "not_selected"
 SKIPPED_NO_OBJECT = "skipped_no_object"
@@ -73,7 +73,7 @@ STATUS_STYLE: dict[str, tuple[str, str]] = {
     UPDATED: ("Updated", "DBEAFE"),
     ADOPTED: ("Adopted (pre-existing)", "CFFAFE"),
     SKIPPED: ("Skipped (unchanged)", "E5E7EB"),
-    SKIPPED_CREATE_DISABLED: ("Skipped (create disabled — BYO)", "E5E7EB"),
+    SKIPPED_CREATE_DISABLED: ("Skipped (create disabled)", "E5E7EB"),
     MANUAL: ("Manual step", "FEF3C7"),
     NOT_SELECTED: ("Deferred (not selected)", "F1F5F9"),
     SKIPPED_NO_OBJECT: ("Skipped (no target object)", "EDE9FE"),

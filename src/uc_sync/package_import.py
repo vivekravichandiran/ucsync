@@ -1084,14 +1084,14 @@ class PackageImportEngine:
         ):
             result.status = "UNCHANGED"
             result.delta_action = "UNCHANGED"
-            # A BYO / create-disabled object (the utility never creates it) keeps that
-            # as its salient status even when unchanged — the confirmed B3 decision:
-            # "Skipped (create disabled — BYO)", never conflated with "Skipped
-            # (unchanged)". Still zero writes (we return here). Only the label differs.
+            # A create-disabled object (the utility never creates it — the customer
+            # pre-provisioned it) keeps that as its salient status even when unchanged
+            # (the confirmed B3 decision: "Skipped (create disabled)", never conflated
+            # with "Skipped (unchanged)"). Still zero writes (we return here).
             if not self._create_enabled(object_type):
                 result.action = "SKIP_CREATE_DISABLED"
                 result.message = (
-                    "create disabled (BYO) — pre-existing on target, unchanged"
+                    "create disabled for this type — pre-existing on target, unchanged"
                 )
             else:
                 result.action = "UNCHANGED"
@@ -1143,8 +1143,8 @@ class PackageImportEngine:
                     # catalog-scoped migration (skipping avoids noisy "does not exist"
                     # ownership/grant warnings on the source-named credential/location).
                     result.message = (
-                        "create disabled (BYO prerequisite); grants + ownership "
-                        "skipped (metastore-scoped, out of catalog-scoped scope)"
+                        "create disabled for this type; grants + ownership skipped "
+                        "(metastore-scoped, out of catalog-scoped scope)"
                     )
                 elif not self.dry_run:
                     grant_warning = self._apply_grants_file(

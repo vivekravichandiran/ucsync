@@ -645,7 +645,7 @@ def build_report(
         applied = sum(v for k, v in rollup.items() if k in _SUCCESS_STATUSES)
         skipped = sum(v for k, v in rollup.items() if k in vocab.SKIP_STATUSES)
         ws.append(["applied (created/updated/adopted)", applied])
-        ws.append(["skipped (unchanged / BYO / deferred)", skipped])
+        ws.append(["skipped (unchanged / create-disabled / deferred)", skipped])
         # The UNCHANGED tally (used to live on the now-removed Delta sheet) as a stat.
         if unchanged_count is not None:
             ws.append(["unchanged (incremental: skipped, zero writes)", unchanged_count])
