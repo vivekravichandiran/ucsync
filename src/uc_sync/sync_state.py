@@ -187,12 +187,15 @@ class SyncStateService:
             self.spark.sql(
                 f"ALTER TABLE {self.full_name} ADD COLUMNS ({add})"
             )
-        # last_action rename backfill: an older table carried last_sync_status; map its
-        # legacy values into the new last_action column (once, where still NULL) so a
-        # pre-existing baseline reads in the unified vocabulary and a prior FAILURE is
-        # still seen as non-clean (bug #18) rather than a blank that reads as clean. The
-        # legacy column is left in place (harmless) — never read once last_action is set.
-        if "last_action" in missing_names and "last_sync_status" in existing:
+        # last_action rename backfill: a legacy table carried last_sync_status; map its
+        # values into last_action for any row still NULL, so a pre-existing baseline reads
+        # in the unified vocabulary and a prior FAILURE is still seen as non-clean (bug
+        # #18) rather than a blank that reads as clean. The UPDATE is idempotent
+        # (WHERE last_action IS NULL) and SELF-HEALING: it runs on every legacy table —
+        # not only the run that adds the column — so rows stranded NULL by an earlier
+        # partial/buggy upgrade are recovered on the next run. The legacy column is left
+        # in place (harmless) — never read once last_action is set.
+        if "last_sync_status" in existing:
             cases = " ".join(
                 f"WHEN '{legacy}' THEN '{action}'"
                 for legacy, action in vocab._LEGACY_STATUS_TO_ACTION.items()

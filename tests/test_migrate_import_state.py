@@ -422,6 +422,41 @@ def test_ensure_table_backfills_last_action_from_legacy_column():
     ), spark.sql_log
 
 
+def test_ensure_table_backfill_self_heals_when_column_already_exists():
+    """Second live-regression: the backfill must run whenever the legacy column is
+    present — NOT only on the run that ADDS last_action. A first (buggy) upgrade that
+    added last_action but skipped the backfill left rows stranded NULL forever, because
+    later runs saw the column already present and never backfilled. Self-heal: with
+    last_action ALREADY in the schema (nothing to ADD) but last_sync_status still there,
+    the UPDATE must still fire."""
+    from uc_sync.sync_state import SyncStateService
+
+    class _Field:
+        def __init__(self, name): self.name = name
+
+    class _Table:
+        # last_action ALREADY exists (added by a prior run) AND legacy col still present.
+        schema = [_Field(n) for n in (
+            "batch_id", "run_id", "object_type", "source_full_name", "last_action",
+            "last_sync_status", "ddl_hash", "governance_hash", "grants_json", "detail",
+            "first_seen", "connectivity_mode", "failure_category", "last_error_raw",
+        )]
+
+    class _FakeSpark:
+        def __init__(self): self.sql_log = []
+        def sql(self, sql): self.sql_log.append(sql); return None
+        def table(self, name): return _Table()
+
+    spark = _FakeSpark()
+    SyncStateService(spark, "ops.ops.uc_sync_state").ensure_table()
+    # Nothing to ADD (all columns present), but the self-healing backfill still fires.
+    assert not any("ADD COLUMNS" in s for s in spark.sql_log)
+    assert any(
+        s.strip().upper().startswith("UPDATE") and "LAST_ACTION" in s.upper()
+        for s in spark.sql_log
+    ), spark.sql_log
+
+
 def test_state_parity_columns_populated():
     """Part D: first_seen / connectivity_mode / failure_category / last_error_raw are
     written, and the row still matches STATE_COLUMNS exactly."""
