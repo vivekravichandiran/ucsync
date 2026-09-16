@@ -5,11 +5,10 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="1862a172-d182-46cb-8967-79eb137ce7bc" name="Changes" comment="Handled monitors and non SQL UDFs">
-      <change beforePath="$PROJECT_DIR$/docs/RUNBOOK.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/RUNBOOK.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/docs/object-support-matrix.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/object-support-matrix.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/fixtures/68_testcat_incremental.sql" beforeDir="false" afterPath="$PROJECT_DIR$/fixtures/68_testcat_incremental.sql" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/uc_sync/package_import.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/package_import.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/uc_sync/report.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/report.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/notebooks/03_Import.py" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/03_Import.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/uc_sync/delta.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/delta.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tests/test_incremental_delta.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_incremental_delta.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -290,7 +289,15 @@
       <option name="project" value="LOCAL" />
       <updated>1789496883694</updated>
     </task>
-    <option name="localTasksCounter" value="28" />
+    <task id="LOCAL-00028" summary="Handled monitors and non SQL UDFs">
+      <option name="closed" value="true" />
+      <created>1789501751143</created>
+      <option name="number" value="00028" />
+      <option name="presentableId" value="LOCAL-00028" />
+      <option name="project" value="LOCAL" />
+      <updated>1789501751143</updated>
+    </task>
+    <option name="localTasksCounter" value="29" />
     <servers />
   </component>
   <component name="VcsManagerConfiguration">

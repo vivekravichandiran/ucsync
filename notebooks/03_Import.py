@@ -248,9 +248,15 @@ try:
             # per-object MERGE key and clobber the object's fingerprints. ABAC policies
             # ARE objects (own row). So exclude only the tag-op results (policies_path
             # set AND object_type != ABAC_POLICY).
+            # COLUMN results (a schema-evolution ADD COLUMN) are attributes of a table
+            # already counted (its own row + ddl_hash), not standalone objects — writing
+            # them would leave orphan rows that read as "deleted in source" on the next
+            # run (columns are never inventoried as objects). Exclude them, same as tag
+            # ops.
             state_dicts = [
                 rd for rd in result_dicts
-                if not (rd.get("policies_path") and rd.get("object_type") != "ABAC_POLICY")
+                if rd.get("object_type") != "COLUMN"
+                and not (rd.get("policies_path") and rd.get("object_type") != "ABAC_POLICY")
             ]
             _state_svc = SyncStateService(spark, cfg.state_table)
             _state_svc.upsert(

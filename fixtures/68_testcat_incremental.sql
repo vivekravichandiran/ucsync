@@ -138,5 +138,50 @@ ALTER TABLE ai27_ucsync_testcatalog.governed.mask_tbl ALTER COLUMN id TYPE BIGIN
 -- (Task-10 / F1) governance FAILURE on a PRE-EXISTING table must NOT drop it.
 -- New mask referencing the un-migrated ai_27 function on the pre-existing secret_fin → on target
 -- the mask apply fails-closed, but secret_fin pre-exists → NOT dropped, marked FAILURE, job RED.
+-- NOTE: superseded by PART C below, which repoints this mask to an in-catalog function so the
+-- standing bed runs GREEN. The fail-closed behaviour it exercised is already certified (the first
+-- incremental run 1107633083625532 showed secret_fin FAILED-but-NOT-dropped). To re-exercise
+-- fail-closed, repoint any of the PART-C masks/policies back to ai_27.sec.mask_ext on a throwaway.
 ALTER TABLE ai27_ucsync_testcatalog.restricted.secret_fin
   ALTER COLUMN acct SET MASK ai_27.sec.mask_ext;
+
+-- =====================================================================================
+-- PART C — GREEN conversion + more column churn (2026-09-16, applied to source)
+-- Turns the 3 ai_27 fail-closed negatives GREEN by repointing them at a REAL in-catalog
+-- masking function, and adds fresh column add/drop so the next incremental is interesting.
+-- Expected on the next run: 0 FAILED (green); ext_masked/abac_ext/secret_fin now migrate;
+-- functions.mask_ext CREATED; departments +region/+headcount applied (Updated); types_tbl.bin
+-- reads "Skipped — column deleted on source; not dropped on target"; and the 3 legacy COLUMN
+-- state rows (nickname/ssn2/email2) NO LONGER read "deleted in source" (delta.py COLUMN guard).
+-- =====================================================================================
+
+-- New in-catalog masking UDF (replaces the out-of-scope ai_27.sec.mask_ext).
+CREATE OR REPLACE FUNCTION ai27_ucsync_testcatalog.functions.mask_ext(v STRING)
+  RETURNS STRING COMMENT 'Generic in-catalog masking UDF (replaces the out-of-scope ai_27.sec.mask_ext)'
+  RETURN CASE WHEN is_account_group_member('admins') THEN v ELSE '***' END;
+
+-- Repoint the inline classic mask (ext_masked) → in-catalog fn → target CREATE now succeeds.
+ALTER TABLE ai27_ucsync_testcatalog.core_tables.ext_masked ALTER COLUMN secret DROP MASK;
+ALTER TABLE ai27_ucsync_testcatalog.core_tables.ext_masked
+  ALTER COLUMN secret SET MASK ai27_ucsync_testcatalog.functions.mask_ext;
+
+-- Repoint the Task-10 pre-existing mask (secret_fin.acct) → in-catalog fn → governance succeeds.
+ALTER TABLE ai27_ucsync_testcatalog.restricted.secret_fin ALTER COLUMN acct DROP MASK;
+ALTER TABLE ai27_ucsync_testcatalog.restricted.secret_fin
+  ALTER COLUMN acct SET MASK ai27_ucsync_testcatalog.functions.mask_ext;
+
+-- Repoint the ABAC policy (abac_ext) → in-catalog fn → created-then-kept (no longer dropped).
+DROP POLICY ai27_ucsync_neg_ext ON TABLE ai27_ucsync_testcatalog.governed.abac_ext;
+CREATE POLICY ai27_ucsync_neg_ext ON TABLE ai27_ucsync_testcatalog.governed.abac_ext
+  COLUMN MASK ai27_ucsync_testcatalog.functions.mask_ext
+  TO `account users`
+  FOR TABLES MATCH COLUMNS has_tag_value('ai27_uc_pii','BANK_ACCOUNT') AS c ON COLUMN c;
+
+-- Column ADDITIONS on the clean departments dim (schema evolution, no governance) → Updated.
+ALTER TABLE ai27_ucsync_testcatalog.core_tables.departments ADD COLUMN region STRING COMMENT 'churn: new col add';
+ALTER TABLE ai27_ucsync_testcatalog.core_tables.departments ADD COLUMN headcount INT COMMENT 'churn: new col add';
+
+-- Column DELETION on types_tbl (needs columnMapping) → target reads "Skipped — column deleted
+-- on source; not dropped on target (non-destructive)".
+ALTER TABLE ai27_ucsync_testcatalog.core_tables.types_tbl SET TBLPROPERTIES ('delta.columnMapping.mode'='name');
+ALTER TABLE ai27_ucsync_testcatalog.core_tables.types_tbl DROP COLUMN bin;

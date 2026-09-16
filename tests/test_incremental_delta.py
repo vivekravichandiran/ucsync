@@ -162,6 +162,20 @@ def test_source_absent_reported_not_dropped():
     assert len(absent) == 1 and absent[0]["object"] == "c.s.gone"
 
 
+def test_legacy_column_state_row_not_reported_deleted_in_source():
+    """A COLUMN row left in uc_sync_state by an older tool version (a column-add was
+    persisted as its own object) must NOT read as 'deleted in source' — a column is a
+    table attribute, never an inventory object, so it can never match a current row."""
+    rows = _rows()
+    base = _baseline(rows)
+    # An added column the old engine wrote as its own state row (table itself present).
+    base["c.s.t.newcol"] = {"object_type": "COLUMN", "ddl_hash": "",
+                            "governance_hash": "", "grants": {}}
+    plan = DeltaPlan(rows, base)
+    absent = [r for r in plan.delta_rows() if r["action"] == "SOURCE_ABSENT"]
+    assert absent == []  # the COLUMN row is skipped, not flagged deleted-in-source
+
+
 def test_force_full_option_removed():
     """Bug #1: the force_full option is gone entirely. A baseline present always
     yields an incremental run (a plain re-run is idempotent — no forced re-seed),

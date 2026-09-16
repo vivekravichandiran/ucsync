@@ -131,6 +131,13 @@ class DeltaPlan:
             for name, prior in self.baseline.items():
                 if name in self._current_names:
                     continue
+                # A column is a table attribute, never a standalone source object, so a
+                # legacy COLUMN row (written to state by an older tool version on a
+                # column-add) can never match an inventory object — it must NOT read as
+                # "deleted in source". Structural column changes ride the owning table's
+                # ddl_hash; the state upsert no longer persists COLUMN rows.
+                if str(prior.get("object_type") or "") == "COLUMN":
+                    continue
                 self.source_absent.append(
                     ObjectDelta(
                         full_name=name,
