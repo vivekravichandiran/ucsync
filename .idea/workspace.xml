@@ -5,10 +5,17 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="1862a172-d182-46cb-8967-79eb137ce7bc" name="Changes" comment="Handled monitors and non SQL UDFs">
-      <change beforePath="$PROJECT_DIR$/fixtures/68_testcat_incremental.sql" beforeDir="false" afterPath="$PROJECT_DIR$/fixtures/68_testcat_incremental.sql" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/notebooks/03_Import.py" beforeDir="false" afterPath="$PROJECT_DIR$/notebooks/03_Import.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/uc_sync/delta.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/uc_sync/delta.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tests/test_incremental_delta.py" beforeDir="false" afterPath="$PROJECT_DIR$/tests/test_incremental_delta.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Databricks Unity Catalog Synchronization Utility.pdf" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/README_old.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/CONFIGURATION_GUIDE.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/CONFIGURATION_GUIDE.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/PERMISSIONS_GUIDE.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/PERMISSIONS_GUIDE.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/PERMISSIONS_GUIDE_old.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/architecture_old.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/configuration_old.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/manual-actions_old.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/object-support-matrix_old.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/runbook_old.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/troubleshooting_old.md" beforeDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -297,7 +304,15 @@
       <option name="project" value="LOCAL" />
       <updated>1789501751143</updated>
     </task>
-    <option name="localTasksCounter" value="29" />
+    <task id="LOCAL-00029" summary="Handled monitors and non SQL UDFs">
+      <option name="closed" value="true" />
+      <created>1789529669178</created>
+      <option name="number" value="00029" />
+      <option name="presentableId" value="LOCAL-00029" />
+      <option name="project" value="LOCAL" />
+      <updated>1789529669178</updated>
+    </task>
+    <option name="localTasksCounter" value="30" />
     <servers />
   </component>
   <component name="VcsManagerConfiguration">

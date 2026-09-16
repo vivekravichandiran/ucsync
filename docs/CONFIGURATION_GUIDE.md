@@ -102,17 +102,6 @@ and a blank one is **inert (no effect), not unused**. Leaving one out changes wh
 **Placement precedence** (per external path): **exact `object_locations` override → `external_locations`
 base-path swap → catalog root / skip.**
 
-> 🗑️ **Retired: `mapping_file_path`.** An older third input (a legacy storage-credential + location
-> CSV) has been **removed as a widget** — the two inputs above cover every scenario, so it was just
-> clutter. Its internal resolution remains as inert dead code (full removal is backlogged in
-> `plans/remove-mapping-file-path.md`). If you have a legacy mapping CSV you must still use, it can be
-> supplied through the advanced YAML `location_mapping_csv_path` config path instead.
-
-> 🧠 **Neither input is dead.** Operators have repeatedly assumed one was unused and deleted it.
-> `external_locations_path` is the primary map; `object_locations_path` is the per-object escape hatch.
-> Blank = the input simply contributes nothing — safe to leave blank, but don't assume it's ignored
-> when set.
-
 ---
 
 ## 📥 `03_Import` widgets

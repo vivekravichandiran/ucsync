@@ -4,7 +4,7 @@ The minimal, **catalog-scoped** privileges the two service principals need. Ever
 stated as the asserted minimum and can be **verified live** with `testing/permission_probe.py`, run
 **as the candidate SP**.
 
-> ## 🚫 Hard client constraint — no metastore/account admin, ever
+> ## 🚫 Hard constraint — no metastore/account admin, ever
 >
 > **Neither service principal is ever a metastore or account admin.** Every grant below is
 > issued by the **catalog owner** (and, for external placement, the **external-location owner**).
