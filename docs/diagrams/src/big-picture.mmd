@@ -1,0 +1,19 @@
+graph LR
+    subgraph SRC["SOURCE workspace / metastore"]
+        direction TB
+        S1["01 Inventory<br/>enumerate securables<br/>+ read tags / ABAC / grants"] --> S2["02 Export<br/>full-fidelity DDL over a<br/>SQL warehouse + path-rewrite"]
+    end
+    B[["BUNDLE — run_&lt;id&gt;/<br/>ddl · grants · tags · abac · policies<br/>manifest.json + checksums"]]
+    subgraph TGT["TARGET workspace / metastore"]
+        direction TB
+        T1["03 Import<br/>replay in dependency order<br/>governed + fail-closed"] --> T2["Reports (xlsx)<br/>+ uc_sync_audit / uc_sync_state"]
+    end
+    S1 -. "requires source_warehouse_id" .-> S2
+    S2 ==>|"writes"| B
+    B ==>|"verified, then replayed"| T1
+    classDef src fill:#E3F2FD,stroke:#1565C0,stroke-width:2px,color:#0D47A1;
+    classDef tgt fill:#E8F5E9,stroke:#2E7D32,stroke-width:2px,color:#1B5E20;
+    classDef stg fill:#FFF8E1,stroke:#F57F17,stroke-width:2px,color:#E65100;
+    class SRC src
+    class TGT tgt
+    class B stg

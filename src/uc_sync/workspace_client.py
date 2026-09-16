@@ -149,6 +149,74 @@ class WorkspaceClient:
     def current_metastore_assignment(self) -> dict[str, Any]:
         return self.get("/api/2.1/unity-catalog/current-metastore-assignment")
 
+    # --- Files API (UC Volumes) — raw file I/O for volume data copy (FEAT-4) ------
+
+    def list_directory(self, directory_path: str) -> Iterator[dict[str, Any]]:
+        """Yield entries of a UC Volume directory via the Files API. Each entry has
+        ``path``, ``is_directory``, ``file_size``, ``last_modified``. Pages via
+        ``page_token``. A not-found directory yields nothing."""
+        base = "/api/2.0/fs/directories" + directory_path
+        page_token: Optional[str] = None
+        while True:
+            try:
+                data = self.get(base, page_token=page_token)
+            except RuntimeError as exc:
+                if "HTTP 404" in str(exc):
+                    return
+                raise
+            for item in data.get("contents") or []:
+                yield item
+            page_token = data.get("next_page_token")
+            if not page_token:
+                break
+
+    def download_file(self, file_path: str) -> bytes:
+        """Download a UC Volume file's raw bytes via the Files API (retries 429/5xx)."""
+        url = self.auth.host + "/api/2.0/fs/files" + urllib.parse.quote(file_path)
+        last_err: Exception | None = None
+        for attempt in range(self.max_retries):
+            req = urllib.request.Request(url, method="GET", headers=self._headers())
+            try:
+                with urllib.request.urlopen(req, timeout=300) as resp:
+                    return resp.read()
+            except urllib.error.HTTPError as exc:
+                payload = exc.read().decode() if hasattr(exc, "read") else str(exc)
+                if exc.code in {429, 500, 502, 503, 504} and attempt < self.max_retries - 1:
+                    time.sleep(min(2**attempt, 20))
+                    last_err = RuntimeError(redact(f"HTTP {exc.code}: {payload}"))
+                    continue
+                raise RuntimeError(redact(f"HTTP {exc.code}: {payload}")) from exc
+            except Exception as exc:  # noqa: BLE001
+                last_err = RuntimeError(redact(str(exc)))
+                time.sleep(min(2**attempt, 20))
+        raise RuntimeError(redact(str(last_err) if last_err else "download failed"))
+
+    def upload_file(self, file_path: str, data: bytes, *, overwrite: bool = True) -> None:
+        """Upload raw bytes to a UC Volume file via the Files API (retries 429/5xx)."""
+        url = (
+            self.auth.host + "/api/2.0/fs/files" + urllib.parse.quote(file_path)
+            + ("?overwrite=true" if overwrite else "")
+        )
+        headers = {**self._headers(), "Content-Type": "application/octet-stream"}
+        last_err: Exception | None = None
+        for attempt in range(self.max_retries):
+            req = urllib.request.Request(url, data=data, method="PUT", headers=headers)
+            try:
+                with urllib.request.urlopen(req, timeout=600) as resp:
+                    resp.read()
+                    return
+            except urllib.error.HTTPError as exc:
+                payload = exc.read().decode() if hasattr(exc, "read") else str(exc)
+                if exc.code in {429, 500, 502, 503, 504} and attempt < self.max_retries - 1:
+                    time.sleep(min(2**attempt, 20))
+                    last_err = RuntimeError(redact(f"HTTP {exc.code}: {payload}"))
+                    continue
+                raise RuntimeError(redact(f"HTTP {exc.code}: {payload}")) from exc
+            except Exception as exc:  # noqa: BLE001
+                last_err = RuntimeError(redact(str(exc)))
+                time.sleep(min(2**attempt, 20))
+        raise RuntimeError(redact(str(last_err) if last_err else "upload failed"))
+
 
 def build_sdk_client(auth: WorkspaceAuth) -> Any:
     """Preferred runtime client inside Databricks."""

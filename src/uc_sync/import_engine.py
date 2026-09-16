@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import random
 import re
+import time
 from dataclasses import asdict, dataclass
 from typing import Any, Iterable, List, Optional, Protocol
 
@@ -11,6 +13,7 @@ from uc_sync.dependency import plan
 from uc_sync.export import canonical_hash
 from uc_sync.mapping import MappingResolver
 from uc_sync.models import UCObject
+from uc_sync.rewrite import is_replayable_table_property
 from uc_sync.package_import import (
     _POLICY_COMPUTE_HINT as POLICY_COMPUTE_HINT,
     _is_policy_unsupported_error,
@@ -69,6 +72,253 @@ class SparkSqlExecutor:
             raise RuntimeError(f"SHOW CREATE returned no rows for {full_name}")
         row = rows[0]
         return str(row[0])
+
+
+class _TransientSqlError(Exception):
+    """A statement failure worth retrying (network blip, warehouse warming)."""
+
+
+# Substrings in a statement error that indicate a transient, retryable failure
+# (warehouse spinning up, capacity, service maintenance) rather than a
+# deterministic SQL error (syntax/permission/not-found), which must fail fast.
+_RETRYABLE_STATEMENT_HINTS = (
+    "temporarily_unavailable",
+    "service_under_maintenance",
+    "temporarily unavailable",
+    "please try again",
+    "try again later",
+    "deadline_exceeded",
+    "deadline exceeded",
+    "warehouse is starting",
+    "cluster is starting",
+    "no worker",
+    "capacity",
+)
+
+
+def _statement_error_is_retryable(message: str) -> bool:
+    # Message-hint check only. A genuinely BLANK terminal failure (no error_code AND
+    # no message — the cold-warehouse signature) is handled explicitly in _run_once;
+    # this function is asked only about a populated message.
+    low = (message or "").strip().lower()
+    return any(hint in low for hint in _RETRYABLE_STATEMENT_HINTS)
+
+
+# HTTP statuses that are genuinely transient at submit time and worth retrying with
+# backoff (bug #10): a brief control-plane rejection (403 — the one-off view-403),
+# rate limiting (429), and server/gateway errors (500/502/503/504). Everything else
+# with an explicit status — 400 (bad request), 401 (unauthorized), 404 (not found),
+# and other permanent 4xx — must FAIL FAST with the real status + body, never retried
+# 5 times behind a "statement failed after N attempts" mystery.
+_RETRYABLE_HTTP_STATUSES = {403, 408, 429, 500, 502, 503, 504}
+_HTTP_STATUS_RE = re.compile(r"HTTP\s+(\d{3})")
+
+
+def _submit_error_is_retryable(message: str) -> bool:
+    """Classify a submit/poll error message (from WorkspaceClient, e.g. ``HTTP 404:
+    …``). A parsed HTTP status decides: retry only the transient set, fail fast on any
+    other explicit status. A message with no HTTP status is a network-level blip →
+    retryable."""
+    match = _HTTP_STATUS_RE.search(message or "")
+    if not match:
+        return True  # no HTTP status → network blip, safe to retry
+    return int(match.group(1)) in _RETRYABLE_HTTP_STATUSES
+
+
+class RestSqlExecutor:
+    """Run SQL against a (possibly remote) workspace via the Statement
+    Execution API instead of a local Spark session.
+
+    Governance reads (tags, ABAC policies) query ``information_schema`` on the
+    workspace that OWNS the objects. When the job runs on the target but
+    inventories a remote source (``connectivity_mode=direct``), a local
+    ``SparkSqlExecutor`` would hit the target's Spark session — where the source
+    catalogs do not exist — so those reads come back empty. Pointing this
+    executor at the source workspace (same SP creds as the REST inventory) makes
+    tag/ABAC reads follow the source like everything else.
+
+    Returns rows as plain lists so callers can index/unpack them exactly like
+    ``spark.sql(...).collect()`` rows (JSON_ARRAY renders every value as a
+    string, so array columns arrive as JSON text — ``governance._json_list``
+    already parses that).
+
+    Production hardening: the reads are idempotent SELECT/DESCRIBE, so the whole
+    statement is retried with exponential backoff + jitter on transient failures
+    — network/HTTP errors surfacing from the client (which itself already retries
+    429/5xx) and transient statement states (warehouse warming, capacity).
+    Deterministic SQL errors (syntax, permission, not-found) fail fast without
+    retry. Polling backs off up to a cap so a cold-warehouse wait does not hammer
+    the API.
+    """
+
+    def __init__(
+        self,
+        client: "WorkspaceClient",
+        warehouse_id: str,
+        *,
+        poll_seconds: float = 2.0,
+        max_wait_seconds: float = 600.0,
+        max_retries: int = 4,
+        retry_base_seconds: float = 1.0,
+        poll_cap_seconds: float = 15.0,
+    ):
+        if not warehouse_id:
+            raise ValueError("warehouse_id is required for RestSqlExecutor")
+        self.client = client
+        self.warehouse_id = warehouse_id
+        self.poll_seconds = poll_seconds
+        self.max_wait_seconds = max_wait_seconds
+        self.max_retries = max(0, int(max_retries))
+        self.retry_base_seconds = retry_base_seconds
+        self.poll_cap_seconds = poll_cap_seconds
+
+    @classmethod
+    def for_ddl_capture(
+        cls, client: "WorkspaceClient", warehouse_id: str
+    ) -> "RestSqlExecutor":
+        """A ``RestSqlExecutor`` tuned for export-stage ``SHOW CREATE`` capture.
+
+        DDL capture is warehouse-only and has no synthesized fallback (plan P2-A),
+        so it must ride out a cold-warehouse warm-up and transient statement states
+        rather than give up early: more retries, a longer per-statement deadline,
+        and a slightly larger backoff base than the governance-read defaults. SHOW
+        CREATE is an idempotent read, so retrying is always safe.
+        """
+
+        return cls(
+            client,
+            warehouse_id,
+            max_retries=6,
+            retry_base_seconds=2.0,
+            max_wait_seconds=900.0,
+        )
+
+    def warm_up(self) -> None:
+        """Block until the warehouse is serving queries, before a burst of captures.
+
+        A cold (or just auto-stopped) serverless warehouse can drop the first
+        statements it receives while it spins up — they come back ``FAILED`` with no
+        error detail. Rather than let the real capture loop absorb those transient
+        failures one object at a time (and risk exhausting per-statement retries on a
+        slow start), issue one trivial idempotent statement first and let the
+        retry + poll loop ride out the warm-up, so every subsequent capture runs
+        against a warm warehouse. Idempotent and safe to call more than once.
+        """
+        self.execute("SELECT 1")
+
+    def execute(self, sql: str) -> list[list[Any]]:
+        last_err: Optional[Exception] = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                return self._run_once(sql)
+            except _TransientSqlError as exc:
+                last_err = exc
+                if attempt >= self.max_retries:
+                    break
+                delay = min(self.retry_base_seconds * (2 ** attempt), 30.0)
+                time.sleep(delay + random.uniform(0, delay * 0.25))
+        raise RuntimeError(
+            f"statement failed after {self.max_retries + 1} attempt(s): {last_err}"
+        )
+
+    def _run_once(self, sql: str) -> list[list[Any]]:
+        try:
+            resp = self.client.post(
+                "/api/2.0/sql/statements",
+                {
+                    "warehouse_id": self.warehouse_id,
+                    "statement": sql,
+                    "wait_timeout": "30s",
+                    "on_wait_timeout": "CONTINUE",
+                    "disposition": "INLINE",
+                    "format": "JSON_ARRAY",
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - client raises RuntimeError
+            # Bug #10: surface the real HTTP status/body and fail FAST on a clearly-
+            # permanent error (400/401/404/other 4xx); retry only genuinely transient
+            # ones (403/429/5xx) or a network blip with no status.
+            if _submit_error_is_retryable(str(exc)):
+                raise _TransientSqlError(f"submit failed: {exc}") from exc
+            raise RuntimeError(f"submit failed (permanent): {exc}") from exc
+
+        deadline = time.time() + self.max_wait_seconds
+        delay = self.poll_seconds
+        while True:
+            state = str((resp.get("status") or {}).get("state") or "").upper()
+            if state == "SUCCEEDED":
+                break
+            if state in {"FAILED", "CANCELED", "CLOSED"}:
+                err = (resp.get("status") or {}).get("error") or {}
+                code = str(err.get("error_code") or "").strip()
+                raw_msg = str(err.get("message") or "").strip()
+                # Always surface BOTH the error_code and the message (the API returns
+                # e.g. error_code=BAD_REQUEST + "PERMISSION_DENIED: User does not have
+                # SELECT …"); a permission/syntax misconfig must never reach the report
+                # as a bare "statement FAILED:" with no detail (that masked a grant gap
+                # as a mystery once already).
+                detail = "; ".join(p for p in (code, raw_msg) if p) or (
+                    f"no error detail; state={state}; stmt={sql[:120]}"
+                )
+                # Retry ONLY a genuinely blank terminal failure — no error_code AND no
+                # message — which is the cold / just-autostopped warehouse dropping the
+                # statement while it spins up (all statements here are idempotent reads).
+                # A known transient message hint is also retryable. Anything with a real
+                # error_code or message (permission / syntax / not-found) fails FAST.
+                blank = not code and not raw_msg
+                if blank or _statement_error_is_retryable(raw_msg):
+                    raise _TransientSqlError(f"statement {state}: {detail}")
+                raise RuntimeError(f"statement {state}: {detail}")
+            if time.time() > deadline:
+                # A cold warehouse warms in well under this; a timeout here means
+                # something is wrong that a resubmit won't fix — fail terminally.
+                raise RuntimeError(
+                    f"statement did not finish before "
+                    f"{self.max_wait_seconds:.0f}s (state={state})"
+                )
+            time.sleep(delay + random.uniform(0, delay * 0.25))
+            delay = min(delay * 1.5, self.poll_cap_seconds)
+            try:
+                resp = self.client.get(
+                    f"/api/2.0/sql/statements/{resp.get('statement_id')}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                if _submit_error_is_retryable(str(exc)):
+                    raise _TransientSqlError(f"poll failed: {exc}") from exc
+                raise RuntimeError(f"poll failed (permanent): {exc}") from exc
+
+        result = resp.get("result") or {}
+        rows = [list(r) for r in (result.get("data_array") or [])]
+        # Follow chunk links in case a governance read spans multiple chunks.
+        next_link = result.get("next_chunk_internal_link")
+        while next_link:
+            try:
+                chunk = self.client.get(next_link)
+            except Exception as exc:  # noqa: BLE001
+                raise _TransientSqlError(f"chunk fetch failed: {exc}") from exc
+            rows.extend(list(r) for r in (chunk.get("data_array") or []))
+            next_link = chunk.get("next_chunk_internal_link")
+        return rows
+
+    def show_create(self, object_type: str, full_name: str) -> str:
+        """Capture full-fidelity DDL from the (remote) source via SHOW CREATE.
+
+        Used by the export stage in direct mode, where the job runs on the target
+        but the source objects only exist on the source workspace — so the DDL
+        must be read over the source warehouse, not the local Spark session.
+        Functions have no ``SHOW CREATE FUNCTION`` in Databricks SQL, so the
+        caller synthesizes them from inventory instead.
+        """
+        if str(object_type).upper() == "FUNCTION":
+            raise RuntimeError(
+                "SHOW CREATE FUNCTION is not supported in Databricks SQL; "
+                "functions are synthesized from inventory"
+            )
+        rows = self.execute(f"SHOW CREATE TABLE {quote_full_name(full_name)}")
+        if not rows:
+            raise RuntimeError(f"SHOW CREATE returned no rows for {full_name}")
+        first = rows[0]
+        return str(first[0] if not isinstance(first, str) else first)
 
 
 class ImportEngine:
@@ -462,8 +712,21 @@ class ImportEngine:
                 else None
             )
         if kind == "EXTERNAL_VOLUME":
-            # Duplicating the same external storage registration is unsafe.
-            return None
+            source_location = obj.storage_location or str(
+                obj.definition.get("storage_location") or ""
+            )
+            target_location = self.mapper.rewrite_location(source_location) or (
+                source_location
+                if self.cfg.execution_mode == "CROSS_WORKSPACE"
+                else ""
+            )
+            if not target_location:
+                return None
+            comment = self._comment_clause(obj.definition.get("comment"))
+            return (
+                f"CREATE EXTERNAL VOLUME IF NOT EXISTS {target} "
+                f"LOCATION '{self._escape_literal(target_location)}'{comment}"
+            )
         return None
 
     def _existing_external_result(
@@ -608,11 +871,14 @@ class ImportEngine:
         data_format = str(
             obj.definition.get("data_source_format") or "DELTA"
         ).upper()
-        # Runtime-generated Delta protocol properties are not portable.
+        # Bug #7: keep replayable table properties (incl. meaningful delta.* such as
+        # dataSkippingStatsColumns / feature.allowColumnDefaults); drop only the
+        # genuinely un-replayable keys (row-tracking materialized column names + min
+        # reader/writer protocol versions).
         portable_properties = {
             key: value
             for key, value in (obj.properties or {}).items()
-            if not str(key).lower().startswith("delta.")
+            if is_replayable_table_property(key)
         }
         properties = ""
         if portable_properties:

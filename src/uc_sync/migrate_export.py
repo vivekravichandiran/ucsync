@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,7 +11,7 @@ from typing import Any, Optional
 from uc_sync.mapping import MappingResolver
 from uc_sync.models import ObjectType
 from uc_sync.rewrite import (
-    rewrite_external_location_identifiers,
+    rewrite_access_connector_id,
     rewrite_json_text,
     rewrite_json_value,
     rewrite_text,
@@ -61,14 +60,19 @@ def _parse_artifact_name(relative: str) -> tuple[str, str, str]:
 
 
 class MigrateExportService:
-    """Copy export_staging → export_migrated_staging with catalog/location rewrite."""
+    """Copy export_staging → export_migrated_staging with storage-path rewrite.
+
+    Names (catalog/schema/table/external-location) are **never** rewritten — the
+    utility recreates every securable under its source name. Only storage URLs are
+    rewritten (via the mapping file), and captured ``SHOW CREATE`` DDL is passed
+    through the replay sanitizers.
+    """
 
     def __init__(
         self,
         *,
         source_root: str,
         target_root: str,
-        catalog_mapping: dict[str, str],
         mappings: Optional[dict[str, Any]] = None,
         volume_root: str | None = None,
         run_id: str = "",
@@ -76,10 +80,10 @@ class MigrateExportService:
     ):
         self.source_root = Path(source_root)
         self.target_root = Path(target_root)
-        self.catalog_mapping = dict(catalog_mapping or {})
         self.mapper = MappingResolver(mappings or {})
         self.run_id = run_id
         self.fs = fs
+        self._cred_source_location = self._read_credential_source_locations()
         self.volume_root = (
             Path(volume_root) / f"run_{run_id}" / "migrated"
             if volume_root and run_id
@@ -152,7 +156,6 @@ class MigrateExportService:
             "source_root": str(self.source_root),
             "target_root": str(self.target_root),
             "volume_root": str(self.volume_root) if self.volume_root else "",
-            "catalog_mapping": self.catalog_mapping,
             "file_count": len(results),
             "success_count": sum(item.status == "SUCCESS" for item in results),
         }
@@ -189,7 +192,6 @@ class MigrateExportService:
         error_message: str = "",
     ) -> MigrateItemResult:
         artifact, object_type, encoded_name = _parse_artifact_name(relative)
-        target_full_name = self.map_full_name(encoded_name) if encoded_name else ""
         return MigrateItemResult(
             relative_path=relative,
             status=status,
@@ -199,64 +201,52 @@ class MigrateExportService:
             error_message=error_message,
             artifact=artifact,
             object_type=object_type,
-            source_full_name=self.unmap_full_name(target_full_name),
-            target_full_name=target_full_name,
+            source_full_name=encoded_name,
+            target_full_name=encoded_name,
         )
 
-    def map_full_name(self, full_name: str) -> str:
-        return self._swap_catalog(full_name, self.catalog_mapping)
-
-    def unmap_full_name(self, full_name: str) -> str:
-        """Target → source name, for audit rows keyed on source identity."""
-        inverse = {
-            target: source
-            for source, target in self.catalog_mapping.items()
-            if source and target
-        }
-        return self._swap_catalog(full_name, inverse)
-
-    @staticmethod
-    def _swap_catalog(full_name: str, mapping: dict[str, str]) -> str:
-        name = str(full_name or "")
-        if not name:
-            return name
-        if "." not in name:
-            return mapping.get(name, name)
-        catalog, _, rest = name.partition(".")
-        target = mapping.get(catalog)
-        if not target:
-            return name
-        return f"{target}.{rest}" if rest else target
-
     def _map_relative_path(self, relative: str) -> str:
-        """Rename encoded source catalog segments in ddl/grants/metadata filenames."""
+        """Names are never mapped, so package paths are copied verbatim."""
 
-        result = relative
-        for source, target in sorted(
-            self.catalog_mapping.items(),
-            key=lambda item: len(item[0]),
-            reverse=True,
-        ):
-            if not source or not target or source == target:
+        return relative
+
+    def _read_credential_source_locations(self) -> dict[str, str]:
+        """Map ``storage_credential_name -> source storage location`` from the
+        bundle inventory's external locations.
+
+        Storage-credential DDL carries only the credential name and its source
+        access-connector id — not the storage path — so the correct *target*
+        connector can only be resolved by finding which source location the
+        credential backs. Each external location records both its
+        ``storage_credential_name`` and its (source) ``storage_location``.
+        """
+
+        inventory = self.source_root / "inventory" / "objects.json"
+        if not inventory.is_file():
+            return {}
+        try:
+            rows = json.loads(inventory.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        mapping: dict[str, str] = {}
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
                 continue
-            result = result.replace(f"{source}__", f"{target}__")
-            result = re.sub(
-                rf"(^|[_/]){re.escape(source)}(\.(?:sql|json|ya?ml))$",
-                rf"\1{target}\2",
-                result,
-                flags=re.IGNORECASE,
+            if row.get("object_type") != ObjectType.EXTERNAL_LOCATION.value:
+                continue
+            definition = row.get("definition") or {}
+            cred = (
+                row.get("storage_credential_name")
+                or definition.get("credential_name")
             )
-        # Rename EXTERNAL_LOCATION_<source>.sql using CSV location mapping.
-        artifact, object_type, encoded = _parse_artifact_name(result)
-        if object_type == "EXTERNAL_LOCATION" and encoded:
-            mapping = self.mapper.external_location_mapping(encoded, "", "")
-            target_name = (mapping or {}).get("target_external_location") or ""
-            if target_name and target_name != encoded:
-                result = result.replace(
-                    f"EXTERNAL_LOCATION_{encoded}",
-                    f"EXTERNAL_LOCATION_{target_name}",
-                )
-        return result
+            location = (
+                row.get("storage_location")
+                or definition.get("storage_location")
+                or definition.get("url")
+            )
+            if cred and location and str(cred) not in mapping:
+                mapping[str(cred)] = str(location)
+        return mapping
 
     def _rewrite_file(self, relative: str, content: str) -> str:
         lowered = relative.lower()
@@ -266,59 +256,39 @@ class MigrateExportService:
             return self._rewrite_inventory(content)
         artifact, object_type, encoded = _parse_artifact_name(relative)
         if lowered.endswith(".json"):
-            rewritten = rewrite_json_text(
-                content,
-                self.catalog_mapping,
-                location_resolver=self.mapper,
-            )
+            rewritten = rewrite_json_text(content, location_resolver=self.mapper)
         else:
-            rewritten = rewrite_text(
-                content,
-                self.catalog_mapping,
-                location_resolver=self.mapper,
-            )
+            rewritten = rewrite_text(content, location_resolver=self.mapper)
             # Managed-storage / collation / inline-policy stripping is only valid
             # for CREATE DDL. Grants and policy files (``ALTER TABLE ... SET MASK
-            # / SET ROW FILTER``) must pass through untouched apart from catalog
-            # rewriting — otherwise strip_inline_policy_clauses would delete the
+            # / SET ROW FILTER``) must pass through untouched apart from the path
+            # rewrite — otherwise strip_inline_policy_clauses would delete the
             # SET MASK clause from the ALTER statement itself, corrupting it.
             if artifact == "ddl":
                 rewritten = strip_managed_storage_clauses(rewritten, object_type)
-                if object_type == "EXTERNAL_LOCATION":
-                    rewritten = self._rewrite_external_location_sql(
-                        rewritten, encoded
+                if object_type == "STORAGE_CREDENTIAL":
+                    # Point the credential at the target-region access connector
+                    # for the source location it backs (per-catalog connectors),
+                    # falling back to the first mapping connector when unknown.
+                    source_location = self._cred_source_location.get(encoded, "")
+                    connector = (
+                        self.mapper.target_access_connector_id_for_location(
+                            source_location
+                        )
+                        if source_location
+                        else None
+                    ) or self.mapper.target_access_connector_id()
+                    rewritten = rewrite_access_connector_id(
+                        rewritten, connector or ""
                     )
         return rewritten
 
-    def _rewrite_external_location_sql(
-        self, content: str, source_name: str
-    ) -> str:
-        url_match = re.search(
-            r"URL\s+'([^']+)'", content, flags=re.IGNORECASE
-        )
-        source_url = url_match.group(1) if url_match else ""
-        mapping = self.mapper.external_location_mapping(
-            source_name, source_url, ""
-        )
-        if not mapping:
-            return content
-        return rewrite_external_location_identifiers(
-            content,
-            source_name=source_name,
-            target_name=str(mapping.get("target_external_location") or ""),
-            target_credential=str(mapping.get("target_credential") or ""),
-        )
-
     def _rewrite_inventory(self, content: str) -> str:
-        """Keep source identity fields; add target_full_name; rewrite locations/DDL."""
+        """Keep source identity fields; add target_full_name (=source); rewrite paths."""
 
         rows = json.loads(content)
         if not isinstance(rows, list):
-            return rewrite_json_text(
-                content,
-                self.catalog_mapping,
-                location_resolver=self.mapper,
-            )
+            return rewrite_json_text(content, location_resolver=self.mapper)
         rewritten_rows: list[Any] = []
         identity_keys = {
             "full_name",
@@ -326,6 +296,8 @@ class MigrateExportService:
             "object_id",
             "name",
             "owner",
+            "catalog",
+            "schema",
         }
         for row in rows:
             if not isinstance(row, dict):
@@ -336,8 +308,9 @@ class MigrateExportService:
             new_row["source_full_name"] = source_full or str(
                 row.get("source_full_name") or ""
             )
-            new_row["target_full_name"] = self.map_full_name(source_full)
-            # Preserve source identity; rewrite other string/nested values.
+            # Names are never mapped: target identity == source identity.
+            new_row["target_full_name"] = source_full
+            # Preserve identity; rewrite storage paths in other string/nested values.
             for key, value in list(new_row.items()):
                 if key in identity_keys or key in {
                     "source_full_name",
@@ -346,22 +319,11 @@ class MigrateExportService:
                 }:
                     continue
                 if isinstance(value, str):
-                    new_row[key] = rewrite_text(
-                        value,
-                        self.catalog_mapping,
-                        location_resolver=self.mapper,
-                    )
+                    new_row[key] = rewrite_text(value, location_resolver=self.mapper)
                 elif isinstance(value, (dict, list)):
                     new_row[key] = rewrite_json_value(
-                        value,
-                        self.catalog_mapping,
-                        location_resolver=self.mapper,
+                        value, location_resolver=self.mapper
                     )
-            # Catalog segment for convenience on target-side tooling.
-            if new_row.get("catalog") and source_full:
-                source_catalog = source_full.split(".", 1)[0]
-                if source_catalog in self.catalog_mapping:
-                    new_row["catalog"] = self.catalog_mapping[source_catalog]
             rewritten_rows.append(new_row)
         return json.dumps(rewritten_rows, indent=2, default=str) + "\n"
 

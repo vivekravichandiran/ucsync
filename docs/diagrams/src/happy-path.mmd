@@ -1,0 +1,15 @@
+graph LR
+    I["00 Install Jobs<br/>fill widgets once"] --> DR["Run End-to-end<br/><b>Dry Run</b><br/>(dry_run=true)"]
+    DR --> REV1{"Reports clean?<br/>preflight GO?"}
+    REV1 -->|"no — fix"| DR
+    REV1 -->|"yes"| LIVE["Run End-to-end<br/><b>Live</b><br/>(dry_run=false)"]
+    LIVE --> REV2["Read import.xlsx<br/>+ Outstanding sheet"]
+    REV2 --> FIX{"Any FAILUREs?"}
+    FIX -->|"fix prereq, re-run (additive)"| LIVE
+    FIX -->|"none"| DONE(["Governed shells ready<br/>→ hand to data-migration"])
+    classDef step fill:#E8F5E9,stroke:#2E7D32,stroke-width:2px,color:#1B5E20;
+    classDef gate fill:#FFF8E1,stroke:#F57F17,stroke-width:2px,color:#E65100;
+    classDef done fill:#F3E5F5,stroke:#6A1B9A,stroke-width:2px,color:#4A148C;
+    class I,DR,LIVE,REV2 step
+    class REV1,FIX gate
+    class DONE done

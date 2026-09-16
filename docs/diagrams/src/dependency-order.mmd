@@ -1,0 +1,22 @@
+graph LR
+    P0["<b>Phase 0</b><br/>Governed tag <b>definitions</b><br/>CREATE GOVERNED TAG<br/>(idempotent)"]
+    subgraph S["① Structure"]
+        SC["Storage<br/>credentials"] --> EL["External<br/>locations"] --> CAT["Catalogs"] --> SCH["Schemas"] --> VOL["Volumes"]
+    end
+    subgraph P["② Protect — governance interleaved"]
+        FN["Functions<br/><b>before tables</b>"] --> TBL["Tables<br/>inline masks<br/>(atomic)"] --> TAG["Governed<br/>tags<br/><i>fail→drop</i>"] --> AB["ABAC<br/><i>fail→drop</i>"] --> SW{{"Drop<br/>sweep"}}
+    end
+    subgraph F["③ Finish"]
+        VW["Views /<br/>matviews"] --> GR["Grants"] --> OW["Ownership<br/><b>(last)</b>"]
+    end
+    P0 --> SC
+    VOL --> FN
+    SW --> VW
+    classDef struct fill:#E3F2FD,stroke:#1565C0,stroke-width:2px,color:#0D47A1;
+    classDef gov fill:#F3E5F5,stroke:#6A1B9A,stroke-width:2px,color:#4A148C;
+    classDef danger fill:#FFEBEE,stroke:#C62828,stroke-width:2px,color:#B71C1C;
+    classDef last fill:#ECEFF1,stroke:#455A64,stroke-width:2px,color:#263238;
+    class SC,EL,CAT,SCH,VOL,FN,TBL,VW struct
+    class P0,TAG,AB gov
+    class SW danger
+    class GR,OW last

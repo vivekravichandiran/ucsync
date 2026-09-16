@@ -1,0 +1,17 @@
+sequenceDiagram
+    autonumber
+    participant Op as Operator
+    participant S as Source workspace
+    participant VA as Staging A (source)
+    participant VB as Staging B (target)
+    participant T as Target workspace
+    Note over S: Job A — Airgap Inventory+Export
+    Op->>S: run 01 Inventory + 02 Export (source warehouse)
+    S->>VA: write run_<id>/ (manifest + checksums)
+    Note over Op: THE HANDOFF
+    Op->>VB: copy the whole run_<id>/ dir A → B
+    Note over T: Job B — Airgap Import
+    Op->>T: run 03 Import (run_id = source bundle id)
+    T->>VB: read + verify manifest/checksums
+    T->>T: create + govern in dependency order (fail-closed)
+    T-->>Op: import.xlsx + Outstanding sheet + uc_sync_state

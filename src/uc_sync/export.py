@@ -7,13 +7,19 @@ import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from uc_sync import __version__
-from uc_sync.models import UCObject
+from uc_sync.governance import (
+    abac_policy_create_statement,
+    governed_tag_create_statement,
+    tag_statements_for_object,
+)
+from uc_sync.models import ObjectType, UCObject
 from uc_sync.sql_ddl import (
     create_ddl_for_object,
     format_ddl_file,
+    function_ddl_from_information_schema,
     grant_statements_for_object,
     policy_statements_for_object,
     prefers_show_create,
@@ -21,6 +27,52 @@ from uc_sync.sql_ddl import (
     show_create_command,
     supports_show_create,
 )
+
+
+class DdlCaptureError(RuntimeError):
+    """A full-fidelity DDL capture (SHOW CREATE) that failed after all retries.
+
+    Raised for the table/view family, where synthesizing DDL from inventory would
+    silently drop column masks / row filters / constraints / generated / identity /
+    partition / clustering. Per plan P2-A there is NO synthesized fallback for these
+    types — the object is a hard FAILURE and the operator re-runs.
+    """
+
+
+# The table/view family whose ONLY full-fidelity source is SHOW CREATE. A capture
+# failure for one of these is a hard FAILURE (never a synthesized rebuild, which
+# would silently strip classic masks / row filters / constraints). Metric views
+# are intentionally excluded: they carry only YAML (no masks/constraints are
+# possible), so synthesizing them from the captured definition is lossless.
+_HARD_FAIL_SHOW_CREATE_TYPES = {
+    "TABLE",
+    "EXTERNAL_TABLE",
+    "VIEW",
+    "DYNAMIC_VIEW",
+    # Materialized views are conditionally migratable (migrate_materialized_views), so
+    # their DDL is still captured. Streaming tables are ALWAYS report-only (pipeline-
+    # owned) — capturing their SHOW CREATE was wasted work; they are in the report-only
+    # no-DDL set below instead.
+    "MATERIALIZED_VIEW",
+}
+
+# Report-only types that must never have DDL captured — they are reported but never
+# recreated. FOREIGN objects that only look like tables (bug #6): a Lakebase-synced
+# table (POSTGRESQL_FORMAT) and a Vector Search index (VECTOR_INDEX_FORMAT) — the
+# latter cannot even be read by SHOW CREATE. Plus the inventory-only Tier-A AI assets.
+_REPORT_ONLY_NO_DDL_TYPES = {
+    "LAKEBASE_TABLE",
+    "PIPELINE_TABLE",
+    "VECTOR_INDEX",
+    "ONLINE_TABLE",
+    "MONITOR",
+    "UC_SECRET",
+    "MODEL",
+    # Always report-only: streaming tables (pipeline-owned) and monitor metric tables
+    # (regenerated when the monitor is recreated). Never capture DDL for these.
+    "STREAMING_TABLE",
+    "MONITOR_METRIC_TABLE",
+}
 
 
 @dataclass
@@ -43,6 +95,23 @@ class ExportItemResult:
         return asdict(self)
 
 
+def export_read_failures(result: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Per-object export results that could NOT be read (status ``ERROR``).
+
+    Bug #2: the export must fail loudly if it could not read any inventoried
+    object — a permission-denied SHOW CREATE, a failed DDL capture, etc. — instead
+    of quietly reporting overall success and letting the import run on a partial
+    bundle. The caller (notebook 02) uses this to exit non-zero after the report
+    and audit rows have been written, so the operator sees the real cause and
+    re-runs rather than importing an incomplete set.
+    """
+    return [
+        item
+        for item in (result.get("results") or [])
+        if isinstance(item, dict) and item.get("status") == "ERROR"
+    ]
+
+
 def canonical_hash(obj: UCObject) -> str:
     payload = {
         "object_type": obj.object_type.value,
@@ -56,7 +125,10 @@ def canonical_hash(obj: UCObject) -> str:
 
 
 def _safe_filename(object_type: str, full_name: str) -> str:
-    return f"{object_type}_{full_name.replace('.', '__')}"
+    safe = full_name.replace(".", "__")
+    # ABAC policy full names carry '#policy:<name>' — sanitize for a filesystem.
+    safe = safe.replace("#policy:", "__policy__").replace("#", "_").replace(":", "_")
+    return f"{object_type}_{safe}"
 
 
 class ExportService:
@@ -78,7 +150,7 @@ class ExportService:
         self.fs = fs
         self.root = Path(volume_root.rstrip("/")) / f"run_{run_id}"
         default_workspace = (
-            "/Workspace/Users/vivek.ravichandiran@databricks.com/"
+            "/Workspace/Shared/"
             f"UCSync/export_staging/{run_id}"
         )
         self.workspace_root = Path(workspace_root or default_workspace)
@@ -123,6 +195,9 @@ class ExportService:
             "metadata",
             "grants",
             "policies",
+            "tags",
+            "abac",
+            "governed_tags",
             "bindings",
             "validation",
             "checksums",
@@ -137,10 +212,35 @@ class ExportService:
         all_table_ddls: list[str] = []
         all_grant_ddls: list[str] = []
         all_policy_ddls: list[str] = []
+        all_tag_ddls: list[str] = []
+        all_abac_ddls: list[str] = []
+        all_governed_tag_ddls: list[str] = []
+        governed_tag_files = 0
         ddl_files = 0
         grant_files = 0
         policy_files = 0
+        tag_files = 0
+        abac_files = 0
         ddl_by_source: dict[str, int] = {}
+        warnings_global: list[str] = []
+
+        # Pre-warm the (possibly cold / auto-stopped) source warehouse before the
+        # SHOW CREATE capture burst. A cold serverless warehouse drops its first
+        # statements with a bare "statement FAILED:" while it spins up; capturing
+        # DDL has no synthesized fallback, so a dropped statement silently loses the
+        # object from the bundle. Warming up front (and the executor's retry on
+        # empty-message failures) keeps the capture loop running against a warm
+        # warehouse. Best-effort: a warm-up failure is not fatal on its own — the
+        # per-object capture still retries — so it is only recorded as a warning.
+        if not dry_run and self.sql is not None and hasattr(self.sql, "warm_up"):
+            try:
+                self.sql.warm_up()
+            except Exception as exc:  # noqa: BLE001
+                warmup_warning = (
+                    f"source warehouse warm-up did not confirm ready: {exc}"
+                )
+                print(f"[export] {warmup_warning}")
+                warnings_global.append(warmup_warning)
 
         for obj in objects_list:
             try:
@@ -155,6 +255,32 @@ class ExportService:
                     meta_rel,
                     json.dumps(obj.to_dict(), indent=2, default=str) + "\n",
                 )
+
+                # Governed-tag definitions (FEAT-2): emit a CREATE GOVERNED TAG file
+                # (with allowed values) into governed_tags/ so the import can create
+                # them before any SET TAGS. No DDL/grants/tags/policies of their own.
+                if obj.object_type == ObjectType.GOVERNED_TAG:
+                    gt_sql = governed_tag_create_statement(
+                        obj.full_name,
+                        list((obj.definition or {}).get("allowed_values") or []),
+                    )
+                    gt_body = render_sql_file(
+                        [gt_sql], header=f"Governed tag {obj.full_name}"
+                    )
+                    self._write_text(f"governed_tags/{stem}.sql", gt_body)
+                    all_governed_tag_ddls.append(gt_body.rstrip() + "\n")
+                    governed_tag_files += 1
+                    results.append(
+                        ExportItemResult(
+                            object_type=obj.object_type.value,
+                            full_name=obj.full_name,
+                            status="SUCCESS",
+                            definition_hash=digest,
+                            metadata_path=meta_paths.get("volume")
+                            or meta_paths.get("workspace", ""),
+                        )
+                    )
+                    continue
 
                 ddl_path = ""
                 workspace_ddl_path = ""
@@ -178,7 +304,6 @@ class ExportService:
                         "DYNAMIC_VIEW",
                         "METRIC_VIEW",
                         "MATERIALIZED_VIEW",
-                        "STREAMING_TABLE",
                         "FUNCTION",
                     }:
                         all_table_ddls.append(ddl_sql.rstrip() + "\n")
@@ -218,6 +343,27 @@ class ExportService:
                     all_policy_ddls.append(policy_body.rstrip() + "\n")
                     policy_files += 1
 
+                tag_sql_statements = tag_statements_for_object(obj)
+                if tag_sql_statements:
+                    tag_body = render_sql_file(
+                        tag_sql_statements,
+                        header=f"Tags for {obj.object_type.value} {obj.full_name}",
+                    )
+                    self._write_text(f"tags/{stem}.sql", tag_body)
+                    all_tag_ddls.append(tag_body.rstrip() + "\n")
+                    tag_files += 1
+
+                if obj.object_type == ObjectType.ABAC_POLICY:
+                    abac_sql = abac_policy_create_statement(obj)
+                    if abac_sql:
+                        abac_body = render_sql_file(
+                            [abac_sql],
+                            header=f"ABAC policy {obj.name} ON {obj.definition.get('on_securable')}",
+                        )
+                        self._write_text(f"abac/{stem}.sql", abac_body)
+                        all_abac_ddls.append(abac_body.rstrip() + "\n")
+                        abac_files += 1
+
                 status = "SUCCESS"
                 error_code = ""
                 error_message = ""
@@ -245,12 +391,19 @@ class ExportService:
                     )
                 )
             except Exception as exc:  # noqa: BLE001 - report per-object errors
+                # A hard DDL-capture failure (no synth fallback, P2-A) gets a
+                # dedicated code so the report / Issues sheet names it clearly.
+                error_code = (
+                    "DDL_CAPTURE_FAILED"
+                    if isinstance(exc, DdlCaptureError)
+                    else type(exc).__name__
+                )
                 results.append(
                     ExportItemResult(
                         object_type=obj.object_type.value,
                         full_name=obj.full_name,
                         status="ERROR",
-                        error_code=type(exc).__name__,
+                        error_code=error_code,
                         error_message=str(exc),
                     )
                 )
@@ -300,9 +453,36 @@ class ExportService:
                     ),
                 ),
             )
+        if all_tag_ddls:
+            self._write_text(
+                "tags/all_tags.sql",
+                render_sql_file(
+                    [block.rstrip() for block in all_tag_ddls],
+                    header=f"Governed-tag assignments for run {self.run_id}",
+                ),
+            )
+        if all_abac_ddls:
+            self._write_text(
+                "abac/all_abac.sql",
+                render_sql_file(
+                    [block.rstrip() for block in all_abac_ddls],
+                    header=f"ABAC policy CREATE statements for run {self.run_id}",
+                ),
+            )
+        if all_governed_tag_ddls:
+            self._write_text(
+                "governed_tags/all_governed_tags.sql",
+                render_sql_file(
+                    [block.rstrip() for block in all_governed_tag_ddls],
+                    header=f"Governed-tag CREATE statements for run {self.run_id}",
+                ),
+            )
         manifest["ddl_files"] = ddl_files
         manifest["grant_files"] = grant_files
         manifest["policy_files"] = policy_files
+        manifest["tag_files"] = tag_files
+        manifest["abac_files"] = abac_files
+        manifest["governed_tag_files"] = governed_tag_files
         manifest["ddl_by_source"] = ddl_by_source
         self._write_text(
             "manifest.json",
@@ -325,45 +505,97 @@ class ExportService:
             "ddl_files": ddl_files,
             "grant_files": grant_files,
             "policy_files": policy_files,
+            "tag_files": tag_files,
+            "abac_files": abac_files,
+            "governed_tag_files": governed_tag_files,
             "ddl_by_source": ddl_by_source,
+            "warnings": warnings_global,
         }
 
     def _capture_object_ddl(
         self, obj: UCObject, warnings: list[str]
     ) -> tuple[str | None, str | None]:
-        """Return (ddl_text, source) using SHOW CREATE when possible."""
+        """Return ``(ddl_text, source)``, warehouse-only for the DDL-bearing types.
 
-        tried_show = False
-        if self.sql is not None and supports_show_create(obj.object_type):
-            tried_show = True
+        Plan P2-A — capture is warehouse-only, with NO silent fidelity downgrade:
+
+        * **Functions** are read from ``information_schema`` over the warehouse
+          (lossless — functions carry no masks). If that read cannot be completed
+          the DDL is synthesized from the stage-01 inventory (equally lossless).
+        * **Table/view family** (``_HARD_FAIL_SHOW_CREATE_TYPES``) is captured via
+          ``SHOW CREATE`` on the warehouse (retries + backoff live in the executor).
+          A failure is a **hard FAILURE** (``DdlCaptureError``) — never a synthesized
+          rebuild, which would silently strip masks / row filters / constraints.
+        * **Everything else** (catalogs, schemas, volumes, external locations,
+          storage credentials, metric views) is synthesized from inventory — SQL
+          cannot produce it, and none of it carries classic protection.
+        """
+
+        otype = obj.object_type.value
+
+        # Report-only types that only LOOK like tables (bugs #6/#8) or are inventory-
+        # only Tier-A AI assets: never capture DDL (no SHOW CREATE, no synthesis) —
+        # they are reported, never recreated. Also honour an explicit
+        # in_scope_for_migration=false flag so any object marked report-only at
+        # inventory is skipped regardless of its type.
+        if otype in _REPORT_ONLY_NO_DDL_TYPES or (
+            isinstance(obj.definition, dict)
+            and obj.definition.get("in_scope_for_migration") is False
+        ):
+            return None, None
+
+        if otype == "FUNCTION":
+            if self.sql is not None:
+                try:
+                    ddl = function_ddl_from_information_schema(
+                        self.sql, obj.full_name
+                    )
+                except Exception:  # noqa: BLE001 - fall back to synthesis below
+                    ddl = None
+                if ddl:
+                    return (
+                        format_ddl_file(
+                            obj,
+                            ddl,
+                            source="INFORMATION_SCHEMA",
+                            command="information_schema.routines/parameters",
+                        ),
+                        "INFORMATION_SCHEMA",
+                    )
+            synthesized = create_ddl_for_object(obj)
+            if synthesized:
+                return (
+                    format_ddl_file(obj, synthesized, source="SYNTHESIZED"),
+                    "SYNTHESIZED",
+                )
+            return None, None
+
+        if otype in _HARD_FAIL_SHOW_CREATE_TYPES:
+            if self.sql is None:
+                raise DdlCaptureError(
+                    "a SQL warehouse (sql_executor) is required to capture "
+                    f"full-fidelity DDL for {otype} {obj.full_name}"
+                )
             try:
-                ddl = self._capture_show_create(obj)
-                return ddl, "SHOW_CREATE"
-            except Exception as exc:  # noqa: BLE001
-                if prefers_show_create(obj.object_type):
-                    warnings.append(f"SHOW_CREATE_FAILED: {exc}")
-                # Optional SHOW CREATE types fall through to synthesis quietly.
+                return self._capture_show_create(obj), "SHOW_CREATE"
+            except Exception as exc:  # noqa: BLE001 - no synth fallback for these
+                raise DdlCaptureError(
+                    f"SHOW CREATE failed for {otype} {obj.full_name} after retries; "
+                    "no synthesized fallback (it would drop masks / row filters / "
+                    f"constraints). Re-run once the warehouse is warm: {exc}"
+                ) from exc
 
         synthesized = create_ddl_for_object(obj)
         if synthesized:
             source = (
                 "SYNTHESIZED_MANUAL"
-                if obj.object_type.value == "STORAGE_CREDENTIAL"
-                and "MANUAL:" in synthesized
+                if otype == "STORAGE_CREDENTIAL" and "MANUAL:" in synthesized
                 else "SYNTHESIZED"
             )
             return (
-                format_ddl_file(
-                    obj,
-                    synthesized,
-                    source=source,
-                    command="",
-                ),
+                format_ddl_file(obj, synthesized, source=source, command=""),
                 source,
             )
-
-        if tried_show and prefers_show_create(obj.object_type):
-            warnings.append("DDL_UNAVAILABLE: SHOW CREATE failed and no synthesis")
         return None, None
 
     def _capture_show_create(self, obj: UCObject) -> str:

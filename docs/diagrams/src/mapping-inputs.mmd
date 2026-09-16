@@ -1,0 +1,19 @@
+graph TD
+    subgraph INPUTS["Two location / mapping inputs"]
+        EXT["<b>external_locations_path</b><br/>the single external-storage mapping CSV<br/>2 cols = BYO prefix-swap · 3 cols = create SC+EL"]
+        OBJ["<b>object_locations_path</b><br/>exact per-object override<br/>(schema MANAGED LOCATION · external table/volume LOCATION)"]
+    end
+    OBJ --> P{"Per external path,<br/>which location wins?"}
+    EXT --> P
+    P --> R1["1 · exact object_locations override"]
+    R1 --> R2["2 · external_locations base-path swap"]
+    R2 --> R3["3 · else catalog root / skip"]
+    note["Blank input = inert (no effect).<br/>(mapping_file_path is retired — see<br/>the legacy YAML location_mapping_csv_path.)"]
+    classDef in fill:#E3F2FD,stroke:#1565C0,stroke-width:2px,color:#0D47A1;
+    classDef gate fill:#FFF8E1,stroke:#F57F17,stroke-width:2px,color:#E65100;
+    classDef rank fill:#E8F5E9,stroke:#2E7D32,stroke-width:2px,color:#1B5E20;
+    classDef note fill:#ECEFF1,stroke:#455A64,stroke-width:1.5px,color:#263238;
+    class EXT,OBJ in
+    class P gate
+    class R1,R2,R3 rank
+    class note note

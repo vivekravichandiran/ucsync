@@ -1,0 +1,109 @@
+{
+  "name": "${job_name_prefix} - Airgap Inventory+Export (source)",
+  "tags": {
+    "utility": "uc-governance-migration",
+    "job": "airgap-source"
+  },
+  "max_concurrent_runs": 1,
+  "job_clusters": [
+    {
+      "job_cluster_key": "uc_migration_cluster",
+      "new_cluster": {
+        "spark_version": "${spark_version}",
+        "node_type_id": "${node_type_id}",
+        "num_workers": 1,
+        "data_security_mode": "USER_ISOLATION",
+        "custom_tags": {
+          "uc_migration": "true"
+        }
+      }
+    }
+  ],
+  "tasks": [
+    {
+      "task_key": "inventory",
+      "job_cluster_key": "uc_migration_cluster",
+      "libraries": [
+        {
+          "pypi": {
+            "package": "databricks-sdk==0.36.0"
+          }
+        },
+        {
+          "pypi": {
+            "package": "PyYAML>=6.0"
+          }
+        },
+        {
+          "pypi": {
+            "package": "openpyxl>=3.1"
+          }
+        }
+      ],
+      "notebook_task": {
+        "notebook_path": "${notebook_dir}/01_Inventory",
+        "base_parameters": {
+          "connectivity_mode": "airgap",
+          "catalogs": "${catalogs}",
+          "schemas": "${schemas}",
+          "output_volume_path": "${output_volume_path}",
+          "ops_catalog": "${ops_catalog}",
+          "ops_schema": "${ops_schema}",
+          "source_workspace_url": "${source_workspace_url}",
+          "source_client_id": "${source_client_id}",
+          "source_client_secret": "${source_client_secret}",
+          "source_secret_scope": "${source_secret_scope}",
+          "source_secret_key": "${source_secret_key}",
+          "source_warehouse_id": "${source_warehouse_id}",
+          "run_id": "{{job.run_id}}",
+          "external_locations_path": "${external_locations_path}",
+          "preflight_enforce": "${preflight_enforce}"
+        }
+      }
+    },
+    {
+      "task_key": "export",
+      "depends_on": [
+        {
+          "task_key": "inventory"
+        }
+      ],
+      "job_cluster_key": "uc_migration_cluster",
+      "libraries": [
+        {
+          "pypi": {
+            "package": "databricks-sdk==0.36.0"
+          }
+        },
+        {
+          "pypi": {
+            "package": "PyYAML>=6.0"
+          }
+        },
+        {
+          "pypi": {
+            "package": "openpyxl>=3.1"
+          }
+        }
+      ],
+      "notebook_task": {
+        "notebook_path": "${notebook_dir}/02_Export",
+        "base_parameters": {
+          "connectivity_mode": "airgap",
+          "output_volume_path": "${output_volume_path}",
+          "ops_catalog": "${ops_catalog}",
+          "ops_schema": "${ops_schema}",
+          "external_locations_path": "${external_locations_path}",
+          "source_workspace_url": "${source_workspace_url}",
+          "source_client_id": "${source_client_id}",
+          "source_client_secret": "${source_client_secret}",
+          "source_secret_scope": "${source_secret_scope}",
+          "source_secret_key": "${source_secret_key}",
+          "source_warehouse_id": "${source_warehouse_id}",
+          "run_id": "{{job.run_id}}",
+          "preflight_enforce": "${preflight_enforce}"
+        }
+      }
+    }
+  ]
+}

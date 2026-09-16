@@ -1,0 +1,17 @@
+graph TB
+    subgraph DIRECT["direct (default) — one-sided"]
+        direction LR
+        D1["Job runs in the TARGET"] --> D2["reads source over REST<br/>+ captures DDL over the<br/><b>source</b> SQL warehouse"]
+        D2 --> D3["03 Import on target<br/>— no bundle hand-off"]
+    end
+    subgraph AIRGAP["airgap — two-sided, no connectivity"]
+        direction LR
+        G1["01 + 02 run in the SOURCE<br/>(capture over source warehouse)"] --> G2[["move run_&lt;id&gt;/<br/>(operator copies bundle)"]]
+        G2 --> G3["03 Import in the TARGET"]
+    end
+    classDef d fill:#E8F5E9,stroke:#2E7D32,stroke-width:2px,color:#1B5E20;
+    classDef g fill:#E3F2FD,stroke:#1565C0,stroke-width:2px,color:#0D47A1;
+    classDef hop fill:#FFF8E1,stroke:#F57F17,stroke-width:2px,color:#E65100;
+    class D1,D2,D3 d
+    class G1,G3 g
+    class G2 hop

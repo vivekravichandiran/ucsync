@@ -220,15 +220,20 @@ def test_strip_is_noop_without_policies_and_idempotent():
     assert strip_inline_policy_clauses(once) == once
 
 
-def test_migrate_strip_pipeline_drops_inline_policies():
+def test_migrate_pipeline_keeps_inline_policies():
     # strip_managed_storage_clauses is what MigrateExportService calls per file.
+    # Inline masks / row filters are now KEPT so the CREATE TABLE carries its
+    # protection atomically (functions import before tables). Collation is still
+    # stripped; the reserved TBLPROPERTIES filter still runs.
     out = strip_managed_storage_clauses(_CAPTURED, "TABLE")
-    assert "MASK" not in out and "ROW FILTER" not in out
+    assert "MASK `ai27_uctest`.`sec`.`mask_ssn`" in out
+    assert "WITH ROW FILTER `ai27_uctest`.`sec`.`hr_dept_filter` ON (dept)" in out
+    assert "COLLATE" not in out  # collation still stripped
 
 
 def test_migrate_preserves_policy_alter_statements(tmp_path: Path):
-    """Regression: migrate must catalog-rewrite policies/*.sql but NOT strip the
-    ``SET MASK`` / ``SET ROW FILTER`` clause out of the ALTER statement.
+    """Regression: migrate must NOT strip the ``SET MASK`` / ``SET ROW FILTER``
+    clause out of the ALTER statement, and must preserve names verbatim.
 
     strip_inline_policy_clauses is only for CREATE DDL; running it on a policy
     file corrupts ``... SET MASK f`` into ``... SET`` → PARSE_SYNTAX_ERROR.
@@ -252,28 +257,36 @@ def test_migrate_preserves_policy_alter_statements(tmp_path: Path):
     MigrateExportService(
         source_root=str(source),
         target_root=str(target),
-        catalog_mapping={"c": "tgt"},
         run_id="run1",
     ).run(dry_run=False)
 
-    out = (target / "policies" / "TABLE_tgt__hr__employees.sql").read_text(
+    # Names are never mapped → file name and identifiers are preserved.
+    out = (target / "policies" / "TABLE_c__hr__employees.sql").read_text(
         encoding="utf-8"
     )
-    # Catalog rewritten on both the table and the function references ...
-    assert "`tgt`.`hr`.`employees`" in out
-    assert "SET MASK `tgt`.`sec`.`mask_ssn`" in out
-    # ... and the binding clauses are intact (not stripped).
-    assert "SET ROW FILTER `tgt`.`sec`.`hr_dept_filter` ON (`dept`)" in out
+    assert "`c`.`hr`.`employees`" in out
+    # The binding clauses are intact (not stripped).
+    assert "SET MASK `c`.`sec`.`mask_ssn`" in out
+    assert "SET ROW FILTER `c`.`sec`.`hr_dept_filter` ON (`dept`)" in out
 
 
 # ---- export writes the policies artifact ------------------------------------
+
+
+class _TableShowCreate:
+    """A warehouse executor that answers SHOW CREATE for the policy fixture table
+    (tables are captured warehouse-only now — plan P2-A)."""
+
+    def show_create(self, object_type: str, full_name: str) -> str:
+        return f"CREATE TABLE {full_name} (ssn STRING) USING DELTA"
 
 
 def test_export_writes_policy_files(tmp_path: Path):
     volume = tmp_path / "vol"
     workspace = tmp_path / "ws"
     result = ExportService(
-        str(volume), "run1", workspace_root=str(workspace)
+        str(volume), "run1", workspace_root=str(workspace),
+        sql_executor=_TableShowCreate(),
     ).run([_table_with_policies()], dry_run=False)
 
     assert result["policy_files"] == 1
@@ -322,48 +335,80 @@ def _policy_package(tmp_path: Path) -> Path:
     return root
 
 
-def test_package_import_applies_policies_after_create(tmp_path: Path):
-    root = _policy_package(tmp_path)
+def _inline_mask_package(tmp_path: Path, mask_fn: str = "`tgt`.`sec`.`mask_ssn`") -> Path:
+    """A bundle whose CREATE TABLE carries its column mask INLINE (the new atomic
+    fail-closed shape), with the mask function created before the table."""
+    root = tmp_path / "migrated"
+    (root / "ddl").mkdir(parents=True)
+    (root / "ddl" / "FUNCTION_tgt__sec__mask_ssn.sql").write_text(
+        "CREATE FUNCTION IF NOT EXISTS `tgt`.`sec`.`mask_ssn`(v STRING) "
+        "RETURNS STRING RETURN '***';\n",
+        encoding="utf-8",
+    )
+    (root / "ddl" / "TABLE_tgt__hr__employees.sql").write_text(
+        "CREATE TABLE IF NOT EXISTS `tgt`.`hr`.`employees` "
+        f"(ssn STRING MASK {mask_fn});\n",
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_package_import_keeps_inline_mask_atomic(tmp_path: Path):
+    """Plan #A/#2: with the function created first, the inline MASK stays in the
+    CREATE TABLE (not stripped, no separate APPLY_POLICY phase) and the table is
+    SUCCESS with the clause intact."""
+    root = _inline_mask_package(tmp_path)
     sql = RecordingSql()
     results = PackageImportEngine(str(root), sql, dry_run=False).run()
 
-    policy_rows = [r for r in results if r.action == "APPLY_POLICY"]
-    assert len(policy_rows) == 1
-    assert policy_rows[0].status == "SUCCESS"
-    # The CREATE must run before the ALTERs.
-    create_idx = next(i for i, s in enumerate(sql.statements) if s.startswith("CREATE"))
-    mask_idx = next(i for i, s in enumerate(sql.statements) if "SET MASK" in s)
-    assert create_idx < mask_idx
-    assert any("SET ROW FILTER" in s for s in sql.statements)
+    # No classic-masks phase runs any more.
+    assert not any(r.action == "APPLY_POLICY" for r in results)
+    # The function CREATE runs before the table CREATE (functions ranked first).
+    fn_idx = next(i for i, s in enumerate(sql.statements) if "CREATE FUNCTION" in s)
+    tbl_idx = next(i for i, s in enumerate(sql.statements) if "CREATE TABLE" in s)
+    assert fn_idx < tbl_idx
+    # The MASK clause is kept inline on the CREATE TABLE (atomic protection).
+    create = sql.statements[tbl_idx]
+    assert "MASK `tgt`.`sec`.`mask_ssn`" in create
+    table_row = next(r for r in results if r.object_type == "TABLE")
+    assert table_row.status == "SUCCESS"
 
 
-def test_package_import_policy_dry_run(tmp_path: Path):
-    root = _policy_package(tmp_path)
-    sql = RecordingSql()
-    results = PackageImportEngine(str(root), sql, dry_run=True).run()
-    policy_rows = [r for r in results if r.policies_path]
-    assert policy_rows and policy_rows[0].action == "DRY_RUN"
-    assert not any("SET MASK" in s for s in sql.statements)
+def test_package_import_inline_mask_missing_function_fails_closed(tmp_path: Path):
+    """Plan #3(a): an inline MASK referencing a function that does not exist makes
+    the CREATE TABLE itself fail — the table is never created, nothing leaks."""
+    root = _inline_mask_package(tmp_path, mask_fn="`other_cat`.`sec`.`mask_x`")
+    # Drop the function file so the referenced mask function is truly absent.
+    (root / "ddl" / "FUNCTION_tgt__sec__mask_ssn.sql").unlink()
 
+    class NoFunctionSql:
+        def __init__(self):
+            self.statements = []
 
-def test_package_import_policy_unsupported_cluster_is_manual(tmp_path: Path):
-    root = _policy_package(tmp_path)
-
-    class AssignedClusterSql:
         def execute(self, sql: str):
-            if "SET MASK" in sql or "SET ROW FILTER" in sql:
+            if "CREATE TABLE" in sql and "other_cat" in sql:
                 raise RuntimeError(
-                    "[INVALID_PARAMETER_VALUE."
-                    "ROW_COLUMN_ACCESS_POLICIES_NOT_SUPPORTED_ON_ASSIGNED_CLUSTERS] "
-                    "Query on table t with row filter or column mask not supported "
-                    "on assigned clusters."
+                    "[ROUTINE_NOT_FOUND] The function `other_cat`.`sec`.`mask_x` "
+                    "cannot be found"
                 )
+            if sql.upper().startswith("DESCRIBE"):
+                raise RuntimeError("[TABLE_OR_VIEW_NOT_FOUND] not found")
+            self.statements.append(sql)
 
-    results = PackageImportEngine(str(root), AssignedClusterSql(), dry_run=False).run()
-    policy_rows = [r for r in results if r.policies_path]
-    assert policy_rows[0].status == "MANUAL_ACTION_REQUIRED"
-    assert policy_rows[0].error_code == "POLICY_COMPUTE_UNSUPPORTED"
-    assert "serverless or a Standard" in policy_rows[0].message
+    results = PackageImportEngine(str(root), NoFunctionSql(), dry_run=False).run()
+    table_row = next(r for r in results if r.object_type == "TABLE")
+    assert table_row.status == "FAILURE"
+
+
+def test_package_import_policies_dir_no_longer_replayed(tmp_path: Path):
+    """The vestigial ``policies/`` artifact is no longer applied: classic masks are
+    inline now, so no APPLY_POLICY statements are issued."""
+    root = _policy_package(tmp_path)  # plain CREATE + a policies/ ALTER file
+    sql = RecordingSql()
+    results = PackageImportEngine(str(root), sql, dry_run=False).run()
+    assert not any(r.action == "APPLY_POLICY" for r in results)
+    assert not any("SET MASK" in s for s in sql.statements)
+    assert not any("SET ROW FILTER" in s for s in sql.statements)
 
 
 def test_direct_import_policy_unsupported_cluster_is_manual():
@@ -380,20 +425,6 @@ def test_direct_import_policy_unsupported_cluster_is_manual():
     results = engine._apply_policies([_table_with_policies()], start_order=0)
     assert results[0].status == "MANUAL_ACTION_REQUIRED"
     assert results[0].error_code == "POLICY_COMPUTE_UNSUPPORTED"
-
-
-def test_package_import_policy_already_applied_is_skip(tmp_path: Path):
-    root = _policy_package(tmp_path)
-
-    class AlreadyBoundSql:
-        def execute(self, sql: str):
-            if "SET MASK" in sql or "SET ROW FILTER" in sql:
-                raise RuntimeError("column `ssn` already has a mask assigned")
-
-    results = PackageImportEngine(str(root), AlreadyBoundSql(), dry_run=False).run()
-    policy_rows = [r for r in results if r.policies_path]
-    assert policy_rows[0].status == "SUCCESS"
-    assert policy_rows[0].action == "SKIP_EXISTING"
 
 
 # ---- direct import path maps function names via the mapper ------------------

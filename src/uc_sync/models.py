@@ -21,6 +21,27 @@ class ObjectType(str, Enum):
     EXTERNAL_VOLUME = "EXTERNAL_VOLUME"
     FUNCTION = "FUNCTION"
     MODEL = "MODEL"
+    # Tier-A AI-asset types — discovered & reported (report-only, never migrated;
+    # task 4). Reachable with catalog-scoped privileges, under catalog→schema.
+    ONLINE_TABLE = "ONLINE_TABLE"
+    VECTOR_INDEX = "VECTOR_INDEX"
+    MONITOR = "MONITOR"
+    UC_SECRET = "UC_SECRET"
+    # FOREIGN table_type objects that only LOOK like tables — reported, never
+    # migrated (bug #6). A Lakebase-synced table is a Postgres copy shown in UC for
+    # governance visibility (data_source_format POSTGRESQL_FORMAT); a Vector Search
+    # index (VECTOR_INDEX_FORMAT) classifies as ObjectType.VECTOR_INDEX above.
+    LAKEBASE_TABLE = "LAKEBASE_TABLE"
+    # A plain table owned by a DLT/SDP/Kafka pipeline (non-null top-level pipeline_id
+    # from the tables API) — a pipeline event-log table or output. Reported, never
+    # migrated (bug #8): the pipeline recreates its own event logs on the target.
+    PIPELINE_TABLE = "PIPELINE_TABLE"
+    # A metric table (profile/drift) owned by a Lakehouse quality monitor — a plain
+    # Delta table the monitor manages. Recreating the monitor on the target regenerates
+    # it, so it is reported, never migrated as an empty copy. Detected authoritatively
+    # from each monitor's declared profile_metrics/drift_metrics table names (not a name
+    # heuristic).
+    MONITOR_METRIC_TABLE = "MONITOR_METRIC_TABLE"
     STORAGE_CREDENTIAL = "STORAGE_CREDENTIAL"
     SERVICE_CREDENTIAL = "SERVICE_CREDENTIAL"
     EXTERNAL_LOCATION = "EXTERNAL_LOCATION"
@@ -29,6 +50,11 @@ class ObjectType(str, Enum):
     SHARE = "SHARE"
     RECIPIENT = "RECIPIENT"
     PROVIDER = "PROVIDER"
+    ABAC_POLICY = "ABAC_POLICY"
+    # A governed-tag definition (account-level tag policy + allowed values). Created
+    # on the target BEFORE its values are assigned (FEAT-2), idempotent for a
+    # same-account target where the tag is already visible.
+    GOVERNED_TAG = "GOVERNED_TAG"
     GRANT = "GRANT"
     BINDING = "BINDING"
 

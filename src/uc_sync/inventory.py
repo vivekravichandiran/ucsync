@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Iterable, List
+from typing import Any, Iterable, List, Optional
 
 from uc_sync.config import SyncConfig
 from uc_sync.filters import allowed
@@ -138,6 +138,7 @@ SECURABLE_TYPE_FOR_OBJECT = {
     ObjectType.METRIC_VIEW: "table",
     ObjectType.MATERIALIZED_VIEW: "table",
     ObjectType.STREAMING_TABLE: "table",
+    ObjectType.MONITOR_METRIC_TABLE: "table",
     ObjectType.VOLUME: "volume",
     ObjectType.EXTERNAL_VOLUME: "volume",
     ObjectType.FUNCTION: "function",
@@ -170,9 +171,12 @@ def classify_principal(principal: str) -> str:
 
 
 class InventoryService:
-    def __init__(self, source: WorkspaceClient, cfg: SyncConfig):
+    def __init__(
+        self, source: WorkspaceClient, cfg: SyncConfig, sql_executor: object = None
+    ):
         self.source = source
         self.cfg = cfg
+        self.sql = sql_executor
         self.mapper = MappingResolver(cfg.mappings)
 
     def run(self) -> List[UCObject]:
@@ -205,6 +209,27 @@ class InventoryService:
             for obj in table_objects
             if obj.storage_location
         ]
+        # Catalog/schema managed-location roots also reference external locations
+        # that no table sits directly under (e.g. an EL backing only the catalog
+        # root). Feed them into discovery so those ELs are created on the target.
+        for obj in objects:
+            # Only in-scope catalogs/schemas — _iter_catalogs yields every catalog
+            # in the metastore, so an unguarded loop would pull in every catalog's
+            # external location.
+            if obj.object_type in {ObjectType.CATALOG, ObjectType.SCHEMA} and allowed(
+                obj, self.cfg
+            ):
+                root = (
+                    (obj.definition or {}).get("storage_root")
+                    or (obj.definition or {}).get("storage_location")
+                    or obj.storage_location
+                    or (obj.source_metadata or {}).get("storage_root")
+                )
+                if root:
+                    table_locations.append(str(root))
+            # External volumes reference an external location by path too.
+            if obj.object_type == ObjectType.EXTERNAL_VOLUME and obj.storage_location:
+                table_locations.append(str(obj.storage_location))
         locations = list(self._iter_external_locations(table_locations))
         for table in table_objects:
             path = str(table.storage_location or "").rstrip("/")
@@ -236,7 +261,253 @@ class InventoryService:
         filtered = [o for o in objects if allowed(o, self.cfg)]
         for obj in filtered:
             self._attach_grants(obj)
-        return filtered
+        if self.sql is not None:
+            self._attach_governance(filtered)
+        # Tier-A AI-asset discovery (task 4): report-only inventory of the UC object
+        # types reachable with catalog-scoped privileges (registered models, online
+        # tables, vector-search indexes, quality monitors, UC secrets). Appended
+        # AFTER the component filter so they always surface ("we checked, you have
+        # none" vs "we never looked"); every row carries in_scope_for_migration=false.
+        # Migration scope is unchanged — nothing here is ever created on the target.
+        tier_a = self._iter_tier_a_assets(catalogs, filtered)
+        # Reclassify monitor metric tables (profile/drift) — ordinary Delta tables the
+        # inventory picked up as TABLE, but a Lakehouse monitor owns and regenerates them
+        # when recreated. Detected AUTHORITATIVELY from each monitor's declared
+        # profile_metrics/drift_metrics table names (NOT a `_*_metrics` name heuristic),
+        # so they become report-only and are never migrated as empty copies.
+        metric_tables: set[str] = set()
+        for a in tier_a:
+            if a.object_type == ObjectType.MONITOR:
+                for key in ("profile_metrics_table_name", "drift_metrics_table_name"):
+                    val = (a.definition or {}).get(key)
+                    if val:
+                        metric_tables.add(str(val))
+        if metric_tables:
+            for obj in filtered:
+                if (
+                    obj.object_type == ObjectType.TABLE
+                    and obj.full_name in metric_tables
+                ):
+                    obj.object_type = ObjectType.MONITOR_METRIC_TABLE
+                    obj.definition = {
+                        **(obj.definition or {}),
+                        "in_scope_for_migration": False,
+                    }
+        # Governed-tag definitions (FEAT-2): the account-level tag policies actually
+        # used by the in-scope objects, captured so the import can CREATE them on the
+        # target before any SET TAGS (idempotent for a same-account target).
+        governed = self._iter_governed_tags(filtered)
+        return filtered + governed + tier_a
+
+    def _iter_governed_tags(self, objects: list[UCObject]) -> list[UCObject]:
+        """Emit a GOVERNED_TAG object per governed tag actually assigned on an
+        in-scope object (FEAT-2). Its definition carries the allowed-value list read
+        from the source account's tag-policies API. Best-effort: no policies (API
+        absent / not permitted) → nothing emitted, and the assign phase is unchanged.
+        """
+        from uc_sync.governance import read_governed_tag_policies
+
+        policies = read_governed_tag_policies(self.source)
+        if not policies:
+            return []
+        used_keys: set[str] = set()
+        for obj in objects:
+            for key in (obj.tags or {}):
+                used_keys.add(str(key))
+            for col_tags in (obj.definition or {}).get("column_tags", {}).values():
+                for key in (col_tags or {}):
+                    used_keys.add(str(key))
+        governed: list[UCObject] = []
+        for key in sorted(used_keys):
+            if key not in policies:
+                continue  # free-form tag — no governed-tag definition to create
+            governed.append(
+                UCObject(
+                    object_type=ObjectType.GOVERNED_TAG,
+                    name=key,
+                    full_name=key,
+                    definition={"allowed_values": policies[key]},
+                )
+            )
+        return governed
+
+    def _iter_tier_a_assets(
+        self, catalogs: list[UCObject], in_scope: list[UCObject]
+    ) -> list[UCObject]:
+        """Best-effort discovery of the report-only Tier-A AI-asset types.
+
+        Every collector is wrapped so a missing privilege / evolving API yields an
+        empty result, never a failure (report-only). Discovery walks the same
+        in-scope catalog→schema surface as the main inventory. Quality monitors have
+        no bulk list endpoint (bug #3), so they are probed **per in-scope table**
+        from the objects the main inventory already resolved.
+        """
+        assets: list[UCObject] = []
+        for cat in catalogs:
+            if not allowed(cat, self.cfg):
+                continue
+            for schema in self._iter_schemas(cat.name):
+                if not allowed(schema, self.cfg):
+                    continue
+                for collector in (
+                    self._iter_registered_models,
+                    self._iter_online_tables,
+                    self._iter_vector_indexes,
+                    self._iter_uc_secrets,
+                ):
+                    try:
+                        assets.extend(collector(cat.name, schema.name))
+                    except Exception as exc:  # noqa: BLE001 - report-only, never fail
+                        print(
+                            f"[inventory] Tier-A {collector.__name__} skipped for "
+                            f"{cat.name}.{schema.name}: {exc!r}"
+                        )
+        assets.extend(self._iter_quality_monitors(in_scope))
+        return assets
+
+    def _tier_a_object(
+        self, object_type: ObjectType, full_name: str, **definition: object
+    ) -> UCObject:
+        parts = full_name.split(".")
+        return UCObject(
+            object_type=object_type,
+            name=parts[-1] if parts else full_name,
+            full_name=full_name,
+            catalog=parts[0] if parts else None,
+            schema=parts[1] if len(parts) > 2 else None,
+            definition={"in_scope_for_migration": False, **definition},
+        )
+
+    def _iter_registered_models(self, catalog: str, schema: str) -> Iterable[UCObject]:
+        for m in self.source.paginate(
+            "/api/2.1/unity-catalog/models",
+            "registered_models",
+            catalog_name=catalog,
+            schema_name=schema,
+        ):
+            full_name = m.get("full_name") or f"{catalog}.{schema}.{m.get('name')}"
+            version_count = ""
+            try:
+                versions = list(
+                    self.source.paginate(
+                        f"/api/2.1/unity-catalog/models/{full_name}/versions",
+                        "model_versions",
+                    )
+                )
+                version_count = len(versions)
+            except Exception:  # noqa: BLE001 - version count is best-effort
+                version_count = ""
+            yield self._tier_a_object(
+                ObjectType.MODEL, full_name,
+                comment=m.get("comment"), owner=m.get("owner"),
+                version_count=version_count,
+            )
+
+    def _iter_online_tables(self, catalog: str, schema: str) -> Iterable[UCObject]:
+        # Online tables are derived from a source table; there is no per-schema list
+        # endpoint, so this is best-effort and typically empty. VERIFY LIVE.
+        return []
+
+    # Table-like types a Lakehouse/quality monitor can be attached to. (Streaming
+    # tables, MVs and views can also carry monitors; probe the concrete table family.)
+    _MONITORABLE_TYPES = {
+        ObjectType.TABLE,
+        ObjectType.EXTERNAL_TABLE,
+        ObjectType.MATERIALIZED_VIEW,
+        ObjectType.STREAMING_TABLE,
+    }
+
+    def _iter_quality_monitors(self, in_scope: list[UCObject]) -> Iterable[UCObject]:
+        """Report-only Lakehouse/quality monitors (bug #3).
+
+        There is **no bulk list** for monitors (the Data Quality API's list is
+        currently unimplemented), so probe each in-scope table with the per-object
+        get (``GET /api/2.1/unity-catalog/tables/{full_name}/monitor`` — the deprecated
+        quality-monitors get, which mirrors ``data-quality get-monitor``). A monitored
+        table returns its monitor config; an unmonitored one returns a clean not-found,
+        which we skip silently. Report-only: a probe failure never fails inventory.
+        """
+        for table in in_scope:
+            if table.object_type not in self._MONITORABLE_TYPES:
+                continue
+            monitor = self._probe_table_monitor(table.full_name)
+            if not monitor:
+                continue
+            yield self._tier_a_object(
+                ObjectType.MONITOR,
+                f"{table.full_name}#monitor",
+                monitored_table=table.full_name,
+                status=monitor.get("status"),
+                monitor_version=monitor.get("monitor_version"),
+                assets_dir=monitor.get("assets_dir"),
+                output_schema_name=monitor.get("output_schema_name"),
+                profile_metrics_table_name=monitor.get("profile_metrics_table_name"),
+                drift_metrics_table_name=monitor.get("drift_metrics_table_name"),
+            )
+
+    def _probe_table_monitor(self, table_full_name: str) -> Optional[dict[str, Any]]:
+        """Return the monitor config for a table, or None if it has none / cannot be
+        read. A not-found (no monitor) is the common, expected case and is quiet."""
+        try:
+            monitor = self.source.get(
+                f"/api/2.1/unity-catalog/tables/{table_full_name}/monitor"
+            )
+        except Exception as exc:  # noqa: BLE001 - not-found (no monitor) is expected
+            msg = str(exc)
+            if "404" not in msg and "does not exist" not in msg.lower() \
+                    and "not found" not in msg.lower() \
+                    and "cannot find" not in msg.lower():
+                # A genuine error (e.g. a permission gap) — note it, but never fail
+                # inventory (monitors are report-only).
+                print(
+                    f"[inventory] monitor probe skipped for {table_full_name}: {exc!r}"
+                )
+            return None
+        return monitor if isinstance(monitor, dict) and monitor else None
+
+    def _iter_vector_indexes(self, catalog: str, schema: str) -> Iterable[UCObject]:
+        # Vector-search indexes are listed per endpoint, not per schema. VERIFY LIVE.
+        return []
+
+    def _iter_uc_secrets(self, catalog: str, schema: str) -> Iterable[UCObject]:
+        # UC (schema-level) secrets are a newer API distinct from workspace secret
+        # scopes. VERIFY LIVE. Report-only, best-effort empty by default.
+        return []
+
+    def _attach_governance(self, objects: list[UCObject]) -> None:
+        """Attach governed-tag assignments and inventory ABAC policies via SQL."""
+
+        from uc_sync.governance import read_abac_policies, read_tags
+
+        catalogs = sorted(
+            {
+                obj.catalog or obj.name
+                for obj in objects
+                if obj.object_type == ObjectType.CATALOG
+            }
+        )
+        for catalog in catalogs:
+            try:
+                tags = read_tags(self.sql, catalog)
+            except Exception as exc:  # noqa: BLE001 - keep inventory usable
+                print(f"[inventory] tag read failed for {catalog}: {exc!r}")
+                tags = {"objects": {}, "columns": {}}
+            object_tags = tags.get("objects", {})
+            column_tags = tags.get("columns", {})
+            for obj in objects:
+                if obj.full_name in object_tags:
+                    obj.tags = {**(obj.tags or {}), **object_tags[obj.full_name]}
+                if obj.full_name in column_tags:
+                    obj.definition = {
+                        **(obj.definition or {}),
+                        "column_tags": column_tags[obj.full_name],
+                    }
+            try:
+                policies = read_abac_policies(self.sql, catalog)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[inventory] ABAC read failed for {catalog}: {exc!r}")
+                policies = []
+            objects.extend(policies)
 
     def _attach_grants(self, obj: UCObject) -> None:
         if obj.grants:
@@ -375,6 +646,8 @@ class InventoryService:
             t = {**t, **detail}
             updated_at, src = _ts(t)
             table_type = (t.get("table_type") or "MANAGED").upper()
+            data_source_format = str(t.get("data_source_format") or "").upper()
+            report_only_foreign = False
             if table_type in {"VIEW", "METRIC_VIEW"}:
                 otype = (
                     ObjectType.METRIC_VIEW
@@ -391,8 +664,30 @@ class InventoryService:
                 otype = ObjectType.MATERIALIZED_VIEW
             elif table_type == "STREAMING_TABLE":
                 otype = ObjectType.STREAMING_TABLE
+            elif table_type == "FOREIGN":
+                # FOREIGN objects only LOOK like tables and cannot be recreated with
+                # ordinary table SQL (bug #6): a Lakebase-synced table (Postgres copy,
+                # POSTGRESQL_FORMAT) or a Vector Search index (VECTOR_INDEX_FORMAT).
+                # Classify to their own report-only types so they are never sent to
+                # SHOW CREATE / CREATE; any other FOREIGN format is reported too.
+                report_only_foreign = True
+                if data_source_format == "VECTOR_INDEX_FORMAT":
+                    otype = ObjectType.VECTOR_INDEX
+                else:
+                    otype = ObjectType.LAKEBASE_TABLE
             else:
                 otype = ObjectType.TABLE
+            # Bug #8: a table owned by a DLT/SDP/Kafka pipeline carries a non-null
+            # top-level pipeline_id (event-log table or pipeline output). It cannot
+            # be recreated with ordinary table SQL (UC demands a managing pipeline;
+            # event-log schemas don't exist on the target). Reclassify a plain
+            # pipeline-managed table to a report-only type; pipeline-output MVs /
+            # streaming tables are already report-only via their own types.
+            pipeline_id = t.get("pipeline_id")
+            report_only_pipeline = False
+            if pipeline_id and otype in {ObjectType.TABLE, ObjectType.EXTERNAL_TABLE}:
+                otype = ObjectType.PIPELINE_TABLE
+                report_only_pipeline = True
             yield UCObject(
                 object_type=otype,
                 name=t["name"],
@@ -423,6 +718,14 @@ class InventoryService:
                     "view_with_metrics": t.get("view_with_metrics"),
                     "row_filter": _row_filter_from_payload(t),
                     "column_masks": _column_masks_from_payload(t),
+                    # FOREIGN (Lakebase-synced / Vector Search, bug #6) and pipeline-
+                    # managed (bug #8) objects are reported, never migrated.
+                    **(
+                        {"in_scope_for_migration": False}
+                        if (report_only_foreign or report_only_pipeline)
+                        else {}
+                    ),
+                    **({"pipeline_id": pipeline_id} if pipeline_id else {}),
                 },
                 properties=t.get("properties") or {},
                 source_metadata=t,

@@ -1,0 +1,17 @@
+sequenceDiagram
+    autonumber
+    participant Op as Operator
+    participant T as Target workspace
+    participant S as Source (over REST + warehouse)
+    participant V as Staging volume (bundle)
+    Op->>T: 00 Install Jobs (fill widgets once)
+    Note over Op,T: Run "End-to-end Dry Run" (dry_run=true)
+    T->>S: 01 Inventory — enumerate + read tags/ABAC/grants
+    T->>S: 02 Export — SHOW CREATE DDL over source warehouse
+    T->>V: write run_<id>/ (manifest + checksums)
+    T->>V: 03 Import (dry) — plan only, no mutations
+    T-->>Op: import.xlsx (intended actions) + preflight verdict
+    Note over Op,T: Reports clean & preflight GO → go live
+    Op->>T: Run "End-to-end Live" (dry_run=false)
+    T->>T: create + govern in dependency order (fail-closed)
+    T-->>Op: import.xlsx + Outstanding sheet + uc_sync_state

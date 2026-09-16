@@ -1,0 +1,15 @@
+graph LR
+    subgraph ST1["01 Inventory · read-only"]
+        A["Enumerate securables in scope<br/>attach grants · governed tags · ABAC<br/>→ bundle/inventory.json"]
+    end
+    subgraph ST2["02 Export · read-only (writes staging)"]
+        B["SHOW CREATE DDL (warehouse)<br/>functions from information_schema<br/>path-rewrite → migrated/<br/>→ manifest + checksums"]
+    end
+    subgraph ST3["03 Import · mutating (target)"]
+        C["Replay migrated/ in dependency order<br/>create + govern, fail-closed<br/>→ reports + state"]
+    end
+    ST1 ==> ST2 ==> ST3
+    classDef ro fill:#E3F2FD,stroke:#1565C0,stroke-width:2px,color:#0D47A1;
+    classDef rw fill:#E8F5E9,stroke:#2E7D32,stroke-width:2px,color:#1B5E20;
+    class ST1,ST2 ro
+    class ST3 rw

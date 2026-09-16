@@ -1,0 +1,163 @@
+{
+  "functions": {
+    "ai27_uc_gov_src.sec.mask_account": {
+      "signature": "v STRING",
+      "returns": "STRING",
+      "body": "CASE WHEN is_account_group_member('admins') THEN v ELSE concat('****', right(v,4)) END",
+      "comment": null
+    },
+    "ai27_uc_gov_src.sec.region_filter": {
+      "signature": "region STRING",
+      "returns": "BOOLEAN",
+      "body": "is_account_group_member('admins') OR region = 'US'",
+      "comment": null
+    },
+    "ai27_uc_gov_src.sec.mask_email": {
+      "signature": "v STRING",
+      "returns": "STRING",
+      "body": "CASE WHEN is_account_group_member('admins') THEN v ELSE regexp_replace(v,'(^[^@]).*(@.*$)','$1***$2') END",
+      "comment": null
+    },
+    "ai27_uc_gov_src.sec.dept_filter": {
+      "signature": "dept STRING",
+      "returns": "BOOLEAN",
+      "body": "is_account_group_member('admins') OR dept = 'PUBLIC'",
+      "comment": null
+    },
+    "ai27_uc_gov_src.sec.mask_phone": {
+      "signature": "v STRING",
+      "returns": "STRING",
+      "body": "CASE WHEN is_account_group_member('admins') THEN v ELSE concat('***-***-', right(v,4)) END",
+      "comment": null
+    },
+    "ai27_uc_gov_src.sec.mask_ssn": {
+      "signature": "v STRING",
+      "returns": "STRING",
+      "body": "CASE WHEN is_account_group_member('admins') THEN v ELSE 'XXX-XX-' || right(v,4) END",
+      "comment": null
+    },
+    "ai27_uc_finance.sec.mask_account": {
+      "signature": "v STRING",
+      "returns": "STRING",
+      "body": "CASE WHEN is_account_group_member('admins') THEN v ELSE concat('****', right(v,4)) END",
+      "comment": null
+    },
+    "ai27_uc_sales.sec.mask_email": {
+      "signature": "v STRING",
+      "returns": "STRING",
+      "body": "CASE WHEN is_account_group_member('admins') THEN v ELSE regexp_replace(v,'(^[^@]).*(@.*$)','$1***$2') END",
+      "comment": null
+    }
+  },
+  "abac_create": {
+    "ai27_uc_gov_src#policy:ai27_uc_mask_phone_cat": "CREATE POLICY `ai27_uc_mask_phone_cat` ON CATALOG `ai27_uc_gov_src`\nCOMMENT 'Mask phone numbers catalog-wide via governed tag'\nCOLUMN MASK `ai27_uc_gov_src`.`sec`.`mask_phone`\nTO `account users`\nFOR TABLES\nMATCH COLUMNS has_tag_value('ai27_uc_pii','PHONE') AS c\nON COLUMN `c`;",
+    "ai27_uc_gov_src.finance#policy:ai27_uc_mask_bank": "CREATE POLICY `ai27_uc_mask_bank` ON SCHEMA `ai27_uc_gov_src`.`finance`\nCOMMENT 'Mask bank accounts via governed tag'\nCOLUMN MASK `ai27_uc_gov_src`.`sec`.`mask_account`\nTO `account users`\nFOR TABLES\nMATCH COLUMNS has_tag_value('ai27_uc_pii','BANK_ACCOUNT') AS c\nON COLUMN `c`;",
+    "ai27_uc_gov_src.hr.abac_ext#policy:ai27_uc_mask_ext_neg": "CREATE POLICY `ai27_uc_mask_ext_neg` ON TABLE `ai27_uc_gov_src`.`hr`.`abac_ext`\nCOLUMN MASK `ai_27`.`sec`.`mask_ext`\nTO `account users`\nFOR TABLES\nMATCH COLUMNS has_tag_value('ai27_uc_pii', 'EMAIL') AS c\nON COLUMN `c`;",
+    "ai27_uc_gov_src.hr.employees_secure#policy:ai27_uc_rowfilter_region": "CREATE POLICY `ai27_uc_rowfilter_region` ON TABLE `ai27_uc_gov_src`.`hr`.`employees_secure`\nCOMMENT 'Row filter by region governed tag'\nROW FILTER `ai27_uc_gov_src`.`sec`.`region_filter`\nTO `account users`\nEXCEPT `abhishek.iyer@databricks.com`\nFOR TABLES\nMATCH COLUMNS has_tag_value('ai27_uc_row_access','restricted') AS region\nUSING COLUMNS (region);",
+    "ai27_uc_gov_src.hr.employees_secure#policy:ai27_uc_mask_email": "CREATE POLICY `ai27_uc_mask_email` ON TABLE `ai27_uc_gov_src`.`hr`.`employees_secure`\nCOMMENT 'Mask email except exempt principal'\nCOLUMN MASK `ai27_uc_gov_src`.`sec`.`mask_email`\nTO `account users`\nEXCEPT `abhishek.iyer@databricks.com`\nFOR TABLES\nMATCH COLUMNS has_tag_value('ai27_uc_pii','EMAIL') AS c\nON COLUMN `c`;",
+    "ai27_uc_finance.gl#policy:ai27_uc_fin_mask_acct": "CREATE POLICY `ai27_uc_fin_mask_acct` ON SCHEMA `ai27_uc_finance`.`gl`\nCOMMENT 'Mask account numbers'\nCOLUMN MASK `ai27_uc_finance`.`sec`.`mask_account`\nTO `account users`\nFOR TABLES\nMATCH COLUMNS has_tag_value('ai27_uc_pii','BANK_ACCOUNT') AS c\nON COLUMN `c`;"
+  },
+  "column_tags": {
+    "ai27_uc_gov_src": [
+      [
+        "hr",
+        "employees_secure",
+        "region",
+        "ai27_uc_row_access",
+        "restricted"
+      ],
+      [
+        "finance",
+        "ledger",
+        "counterparty_account",
+        "ai27_uc_pii",
+        "BANK_ACCOUNT"
+      ],
+      [
+        "hr",
+        "employees_secure",
+        "phone",
+        "ai27_uc_pii",
+        "PHONE"
+      ],
+      [
+        "finance",
+        "ledger",
+        "settlement_account",
+        "ai27_uc_pii",
+        "BANK_ACCOUNT"
+      ],
+      [
+        "hr",
+        "employees",
+        "phone",
+        "ai27_uc_pii",
+        "PHONE"
+      ],
+      [
+        "hr",
+        "abac_ext",
+        "email",
+        "ai27_uc_pii",
+        "EMAIL"
+      ],
+      [
+        "hr",
+        "employees_secure",
+        "email",
+        "ai27_uc_pii",
+        "EMAIL"
+      ],
+      [
+        "finance",
+        "accounts",
+        "routing_number",
+        "ai27_uc_pii",
+        "BANK_ACCOUNT"
+      ],
+      [
+        "finance",
+        "accounts",
+        "contact_phone",
+        "ai27_uc_pii",
+        "PHONE"
+      ],
+      [
+        "finance",
+        "accounts",
+        "account_number",
+        "ai27_uc_pii",
+        "BANK_ACCOUNT"
+      ]
+    ],
+    "ai27_uc_finance": [
+      [
+        "gl",
+        "accounts_ext",
+        "gl_account",
+        "ai27_uc_pii",
+        "BANK_ACCOUNT"
+      ],
+      [
+        "gl",
+        "accounts",
+        "account_number",
+        "ai27_uc_pii",
+        "BANK_ACCOUNT"
+      ]
+    ],
+    "ai27_uc_sales": []
+  },
+  "table_tags": {
+    "ai27_uc_gov_src": [],
+    "ai27_uc_finance": [
+      [
+        "gl",
+        "accounts_ext",
+        "ai27_uc_pii",
+        "BANK_ACCOUNT"
+      ]
+    ],
+    "ai27_uc_sales": []
+  }
+}

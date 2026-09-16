@@ -10,13 +10,72 @@ from typing import Any, Optional
 
 from uc_sync.components import resolve_components
 from uc_sync.location_mapping import (
+    load_external_locations_csv,
     load_location_mapping_csv,
     parse_location_mappings,
 )
 
 
+# Canonical stage / connectivity vocabularies for the governance-migration model.
+STAGES = ("INVENTORY", "EXPORT", "IMPORT")
+CONNECTIVITY_MODES = ("direct", "airgap")
+
+# Object-family creation toggles (gate CREATE only) and governance toggles
+# (always applied to whatever exists on target). See design §4.2.
+CREATE_TOGGLES = (
+    "create_storage_credentials",
+    "create_external_locations",
+    "create_catalogs",
+    "create_schemas",
+    "create_volumes",
+    "create_functions",
+    "create_tables",
+    "create_views",
+    "create_abac_policies",
+)
+APPLY_TOGGLES = ("apply_grants", "apply_tags", "apply_masks_row_filters")
+
+# BYO-by-default posture: the customer pre-creates the catalog, schemas, storage
+# credential, and external location, so the utility does NOT create them by default —
+# it starts "inside the schema" (tables / views / functions / volumes + governance).
+# Set a toggle true to opt back in (e.g. a from-scratch Mode-A run, or a 3-column
+# external_locations.csv which turns SC/EL creation on explicitly). Every other
+# create toggle (contents) and all apply toggles default true.
+BYO_PREREQUISITE_TOGGLES = (
+    "create_catalogs",
+    "create_schemas",
+    "create_storage_credentials",
+    "create_external_locations",
+)
+
+
+def _toggle_default(name: str) -> bool:
+    """Default for a create/apply toggle — BYO prerequisites off, everything else on."""
+    return name not in BYO_PREREQUISITE_TOGGLES
+
+
 @dataclass
 class SyncConfig:
+    # --- new governance-migration contract (canonical) ---
+    stage: str = "INVENTORY"
+    connectivity_mode: str = "direct"
+    mapping_file_path: str = ""
+    # BYO-by-default: catalog / schema / storage-credential / external-location are
+    # prerequisites the customer pre-creates, so their creation is OFF by default.
+    create_storage_credentials: bool = False
+    create_external_locations: bool = False
+    create_catalogs: bool = False
+    create_schemas: bool = False
+    create_volumes: bool = True
+    create_functions: bool = True
+    create_tables: bool = True
+    create_views: bool = True
+    create_abac_policies: bool = True
+    apply_grants: bool = True
+    apply_tags: bool = True
+    apply_masks_row_filters: bool = True
+    # --- legacy fields (still consumed by import_engine/package_import until the
+    #     Phase 2 import rework; derived from the new contract when not provided) ---
     execution_mode: str = "LOCAL"
     mode: str = "INVENTORY"
     dry_run: bool = True
@@ -24,6 +83,22 @@ class SyncConfig:
     source_oauth_secret_scope: str = ""
     source_client_id_secret_key: str = ""
     source_client_secret_key: str = ""
+    # Source SP credentials. client_id is always plaintext; the SECRET is either
+    # source_client_secret (plaintext) or read from source_secret_scope/key.
+    source_client_id: str = ""
+    source_client_secret: str = ""
+    source_secret_scope: str = ""
+    source_secret_key: str = ""
+    source_token: str = ""
+    # SQL warehouse on the SOURCE workspace, used for governance reads
+    # (tags/ABAC) when inventorying a remote source in direct mode. Not needed
+    # when the source is the current workspace (local/airgap-on-source).
+    source_warehouse_id: str = ""
+    # SQL warehouse on the TARGET (import) workspace. ABAC `CREATE POLICY` is
+    # rejected at parse on a classic Spark cluster and only accepted on a SQL
+    # warehouse, so the import routes the ABAC phase through this warehouse. It is
+    # required only when the bundle contains ABAC policies.
+    import_warehouse_id: str = ""
     target_workspace_url: str = ""
     target_oauth_secret_scope: str = ""
     target_client_id_secret_key: str = ""
@@ -34,6 +109,13 @@ class SyncConfig:
     state_table: str = ""
     import_package_path: str = ""
     location_mapping_csv_path: str = ""
+    # The single external-storage mapping file (task 2). Its column shape decides
+    # behavior: 2-col (source_base_path,target_base_path) → BYO (SC/EL are
+    # prerequisites, only prefix-swap); 3-col (+access_connector_id) → the utility
+    # creates the storage credential + external location. Supersedes the legacy
+    # 3-column location_mapping_csv_path.
+    external_locations_path: str = ""
+    external_locations_create_storage: bool = True
     catalog_mapping: dict[str, str] = field(default_factory=dict)
     catalogs: list[str] = field(default_factory=list)
     schemas: list[str] = field(default_factory=list)
@@ -44,6 +126,23 @@ class SyncConfig:
     include_regex: list[str] = field(default_factory=list)
     exclude_regex: list[str] = field(default_factory=list)
     import_mode: str = "CREATE_OR_SKIP"
+    # Incremental (delta) sync (task 1): run mode is auto-detected from uc_sync_state
+    # (baseline present → incremental; none → full + seed). A plain re-run is already
+    # idempotent; for a genuine reset use DROP SCHEMA … CASCADE then recreate (only
+    # safe before any data has been loaded into the target — see the runbook).
+    # Streaming tables & materialized views are DLT/SDP-pipeline-managed and are
+    # report-only by default (task 4). Set this on to opt into materialized-view
+    # migration; streaming tables are always report-only.
+    migrate_materialized_views: bool = False
+    # Volume data copy (FEAT-4): copy the actual files of managed + external volumes
+    # source→target via the Files API. Default OFF (securables are always created;
+    # file bytes are optional). Incremental via a control table of copied mtimes.
+    copy_volume_data: bool = False
+    # Graded preflight (task 9): gate 01/02/03 behind an environment preflight. When
+    # enforced (default), a NO-GO (missing report lib, unreachable warehouse, …) is a
+    # red run, never a silent degrade. Every run always produces its report — a
+    # report-write failure fails the run (bug #4, no opt-out).
+    preflight_enforce: bool = True
     allow_destructive_operations: bool = False
     max_api_workers: int = 8
     mappings: dict[str, Any] = field(default_factory=dict)
@@ -260,13 +359,70 @@ def from_sources(
     ).upper()
     if execution_mode not in {"LOCAL", "CROSS_WORKSPACE"}:
         raise ValueError("execution_mode must be LOCAL or CROSS_WORKSPACE")
-    if execution_mode == "LOCAL" and not catalog_mapping:
-        raise ValueError(
-            "LOCAL mode requires catalog_mapping_json, catalog_mapping_path, "
-            "or catalog_mapping in the config file"
-        )
-    if execution_mode == "LOCAL" and not catalogs:
+    # Catalog names are never mapped in the governance-migration model, so a
+    # catalog mapping is no longer required for any connectivity mode. If a legacy
+    # mapping is still supplied it drives source catalog selection for back-compat.
+    if catalog_mapping and not catalogs:
         catalogs = list(catalog_mapping)
+
+    # --- new governance-migration contract -------------------------------------
+    # `stage` supersedes `mode`; `connectivity_mode` supersedes `execution_mode`.
+    stage = str(pick("stage", None) or pick("mode", "INVENTORY")).upper()
+    if stage == "SYNC":
+        # Legacy all-in-one mode maps onto the IMPORT stage for the new flow.
+        stage = "IMPORT"
+    if stage not in STAGES:
+        raise ValueError(f"stage must be one of {STAGES}")
+    connectivity_default = "airgap" if execution_mode == "CROSS_WORKSPACE" else "direct"
+    connectivity_mode = str(
+        pick("connectivity_mode", runtime.get("connectivity_mode"))
+        or connectivity_default
+    ).lower()
+    if connectivity_mode not in CONNECTIVITY_MODES:
+        raise ValueError(f"connectivity_mode must be one of {CONNECTIVITY_MODES}")
+    # RETIRED WIDGET (kept as inert dead code — full removal backlogged in
+    # plans/remove-mapping-file-path.md). The `mapping_file_path` widget was removed
+    # from 00_Install_Jobs / 02_Export and the job specs, so this now always resolves
+    # to "" for widget/job-param runs and is a no-op. A legacy CSV can still be
+    # supplied via the YAML `location_mapping_csv_path` input (independent path above).
+    mapping_file_path = str(
+        pick("mapping_file_path", runtime.get("mapping_file_path"))
+    )
+    # A single mapping file supersedes the legacy location CSV; feed the existing
+    # loader until the Phase 2 mapping-file loader replaces it.
+    if mapping_file_path and not location_mapping_csv_path:
+        location_mapping_csv_path = mapping_file_path
+        location_mappings = [
+            item.to_dict()
+            for item in load_location_mapping_csv(mapping_file_path)
+        ]
+    toggles = {
+        name: _as_bool(pick(name, runtime.get(name)), _toggle_default(name))
+        for name in (*CREATE_TOGGLES, *APPLY_TOGGLES)
+    }
+
+    # The single external-storage mapping file (task 2). When supplied it drives the
+    # export-time path rewrite + Mode-A SC/EL creation (via location_mappings) AND
+    # the import-time base-path prefix swap. Its column shape auto-selects behavior:
+    # a 2-column file (no access connector) is BYO — the storage credential +
+    # external location are customer prerequisites, so their create toggles are
+    # forced OFF; a 3-column file creates them (Mode-A parity).
+    external_locations_path = str(
+        pick("external_locations_path", runtime.get("external_locations_path"))
+    )
+    external_locations_create_storage = True
+    if external_locations_path:
+        ext_map = load_external_locations_csv(external_locations_path)
+        external_locations_create_storage = ext_map.creates_storage
+        if not location_mapping_csv_path and not mapping_file_path:
+            # Feed the legacy location_mappings machinery from this one file.
+            location_mappings = ext_map.to_location_mappings()
+        # The file's column shape is authoritative for SC/EL creation, overriding the
+        # BYO default: a 3-column file (with an access connector) turns creation ON
+        # (Mode-A parity); a 2-column BYO file keeps it OFF.
+        create_sc_el = bool(ext_map.creates_storage)
+        toggles["create_storage_credentials"] = create_sc_el
+        toggles["create_external_locations"] = create_sc_el
 
     # Resolve UCSync's four operational-artifact locations from three inputs:
     # ops_catalog + ops_schema (audit/state tables) and output_volume_path
@@ -284,8 +440,12 @@ def from_sources(
     )
 
     return SyncConfig(
+        stage=stage,
+        connectivity_mode=connectivity_mode,
+        mapping_file_path=mapping_file_path,
+        **toggles,
         execution_mode=execution_mode,
-        mode=str(pick("mode", "INVENTORY")).upper(),
+        mode=str(pick("mode", stage)).upper(),
         dry_run=_as_bool(pick("dry_run", runtime.get("dry_run", True)), True),
         source_workspace_url=str(pick("source_workspace_url", source.get("workspace_url"))),
         source_oauth_secret_scope=str(
@@ -296,6 +456,23 @@ def from_sources(
         ),
         source_client_secret_key=str(
             pick("source_client_secret_key", source.get("client_secret_key"))
+        ),
+        source_client_id=str(pick("source_client_id", source.get("client_id"))),
+        source_client_secret=str(
+            pick("source_client_secret", source.get("client_secret"))
+        ),
+        source_secret_scope=str(
+            pick("source_secret_scope", "source_oauth_secret_scope", source.get("secret_scope"))
+        ),
+        source_secret_key=str(
+            pick("source_secret_key", "source_client_secret_key", source.get("client_secret_key"))
+        ),
+        source_token=str(pick("source_token", source.get("token"))),
+        source_warehouse_id=str(
+            pick("source_warehouse_id", source.get("warehouse_id"))
+        ),
+        import_warehouse_id=str(
+            pick("import_warehouse_id", target.get("warehouse_id"))
         ),
         target_workspace_url=str(pick("target_workspace_url", target.get("workspace_url"))),
         target_oauth_secret_scope=str(
@@ -319,6 +496,8 @@ def from_sources(
             )
         ),
         location_mapping_csv_path=location_mapping_csv_path,
+        external_locations_path=external_locations_path,
+        external_locations_create_storage=external_locations_create_storage,
         catalog_mapping=catalog_mapping,
         catalogs=list(catalogs or []),
         schemas=list(schemas or []),
@@ -329,6 +508,17 @@ def from_sources(
         include_regex=list(include_regex or []),
         exclude_regex=list(exclude_regex or []),
         import_mode=str(runtime.get("import_mode") or "CREATE_OR_SKIP"),
+        migrate_materialized_views=_as_bool(
+            pick("migrate_materialized_views",
+                 runtime.get("migrate_materialized_views")),
+            False,
+        ),
+        copy_volume_data=_as_bool(
+            pick("copy_volume_data", runtime.get("copy_volume_data")), False
+        ),
+        preflight_enforce=_as_bool(
+            pick("preflight_enforce", runtime.get("preflight_enforce")), True
+        ),
         allow_destructive_operations=_as_bool(
             runtime.get("allow_destructive_operations"), False
         ),

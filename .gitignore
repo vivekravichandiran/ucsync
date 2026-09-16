@@ -12,6 +12,14 @@ venv/
 # OS
 .DS_Store
 
+# Agent / assistant + IDE local state — never commit
+.claude/
+.isaac/
+.idea/
+.vscode/
+.vibe/
+*.iml
+
 # Local secrets / credentials — never commit
 .databrickscfg
 *.pem
@@ -47,3 +55,4 @@ docs/test-run-results.json
 **/export_staging/
 **/export_migrated_staging/
 **/report_staging/
+testing/

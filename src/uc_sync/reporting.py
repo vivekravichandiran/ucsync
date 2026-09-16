@@ -413,7 +413,7 @@ class ReportService:
         # Shared clusters block /tmp and Volume FUSE writes from Python.
         # Stage under /Workspace, then publish to the UC Volume via dbutils.fs.
         default_local = (
-            "/Workspace/Users/vivek.ravichandiran@databricks.com/"
+            "/Workspace/Shared/"
             f"UCSync/report_staging/{run_id}"
         )
         base = Path(local_root or default_local)

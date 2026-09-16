@@ -124,6 +124,38 @@ def test_synthesize_catalog_schema_volume_location_credential():
     assert "AZURE_MANAGED_IDENTITY" in credential
 
 
+def test_synthesized_table_ddl_emits_inline_mask_and_row_filter():
+    """Plan P2-D (defense-in-depth): the synthesizer emits inline column MASK and
+    table-level WITH ROW FILTER, so a rebuild can never silently strip classic
+    protection."""
+    obj = UCObject(
+        object_type=ObjectType.TABLE,
+        name="employees",
+        full_name="c.hr.employees",
+        definition={
+            "columns": [
+                {"name": "ssn", "position": 0, "type_text": "STRING"},
+                {"name": "val", "position": 1, "type_text": "STRING"},
+                {"name": "dept", "position": 2, "type_text": "STRING"},
+            ],
+            "column_masks": [
+                {"column_name": "ssn", "function_name": "c.sec.mask_ssn",
+                 "using_column_names": []},
+                {"column_name": "val", "function_name": "c.sec.mask_region",
+                 "using_column_names": ["region"]},
+            ],
+            "row_filter": {"function_name": "c.sec.dept_filter",
+                           "input_column_names": ["dept"]},
+        },
+    )
+    ddl = create_ddl_for_object(obj)
+    assert "`ssn` STRING MASK `c`.`sec`.`mask_ssn`" in ddl
+    assert (
+        "`val` STRING MASK `c`.`sec`.`mask_region` USING COLUMNS (`region`)" in ddl
+    )
+    assert "WITH ROW FILTER `c`.`sec`.`dept_filter` ON (`dept`)" in ddl
+
+
 def test_synthesize_metric_view_from_yaml_definition():
     ddl = create_ddl_for_object(
         UCObject(
@@ -151,6 +183,167 @@ def test_synthesize_metric_view_from_yaml_definition():
     )
     assert "version: 1.1" in ddl
     assert ddl.endswith("$$;")
+
+
+class _FailingShowCreate:
+    """A source SQL executor whose SHOW CREATE fails (models a warehouse that could
+    not capture a governed table after retries)."""
+
+    def show_create(self, object_type: str, full_name: str) -> str:
+        raise RuntimeError(
+            f"[TABLE_OR_VIEW_NOT_FOUND] {full_name} cannot be found"
+        )
+
+    def execute(self, sql: str):
+        raise RuntimeError("[TABLE_OR_VIEW_NOT_FOUND] cannot be found")
+
+
+def test_show_create_failure_is_hard_failure_no_synth(tmp_path):
+    """Plan P2-A: for the table/view family SHOW CREATE is the ONLY full-fidelity
+    source. If it fails after retries the object is a HARD FAILURE — never a
+    synthesized rebuild (which would silently drop masks / row filters /
+    constraints). No DDL file is written and the run does not silently proceed."""
+    objects = [
+        UCObject(
+            object_type=ObjectType.TABLE,
+            name="orders",
+            full_name="c.s.orders",
+            definition={"table_type": "MANAGED",
+                        "columns": [{"name": "id", "type_text": "int"}]},
+        ),
+    ]
+    result = ExportService(
+        str(tmp_path / "v"), "run1",
+        sql_executor=_FailingShowCreate(),
+        workspace_root=str(tmp_path / "w"),
+    ).run(objects, dry_run=False)
+
+    row = result["results"][0]
+    assert row["status"] == "ERROR"
+    assert row["error_code"] == "DDL_CAPTURE_FAILED"
+    # No synthesized fallback for a table, and nothing exported.
+    assert "SYNTHESIZED" not in result["ddl_by_source"]
+    assert result["ddl_files"] == 0
+    assert result["exported"] == 0
+
+
+def test_export_read_failures_flags_unread_objects(tmp_path):
+    """Bug #2: a table whose SHOW CREATE fails is surfaced by export_read_failures
+    so the export stage can fail loudly instead of importing a partial bundle."""
+    from uc_sync.export import export_read_failures
+
+    objects = [
+        UCObject(
+            object_type=ObjectType.TABLE,
+            name="orders",
+            full_name="c.s.orders",
+            definition={"columns": [{"name": "id", "type_text": "int"}]},
+        ),
+    ]
+    result = ExportService(
+        str(tmp_path / "v"), "run1",
+        sql_executor=_FailingShowCreate(),
+        workspace_root=str(tmp_path / "w"),
+    ).run(objects, dry_run=False)
+
+    failures = export_read_failures(result)
+    assert len(failures) == 1
+    assert failures[0]["full_name"] == "c.s.orders"
+    assert failures[0]["error_code"] == "DDL_CAPTURE_FAILED"
+    # A clean run reports no read failures.
+    assert export_read_failures({"results": [{"status": "SUCCESS"}]}) == []
+
+
+def test_table_missing_warehouse_is_hard_failure(tmp_path):
+    """A table with no SQL executor at all is also a hard capture failure — DDL
+    capture is warehouse-only for the table/view family."""
+    objects = [
+        UCObject(
+            object_type=ObjectType.TABLE,
+            name="orders",
+            full_name="c.s.orders",
+            definition={"columns": [{"name": "id", "type_text": "int"}]},
+        ),
+    ]
+    result = ExportService(
+        str(tmp_path / "v"), "run1", workspace_root=str(tmp_path / "w"),
+    ).run(objects, dry_run=False)
+    row = result["results"][0]
+    assert row["status"] == "ERROR"
+    assert row["error_code"] == "DDL_CAPTURE_FAILED"
+
+
+class _RoutinesSql:
+    """A warehouse executor answering information_schema.routines/parameters for a
+    scalar UDF ``c.sec.mask_ssn(v STRING, salt INT) RETURNS STRING``."""
+
+    def execute(self, sql: str):
+        low = sql.lower()
+        if "information_schema.routines" in low:
+            # specific_name, data_type, full_data_type, routine_definition,
+            # routine_body, is_deterministic, comment
+            return [[
+                "mask_ssn_1", "STRING", "STRING", "'***'", "SQL", "YES",
+                "masks ssn",
+            ]]
+        if "information_schema.parameters" in low:
+            # parameter_name, full_data_type, data_type, parameter_mode, ordinal
+            return [
+                [None, "STRING", "STRING", "OUT", 0],   # the RETURN row — skipped
+                ["v", "STRING", "STRING", "IN", 1],
+                ["salt", "INT", "INT", "IN", 2],
+            ]
+        return []
+
+
+def test_function_captured_from_information_schema(tmp_path):
+    """Plan P2-A: functions are captured warehouse-only from information_schema and
+    reassembled into a correct CREATE FUNCTION (params in order, return, body,
+    comment) — not via SHOW CREATE FUNCTION (unsupported in DBSQL)."""
+    obj = UCObject(
+        object_type=ObjectType.FUNCTION, name="mask_ssn",
+        full_name="c.sec.mask_ssn",
+    )
+    result = ExportService(
+        str(tmp_path / "v"), "run1", sql_executor=_RoutinesSql(),
+        workspace_root=str(tmp_path / "w"),
+    ).run([obj], dry_run=False)
+
+    assert result["ddl_by_source"].get("INFORMATION_SCHEMA") == 1
+    ddl = (tmp_path / "v" / "run_run1" / "ddl" / "FUNCTION_c__sec__mask_ssn.sql").read_text()
+    # CREATE OR REPLACE (not IF NOT EXISTS): IF NOT EXISTS silently no-ops on a
+    # re-run, so a CHANGED function body would stay stale on target (incremental
+    # bug). Functions carry no data, so OR REPLACE is safe + idempotent.
+    assert "CREATE OR REPLACE FUNCTION `c`.`sec`.`mask_ssn`" in ddl
+    assert "IF NOT EXISTS" not in ddl
+    assert "`v` STRING, `salt` INT" in ddl or "v STRING, salt INT" in ddl
+    assert "RETURNS STRING" in ddl
+    assert "RETURN '***'" in ddl
+    assert "OUT" not in ddl  # the RETURN row is not emitted as a parameter
+
+
+def test_function_info_schema_failure_falls_back_to_synthesis(tmp_path):
+    """A function whose information_schema read fails falls back to synthesizing
+    from inventory (lossless — functions carry no masks), never a hard failure."""
+    class _Boom:
+        def execute(self, sql: str):
+            raise RuntimeError("boom")
+
+    obj = UCObject(
+        object_type=ObjectType.FUNCTION, name="f", full_name="c.sec.f",
+        definition={
+            "input_params": {"parameters": [
+                {"name": "v", "type_text": "STRING", "position": 0}]},
+            "data_type": "STRING",
+            "routine_definition": "'x'",
+        },
+    )
+    result = ExportService(
+        str(tmp_path / "v"), "run1", sql_executor=_Boom(),
+        workspace_root=str(tmp_path / "w"),
+    ).run([obj], dry_run=False)
+    assert result["results"][0]["status"] == "SUCCESS"
+    assert result["ddl_by_source"].get("SYNTHESIZED") == 1
 
 
 def test_export_writes_ddl_for_all_components(tmp_path):

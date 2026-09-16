@@ -1,0 +1,259 @@
+"""Install the UC Governance Migration Databricks Jobs from JSON resource specs.
+
+The four job definitions live as declarative specs under ``jobs/`` at the repo
+root. This module fills their ``${...}`` placeholders with the widget values
+entered in ``notebooks/00_Install_Jobs`` and creates (or updates) the selected
+jobs via the Jobs API. Databricks dynamic references (``{{job.run_id}}``,
+``{{job.parameters.run_id}}``) are left untouched — only ``${name}`` tokens are
+substituted.
+
+Job keys
+--------
+- ``airgap_source``        — 01 Inventory -> 02 Export on the SOURCE workspace.
+- ``airgap_import_target`` — 03 Import on the TARGET workspace; ``run_id`` is a
+  job parameter the operator sets per run to match the source bundle folder.
+- ``e2e_dry_run``          — 01 -> 02 -> 03 in one run, import ``dry_run=true``.
+- ``e2e_live``             — 01 -> 02 -> 03 in one run, import ``dry_run=false``.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+from typing import Any, Iterable, Mapping, Optional
+
+from uc_sync.job_wrapper import (
+    JobCreateResult,
+    _find_job_id_by_name,
+    _jobs_create,
+    _jobs_reset,
+    _jobs_run_now,
+    _sdk_client,
+)
+
+# Ordered so the installer creates jobs in a predictable, readable sequence and
+# the notebook can offer them as a stable multiselect.
+JOB_SPECS: dict[str, str] = {
+    "airgap_source": "airgap_source.json",
+    "airgap_import_target": "airgap_import_target.json",
+    "e2e_dry_run": "e2e_dry_run.json",
+    "e2e_live": "e2e_live.json",
+}
+
+# Friendly labels shown in the notebook multiselect <-> internal job keys.
+JOB_LABELS: dict[str, str] = {
+    "Airgap Inventory+Export (source)": "airgap_source",
+    "Airgap Import (target)": "airgap_import_target",
+    "End-to-end Dry Run": "e2e_dry_run",
+    "End-to-end Live": "e2e_live",
+}
+
+_PLACEHOLDER = re.compile(r"\$\{([a-zA-Z0-9_]+)\}")
+
+
+def _default_specs_dir() -> Path:
+    """``jobs/`` at the repo root (two levels up from ``src/uc_sync``)."""
+
+    return Path(__file__).resolve().parents[2] / "jobs"
+
+
+def _substitute(node: Any, values: Mapping[str, Any]) -> Any:
+    """Replace every ``${key}`` in string leaves with ``values[key]`` (blank if absent)."""
+
+    if isinstance(node, str):
+        return _PLACEHOLDER.sub(lambda m: str(values.get(m.group(1), "")), node)
+    if isinstance(node, dict):
+        return {k: _substitute(v, values) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_substitute(v, values) for v in node]
+    return node
+
+
+# Jobs that execute on / write to the TARGET workspace — these honor the target
+# run-as service principal so every created securable is owned by that SP and the
+# SP's privileges (CREATE CATALOG, etc.) are what the import uses. The
+# source-only Inventory+Export job is intentionally excluded.
+_TARGET_RUN_AS_JOB_KEYS = {"airgap_import_target", "e2e_dry_run", "e2e_live"}
+
+# The source-only Inventory+Export job runs on the SOURCE workspace and reads source
+# objects, so it honors a distinct source-side run-as SPN (task 7). The end-to-end
+# jobs run 01→02→03 as a single job (one run-as), so they use the target run-as only.
+_SOURCE_RUN_AS_JOB_KEYS = {"airgap_source"}
+
+
+def _apply_run_as(spec: dict[str, Any], run_as_spn: str) -> dict[str, Any]:
+    """Set the job's ``run_as`` to a service principal, or leave it default.
+
+    Mirrors the workspace-migration utility's model: the job runs as its target
+    run-as SP, so both the notebook's SQL (Spark) and its REST calls execute as
+    that identity. A blank value leaves ``run_as`` unset (the job runs as the
+    installing user). Only a service-principal **application id** is accepted;
+    an empty ``service_principal_name`` would be rejected by the Jobs API, so it
+    is omitted rather than sent blank.
+    """
+
+    spn = str(run_as_spn or "").strip()
+    if spn:
+        spec["run_as"] = {"service_principal_name": spn}
+    else:
+        spec.pop("run_as", None)
+    return spec
+
+
+def _apply_cluster_override(spec: dict[str, Any], existing_cluster_id: str) -> dict[str, Any]:
+    """Point every task at an existing cluster instead of the shared job cluster.
+
+    When the operator supplies ``existing_cluster_id`` the spec's ``job_clusters``
+    block is dropped and each task is rewired to that cluster; otherwise the spec
+    keeps its own USER_ISOLATION job cluster (required so masks/row filters apply).
+    """
+
+    existing = str(existing_cluster_id or "").strip()
+    if not existing:
+        return spec
+    spec.pop("job_clusters", None)
+    for task in spec.get("tasks", []):
+        task.pop("job_cluster_key", None)
+        task["existing_cluster_id"] = existing
+    return spec
+
+
+def _apply_proxy_env(spec: dict[str, Any], values: Mapping[str, Any]) -> dict[str, Any]:
+    """Inject HTTP(S)_PROXY / NO_PROXY into every NEW job cluster's ``spark_env_vars``.
+
+    A job cluster the utility creates does not inherit a corporate forward proxy, so a
+    behind-proxy customer needs it in the cluster environment for (a) PyPI library
+    installs and (b) the utility's REST + cross-workspace calls (urllib + the SDK honor
+    these vars). Both UPPER and lower case are set (different tools read different
+    cases). Only non-blank values are injected — blank proxy URLs => nothing added, so
+    a non-proxy environment is unaffected (NO_PROXY alone is a harmless no-op). Existing
+    ``spark_env_vars`` are preserved/merged. Applies to new_cluster specs only; an
+    ``existing_cluster_id`` cluster is configured by the operator, not here.
+    """
+
+    http_proxy = str(values.get("http_proxy") or "").strip()
+    https_proxy = str(values.get("https_proxy") or "").strip()
+    no_proxy = str(values.get("no_proxy") or "").strip()
+    env: dict[str, str] = {}
+    if http_proxy:
+        env["HTTP_PROXY"] = env["http_proxy"] = http_proxy
+    if https_proxy:
+        env["HTTPS_PROXY"] = env["https_proxy"] = https_proxy
+    if no_proxy:
+        env["NO_PROXY"] = env["no_proxy"] = no_proxy
+    if not env:
+        return spec
+
+    def _inject(cluster: Any) -> None:
+        if isinstance(cluster, dict):
+            merged = dict(cluster.get("spark_env_vars") or {})
+            merged.update(env)
+            cluster["spark_env_vars"] = merged
+
+    for jc in spec.get("job_clusters", []) or []:
+        _inject(jc.get("new_cluster"))
+    for task in spec.get("tasks", []) or []:
+        _inject(task.get("new_cluster"))
+    return spec
+
+
+def load_job_spec(
+    job_key: str,
+    values: Mapping[str, Any],
+    specs_dir: Optional[str | Path] = None,
+) -> dict[str, Any]:
+    """Load one job spec, substitute placeholders, and apply cluster + proxy overrides."""
+
+    if job_key not in JOB_SPECS:
+        raise ValueError(f"Unknown job key '{job_key}'. Known: {sorted(JOB_SPECS)}")
+    base = Path(specs_dir) if specs_dir else _default_specs_dir()
+    raw = json.loads((base / JOB_SPECS[job_key]).read_text(encoding="utf-8"))
+    spec = _substitute(raw, values)
+    spec = _apply_cluster_override(spec, str(values.get("existing_cluster_id", "")))
+    # Proxy env goes on the NEW job cluster, so apply it after the cluster override
+    # (a no-op when an existing_cluster_id dropped the job_clusters block).
+    spec = _apply_proxy_env(spec, values)
+    if job_key in _TARGET_RUN_AS_JOB_KEYS:
+        spec = _apply_run_as(spec, str(values.get("run_as_spn", "")))
+    elif job_key in _SOURCE_RUN_AS_JOB_KEYS:
+        spec = _apply_run_as(spec, str(values.get("source_run_as_spn", "")))
+    return spec
+
+
+def resolve_job_keys(selection: Iterable[str] | str) -> list[str]:
+    """Map notebook multiselect labels (or raw keys) to canonical job keys.
+
+    Accepts a comma-joined string (as ``dbutils.widgets.get`` returns for a
+    multiselect) or an iterable of labels/keys.
+    """
+
+    if isinstance(selection, str):
+        items = [p.strip() for p in selection.split(",") if p.strip()]
+    else:
+        items = [str(p).strip() for p in selection if str(p).strip()]
+    keys: list[str] = []
+    for item in items:
+        key = JOB_LABELS.get(item, item)
+        if key not in JOB_SPECS:
+            raise ValueError(f"Unknown job selection '{item}'.")
+        if key not in keys:
+            keys.append(key)
+    return keys
+
+
+def install_jobs(
+    *,
+    job_keys: Iterable[str],
+    values: Mapping[str, Any],
+    specs_dir: Optional[str | Path] = None,
+    run_now: bool = False,
+    update_if_exists: bool = True,
+    client: Any = None,
+    profile: Optional[str] = None,
+    host: Optional[str] = None,
+    token: Optional[str] = None,
+) -> list[JobCreateResult]:
+    """Create (or update) each selected job from its filled-in spec."""
+
+    ws = _sdk_client(client=client, profile=profile, host=host, token=token)
+    results: list[JobCreateResult] = []
+    for key in job_keys:
+        spec = load_job_spec(key, values, specs_dir)
+        name = spec["name"]
+        first_task = spec.get("tasks", [{}])[0]
+        notebook_path = first_task.get("notebook_task", {}).get("notebook_path", "")
+        base_parameters = first_task.get("notebook_task", {}).get("base_parameters", {})
+
+        existing_id = _find_job_id_by_name(ws, name)
+        created = updated = False
+        if existing_id is not None and update_if_exists:
+            _jobs_reset(ws, existing_id, spec)
+            job_id, updated = existing_id, True
+        elif existing_id is not None:
+            job_id = existing_id
+        else:
+            job_id = _jobs_create(ws, spec)
+            created = True
+
+        run_id: Optional[int] = None
+        run_page_url: Optional[str] = None
+        if run_now:
+            run_id = _jobs_run_now(ws, job_id)
+            host_url = getattr(getattr(ws, "config", None), "host", None) or host or ""
+            if host_url and run_id is not None:
+                run_page_url = f"{host_url.rstrip('/')}/#job/{job_id}/run/{run_id}"
+
+        results.append(
+            JobCreateResult(
+                job_id=job_id,
+                job_name=name,
+                notebook_path=notebook_path,
+                parameters=dict(base_parameters),
+                run_id=run_id,
+                run_page_url=run_page_url,
+                created=created,
+                updated=updated,
+            )
+        )
+    return results

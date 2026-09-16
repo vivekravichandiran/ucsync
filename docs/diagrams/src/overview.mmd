@@ -1,0 +1,16 @@
+graph LR
+    subgraph SRC["SOURCE metastore (region 1)"]
+        A["Catalogs · schemas<br/>tables / views · functions · volumes<br/>governed tags · ABAC · classic masks · grants"]
+    end
+    B[["BUNDLE<br/>full-fidelity DDL + governance artifacts<br/>manifest.json + checksums"]]
+    subgraph TGT["TARGET metastore (region 2)"]
+        C["Same names · same governance<br/>EMPTY, fully-governed table shells<br/><b>no data moved</b>"]
+    end
+    A ==>|"01 Inventory + 02 Export"| B
+    B ==>|"03 Import (dependency order, fail-closed)"| C
+    classDef src fill:#E3F2FD,stroke:#1565C0,stroke-width:2px,color:#0D47A1;
+    classDef tgt fill:#E8F5E9,stroke:#2E7D32,stroke-width:2px,color:#1B5E20;
+    classDef stg fill:#FFF8E1,stroke:#F57F17,stroke-width:2px,color:#E65100;
+    class SRC src
+    class TGT tgt
+    class B stg

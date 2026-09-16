@@ -9,13 +9,13 @@ from uc_sync.models import ObjectType, UCObject
 
 def test_widgets_override_yaml_catalogs():
     cfg = from_sources(
-        {"catalogs": "ril_sandbox", "mode": "EXPORT", "dry_run": "true"},
+        {"catalogs": "demo_sandbox", "mode": "EXPORT", "dry_run": "true"},
         {
-            "selection": {"catalogs": ["ril_raw", "ril_curated"]},
+            "selection": {"catalogs": ["demo_raw", "demo_curated"]},
             "runtime": {"dry_run": False, "execution_mode": "CROSS_WORKSPACE"},
         },
     )
-    assert cfg.catalogs == ["ril_sandbox"]
+    assert cfg.catalogs == ["demo_sandbox"]
     assert cfg.mode == "EXPORT"
     assert cfg.dry_run is True
 
@@ -23,8 +23,8 @@ def test_widgets_override_yaml_catalogs():
 def test_filter_skips_information_schema_and_system():
     cfg = from_sources(
         {
-            "catalogs": "ril_sandbox",
-            "catalog_mapping_json": '{"ril_sandbox":"ril_sandbox_copy"}',
+            "catalogs": "demo_sandbox",
+            "catalog_mapping_json": '{"demo_sandbox":"demo_sandbox_copy"}',
         },
         {},
     )
@@ -32,15 +32,15 @@ def test_filter_skips_information_schema_and_system():
     info = UCObject(
         ObjectType.SCHEMA,
         "information_schema",
-        "ril_sandbox.information_schema",
-        catalog="ril_sandbox",
+        "demo_sandbox.information_schema",
+        catalog="demo_sandbox",
         schema="information_schema",
     )
     ok = UCObject(
         ObjectType.TABLE,
         "t1",
-        "ril_sandbox.edge.t1",
-        catalog="ril_sandbox",
+        "demo_sandbox.edge.t1",
+        catalog="demo_sandbox",
         schema="edge",
     )
     assert allowed(sys_cat, cfg) is False
@@ -70,3 +70,59 @@ def test_mapping_path(tmp_path):
     path = tmp_path / "mapping.json"
     path.write_text('{"catalogs":{"one":"one_copy"}}', encoding="utf-8")
     assert parse_catalog_mapping(json_path=str(path)) == {"one": "one_copy"}
+
+
+def test_new_contract_stage_connectivity_and_toggles():
+    """Governance-migration contract: stage / connectivity_mode / create_* / apply_*."""
+    cfg = from_sources(
+        {
+            "stage": "IMPORT",
+            "connectivity_mode": "airgap",
+            "catalogs": "sales_prod",
+            "create_tables": "false",
+            "apply_grants": "false",
+            "dry_run": "false",
+        }
+    )
+    assert cfg.stage == "IMPORT"
+    assert cfg.connectivity_mode == "airgap"
+    # create_tables gated off explicitly.
+    assert cfg.create_tables is False
+    # BYO-by-default: catalog / schema / SC / EL creation defaults OFF (they are
+    # customer prerequisites); contents + governance default ON.
+    assert cfg.create_catalogs is False
+    assert cfg.create_schemas is False
+    assert cfg.create_storage_credentials is False
+    assert cfg.create_external_locations is False
+    assert cfg.create_volumes is True
+    assert cfg.create_functions is True
+    assert cfg.create_views is True
+    assert cfg.create_abac_policies is True
+    # apply toggles.
+    assert cfg.apply_grants is False
+    assert cfg.apply_tags is True
+    # legacy alias derived from stage for back-compat consumers.
+    assert cfg.mode == "IMPORT"
+
+
+def test_stage_defaults_from_legacy_mode_and_sync_maps_to_import():
+    assert from_sources({"mode": "EXPORT"}).stage == "EXPORT"
+    assert from_sources({"mode": "SYNC"}).stage == "IMPORT"
+    # connectivity default follows legacy execution_mode.
+    assert from_sources({"execution_mode": "CROSS_WORKSPACE"}).connectivity_mode == (
+        "airgap"
+    )
+    assert from_sources({"execution_mode": "LOCAL"}).connectivity_mode == "direct"
+
+
+def test_report_is_mandatory_no_allow_missing_report_option():
+    """Bug #4: every run must produce its report — the allow_missing_report escape
+    hatch is gone from the config and the job specs."""
+    import json
+    from pathlib import Path
+
+    cfg = from_sources({"stage": "IMPORT", "allow_missing_report": "true"})
+    assert not hasattr(cfg, "allow_missing_report")
+    jobs_dir = Path(__file__).resolve().parent.parent / "jobs"
+    for spec in jobs_dir.glob("*.json"):
+        assert "allow_missing_report" not in spec.read_text()

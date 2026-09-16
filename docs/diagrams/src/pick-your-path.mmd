@@ -1,0 +1,11 @@
+graph TD
+    Q{"What do you need?"}
+    Q -->|"Understand how it works"| A["🏗️ ARCHITECTURE"]
+    Q -->|"Set widgets / job params"| C["⚙️ CONFIGURATION_GUIDE"]
+    Q -->|"Run a migration now"| R["📋 RUNBOOK"]
+    Q -->|"Request access first"| P["🔐 PERMISSIONS_GUIDE"]
+    Q -->|"Is object X supported?"| M["📦 object-support-matrix"]
+    classDef q fill:#FFF8E1,stroke:#F57F17,stroke-width:2px,color:#E65100;
+    classDef doc fill:#E3F2FD,stroke:#1565C0,stroke-width:2px,color:#0D47A1;
+    class Q q
+    class A,C,R,P,M doc

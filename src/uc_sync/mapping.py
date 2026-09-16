@@ -108,6 +108,37 @@ class MappingResolver:
             "target_credential": str(target_credential),
         }
 
+    def target_access_connector_id_for_location(
+        self, source_location: str
+    ) -> Optional[str]:
+        """Target access-connector id for the mapping row that owns this path.
+
+        Per-catalog enterprise setups back each storage credential with its own
+        connector, so the connector must be resolved from the specific source
+        storage location the credential is used for (matched longest-prefix),
+        not from an arbitrary "first row".
+        """
+        mapping = self.location_mapping_for_url(source_location)
+        if mapping:
+            value = str(mapping.get("target_access_connector_id") or "").strip()
+            if value:
+                return value
+        return None
+
+    def target_access_connector_id(self) -> Optional[str]:
+        """First target access-connector id in the mapping file.
+
+        Fallback for credentials whose source storage location cannot be
+        resolved (e.g. a credential backing no external location). When a single
+        target connector backs every credential this is also sufficient; prefer
+        :meth:`target_access_connector_id_for_location` when the location is known.
+        """
+        for item in self.location_mappings():
+            value = str(item.get("target_access_connector_id") or "").strip()
+            if value:
+                return value
+        return None
+
     def managed_storage_root(self, catalog_name: str) -> Optional[str]:
         managed = self.mappings.get("managed_storage") or {}
         explicit = (managed.get("catalogs") or {}).get(catalog_name)

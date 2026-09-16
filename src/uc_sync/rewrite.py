@@ -1,50 +1,30 @@
-"""Catalog / location rewrite helpers for exported SQL, YAML, and JSON."""
+"""Path-only rewrite + DDL replay sanitizers for exported SQL, YAML, and JSON.
+
+Catalog / schema / table / external-location **names are never rewritten** — the
+governance-migration utility recreates every securable under its source name (see
+``plans/uc-governance-migration-design.md`` §2.4). The only value rewritten here is
+the **storage URL** (source ADLS path → mapped target ADLS path), driven by the
+single mapping file. The ``strip_*`` sanitizers make captured ``SHOW CREATE`` DDL
+replayable on a fresh target metastore.
+"""
 
 from __future__ import annotations
 
 import json
 import re
-from typing import Any, Mapping
+from typing import Any
 
 from uc_sync.mapping import MappingResolver
-from uc_sync.sql_ddl import quote_identifier
 
 
 def rewrite_text(
     text: str,
-    catalog_mapping: Mapping[str, str],
     *,
     location_resolver: MappingResolver | None = None,
 ) -> str:
-    """Rewrite source catalog names (and optional storage URLs) in free-form text."""
+    """Rewrite storage URLs in free-form text; leave every identifier untouched."""
 
     rewritten = str(text or "")
-    # Longest catalog names first so overlapping prefixes rewrite correctly.
-    for source_catalog, target_catalog in sorted(
-        catalog_mapping.items(), key=lambda item: len(item[0]), reverse=True
-    ):
-        if not source_catalog or not target_catalog:
-            continue
-        source_q = quote_identifier(source_catalog)
-        target_q = quote_identifier(target_catalog)
-        rewritten = rewritten.replace(f"{source_q}.", f"{target_q}.")
-        rewritten = re.sub(
-            rf"(?<![\w`]){re.escape(source_catalog)}\.",
-            f"{target_catalog}.",
-            rewritten,
-        )
-        # Bare single-segment catalog references (CREATE CATALOG `source`).
-        rewritten = re.sub(
-            rf"(?<![\w`]){re.escape(source_q)}(?![\w`.])",
-            target_q,
-            rewritten,
-        )
-        rewritten = re.sub(
-            rf"(?<![\w`.]){re.escape(source_catalog)}(?![\w`.])",
-            target_catalog,
-            rewritten,
-        )
-
     if location_resolver is not None:
         rewritten = _rewrite_storage_urls(rewritten, location_resolver)
     return rewritten
@@ -64,15 +44,52 @@ def _rewrite_storage_urls(text: str, resolver: MappingResolver) -> str:
     return pattern.sub(replace, text)
 
 
+def rewrite_access_connector_id(text: str, target_connector_id: str) -> str:
+    """Point a storage-credential's ``ACCESS_CONNECTOR_ID`` at the target connector.
+
+    The source connector lives in the source region and is unusable on the target,
+    so a target-region access-connector id (from the mapping file) is substituted
+    when creating the credential. No-op when no target id is provided.
+    """
+
+    target = str(target_connector_id or "").strip()
+    if not target:
+        return text
+    return re.sub(
+        r"(ACCESS_CONNECTOR_ID\s*=\s*')[^']*(')",
+        rf"\g<1>{target}\g<2>",
+        str(text or ""),
+        flags=re.IGNORECASE,
+    )
+
+
 def strip_managed_storage_clauses(text: str, object_type: str = "") -> str:
     """Drop source managed LOCATION clauses so the target metastore assigns storage.
 
     External tables/volumes/locations keep LOCATION/URL (rewritten separately).
+    Catalogs (and schemas) also keep their ``MANAGED LOCATION`` — it is
+    path-rewritten to the target ADLS root, because a target metastore without a
+    default storage root cannot create a catalog without one. Only *managed
+    table/volume* LOCATION clauses are stripped (the target metastore assigns
+    managed table storage under the catalog root).
     """
 
     upper = str(object_type or "").upper()
     if upper in {"EXTERNAL_TABLE", "EXTERNAL_VOLUME", "EXTERNAL_LOCATION"}:
-        return text
+        # Keep the external LOCATION/URL (rewritten separately) but still strip
+        # collation clauses: a target metastore without collation enabled rejects
+        # the replayed `DEFAULT COLLATION`/inline `COLLATE` with PARSE_SYNTAX_ERROR,
+        # exactly as for managed tables and catalogs/schemas.
+        rewritten = strip_default_collation(str(text or ""))
+        rewritten = strip_inline_collate(rewritten)
+        return strip_reserved_table_properties(rewritten)
+    if upper in {"CATALOG", "SCHEMA"}:
+        # Keep the (already path-rewritten) MANAGED LOCATION — a target metastore
+        # with no default storage root cannot create a catalog without one — but
+        # still strip collation / reserved-property noise.
+        rewritten = strip_default_collation(str(text or ""))
+        rewritten = strip_inline_collate(rewritten)
+        return strip_reserved_table_properties(rewritten)
     rewritten = str(text or "")
     rewritten = re.sub(
         r"\s+MANAGED\s+LOCATION\s+'[^']*'",
@@ -100,26 +117,15 @@ def strip_managed_storage_clauses(text: str, object_type: str = "") -> str:
             rewritten,
             flags=re.IGNORECASE,
         )
-    # Newer runtimes emit a table-level `COLLATION '<name>'` clause in
-    # SHOW CREATE TABLE output (e.g. `USING delta\nCOLLATION 'UTF8_BINARY'`).
-    # Older SQL parsers reject that standalone clause, so replaying the captured
-    # DDL fails with PARSE_SYNTAX_ERROR at 'COLLATION'. Drop it and let the target
-    # use its default collation. The per-type `COLLATE <name>` qualifier is handled
-    # separately by strip_inline_collate() below.
-    rewritten = re.sub(
-        r"\s+COLLATION\s+'[^']*'",
-        "",
-        rewritten,
-        flags=re.IGNORECASE,
-    )
-    rewritten = re.sub(
-        r'\s+COLLATION\s+"[^"]*"',
-        "",
-        rewritten,
-        flags=re.IGNORECASE,
-    )
+    # Table-level default collation clause — drop it (see strip_default_collation).
+    rewritten = strip_default_collation(rewritten)
     rewritten = strip_inline_collate(rewritten)
-    rewritten = strip_inline_policy_clauses(rewritten)
+    # Inline column-mask / row-filter clauses are DELIBERATELY KEPT in the CREATE
+    # TABLE DDL: with functions imported before tables, the clauses resolve, so a
+    # table is created with its protection atomically — and if a mask/filter
+    # function is missing, the CREATE TABLE itself fails (fail-closed) rather than
+    # leaving an unprotected table behind. (strip_inline_policy_clauses is retained
+    # for callers that still need it, but the migrate replay no longer applies it.)
     rewritten = strip_reserved_table_properties(rewritten)
     return rewritten
 
@@ -151,6 +157,30 @@ def strip_inline_collate(text: str) -> str:
     )
 
 
+# Table/catalog/schema-level default collation clause. SHOW CREATE emits either the
+# older quoted form (``COLLATION 'UTF8_BINARY'``) or the newer unquoted
+# ``DEFAULT COLLATION UTF8_BINARY``; the value is quoted, backtick-quoted, or a bare
+# identifier. Anchored on ``COLLATION`` (optionally preceded by ``DEFAULT``) so a
+# column ``DEFAULT <expr>`` or ``GENERATED BY DEFAULT AS IDENTITY`` is never touched.
+_DEFAULT_COLLATION_RE = re.compile(
+    r"\s+(?:DEFAULT\s+)?COLLATION\s+"
+    r"(?:'[^']*'|\"[^\"]*\"|`[^`]+`|[A-Za-z_][A-Za-z0-9_]*)",
+    re.IGNORECASE,
+)
+
+
+def strip_default_collation(text: str) -> str:
+    """Drop a table/catalog/schema-level ``[DEFAULT] COLLATION <name>`` clause.
+
+    A target metastore without collation enabled rejects the replayed clause with
+    ``PARSE_SYNTAX_ERROR`` at ``DEFAULT`` / ``COLLATION``. The clause only records the
+    source's default collation, so strip it and let the target apply its own. Inline
+    per-column ``COLLATE <name>`` qualifiers are handled by strip_inline_collate().
+    """
+
+    return _DEFAULT_COLLATION_RE.sub("", str(text or ""))
+
+
 # A fully-qualified name: backtick-quoted or bare identifiers joined by dots.
 _FQ_NAME = (
     r"(?:`[^`]+`|[A-Za-z_][A-Za-z0-9_]*)"
@@ -167,10 +197,10 @@ def strip_inline_policy_clauses(text: str) -> str:
         ...
         WITH ROW FILTER `cat`.`sec`.`hr_dept_filter` ON (dept)
 
-    Replaying that fails when the referenced function does not yet exist in the
-    target (functions import after tables), so the clauses are stripped here and
-    re-applied from the ``policies/*.sql`` artifact in a dedicated phase once every
-    object exists. Mirrors :func:`strip_inline_collate`.
+    Retained as a utility, but **no longer part of the migrate replay pipeline**:
+    functions now import before tables, so the inline clauses resolve and are kept
+    in the CREATE TABLE for atomic fail-closed protection (see
+    :func:`strip_managed_storage_clauses`). Mirrors :func:`strip_inline_collate`.
     """
 
     rewritten = str(text or "")
@@ -191,16 +221,44 @@ def strip_inline_policy_clauses(text: str) -> str:
     return rewritten
 
 
-def strip_reserved_table_properties(text: str) -> str:
-    """Remove reserved/auto-managed ``delta.*`` keys from a TBLPROPERTIES block.
+# The ONLY table properties that genuinely cannot be replayed on CREATE TABLE
+# (bug #7). Everything else — including replayable, meaningful settings like
+# ``delta.dataSkippingStatsColumns`` (late-column clustering), ``delta.feature.
+# allowColumnDefaults`` (column DEFAULTs), deletion vectors, row tracking, auto-
+# optimize, compression, … — is KEPT so the target matches the source's real
+# configuration. Blanket-dropping ``delta.*`` broke 12 tables and silently changed
+# every "successful" one. Compared case-insensitively.
+#   * the two auto-generated row-tracking materialized column names — assigned by
+#     the engine; replaying the source's names throws DELTA_UNKNOWN_CONFIGURATION;
+#   * the protocol floor versions — the target derives these from the enabled
+#     features, and setting them explicitly is rejected / meaningless.
+_UNREPLAYABLE_TABLE_PROPERTY_KEYS = {
+    "delta.rowtracking.materializedrowidcolumnname",
+    "delta.rowtracking.materializedrowcommitversioncolumnname",
+    "delta.minreaderversion",
+    "delta.minwriterversion",
+}
 
-    ``SHOW CREATE TABLE`` emits the table's full property set, including
-    protocol/feature keys and auto-generated row-tracking column names
-    (``delta.rowTracking.materializedRowIdColumnName`` etc.). Replaying those on
-    ``CREATE TABLE`` fails with ``DELTA_UNKNOWN_CONFIGURATION``. These describe
-    source storage internals the target metastore manages itself, so drop every
-    ``delta.*`` property and let the target assign its own. User-defined
-    (non-``delta.``) properties are preserved; if none remain, the whole
+
+def is_replayable_table_property(key: str) -> bool:
+    """True unless ``key`` is one of the genuinely un-replayable table properties
+    (bug #7). Used by the DDL-synthesis paths so they keep the same meaningful
+    delta.* settings the SHOW CREATE path preserves."""
+    return str(key or "").lower() not in _UNREPLAYABLE_TABLE_PROPERTY_KEYS
+
+
+def strip_reserved_table_properties(text: str) -> str:
+    """Remove ONLY the un-replayable table properties from a TBLPROPERTIES block.
+
+    ``SHOW CREATE TABLE`` emits the table's full property set. A few keys cannot be
+    replayed on ``CREATE TABLE`` (they throw ``DELTA_UNKNOWN_CONFIGURATION`` or are
+    engine-derived) — the auto-generated row-tracking materialized column names and
+    the min reader/writer protocol versions (see
+    ``_UNREPLAYABLE_TABLE_PROPERTY_KEYS``). Those are dropped; **every other
+    property is preserved** so the target's configuration matches the source
+    (bug #7 — the previous code stripped all ``delta.*``/``databricks.*``, breaking
+    late-column clustering + column DEFAULTs and silently dropping deletion vectors,
+    row tracking, auto-optimize, compression, …). If no properties remain the whole
     ``TBLPROPERTIES (...)`` clause is removed.
     """
 
@@ -209,19 +267,25 @@ def strip_reserved_table_properties(text: str) -> str:
     def _filter_block(match: re.Match[str]) -> str:
         body = match.group(1)
         kept: list[str] = []
-        # Entries look like: 'key' = 'value'  (comma-separated, possibly multiline)
+        # Entries look like: 'key' = 'value'  (comma-separated, possibly multiline).
+        # The quoted-pair regex tolerates ``)`` inside a value
+        # (e.g. 'upper(region),lower(region)') because it anchors on quotes.
         for key, value in re.findall(
             r"'([^']*)'\s*=\s*'([^']*)'", body
         ):
-            if key.lower().startswith("delta."):
+            if key.lower() in _UNREPLAYABLE_TABLE_PROPERTY_KEYS:
                 continue
             kept.append(f"'{key}' = '{value}'")
         if not kept:
             return ""
         return "TBLPROPERTIES (\n  " + ",\n  ".join(kept) + ")"
 
+    # Greedy capture to the final ``)`` so a property VALUE containing ``)``
+    # (e.g. 'upper(region),lower(region)') does not truncate the block. Any
+    # trailing ``;`` stays outside the match. TBLPROPERTIES is the last clause in
+    # captured table DDL, so nothing legitimate follows it.
     rewritten = re.sub(
-        r"TBLPROPERTIES\s*\(([^)]*)\)",
+        r"TBLPROPERTIES\s*\((.*)\)",
         _filter_block,
         rewritten,
         flags=re.IGNORECASE | re.DOTALL,
@@ -232,75 +296,34 @@ def strip_reserved_table_properties(text: str) -> str:
     return rewritten
 
 
-def rewrite_external_location_identifiers(
-    text: str,
-    *,
-    source_name: str,
-    target_name: str,
-    target_credential: str,
-) -> str:
-    """Rename external location + credential identifiers in CREATE SQL."""
-
-    rewritten = str(text or "")
-    if source_name and target_name and source_name != target_name:
-        rewritten = rewritten.replace(
-            f"`{source_name}`", f"`{target_name}`"
-        )
-        rewritten = re.sub(
-            rf"(?<![\w`]){re.escape(source_name)}(?![\w`])",
-            target_name,
-            rewritten,
-        )
-    if target_credential:
-        rewritten = re.sub(
-            r"(STORAGE\s+CREDENTIAL\s+)`[^`]+`",
-            rf"\1`{target_credential}`",
-            rewritten,
-            flags=re.IGNORECASE,
-        )
-    return rewritten
-
-
 def rewrite_json_value(
     value: Any,
-    catalog_mapping: Mapping[str, str],
     *,
     location_resolver: MappingResolver | None = None,
 ) -> Any:
     if isinstance(value, dict):
         return {
-            key: rewrite_json_value(
-                item, catalog_mapping, location_resolver=location_resolver
-            )
+            key: rewrite_json_value(item, location_resolver=location_resolver)
             for key, item in value.items()
         }
     if isinstance(value, list):
         return [
-            rewrite_json_value(
-                item, catalog_mapping, location_resolver=location_resolver
-            )
+            rewrite_json_value(item, location_resolver=location_resolver)
             for item in value
         ]
     if isinstance(value, str):
-        return rewrite_text(
-            value, catalog_mapping, location_resolver=location_resolver
-        )
+        return rewrite_text(value, location_resolver=location_resolver)
     return value
 
 
 def rewrite_json_text(
     text: str,
-    catalog_mapping: Mapping[str, str],
     *,
     location_resolver: MappingResolver | None = None,
 ) -> str:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
-        return rewrite_text(
-            text, catalog_mapping, location_resolver=location_resolver
-        )
-    rewritten = rewrite_json_value(
-        payload, catalog_mapping, location_resolver=location_resolver
-    )
+        return rewrite_text(text, location_resolver=location_resolver)
+    rewritten = rewrite_json_value(payload, location_resolver=location_resolver)
     return json.dumps(rewritten, indent=2, default=str) + "\n"

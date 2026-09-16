@@ -1,0 +1,289 @@
+<title>UC Governance Migration Report</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root{
+    --ink:#12191f; --surface:#ffffff; --panel:#f6f8fa; --panel-2:#eef2f5;
+    --muted:#5c6b78; --faint:#8595a1; --border:#dde5ea; --border-strong:#c4d0d8;
+    --accent:#0b6e7f; --accent-soft:#e2f0f2; --accent-ink:#084c58;
+    --good:#2b8a3e; --good-soft:#e6f4ea; --warn:#b5820a; --warn-soft:#faf0d7;
+    --crit:#c0322b; --crit-soft:#fbe9e7; --info:#3a6ea5; --info-soft:#e7eff7;
+    --shadow:0 1px 2px rgba(18,25,31,.05),0 4px 16px rgba(18,25,31,.05);
+  }
+  @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+    --ink:#e8eef2; --surface:#0e1418; --panel:#151d23; --panel-2:#1b252c;
+    --muted:#9fb0bc; --faint:#6f818d; --border:#243138; --border-strong:#33454e;
+    --accent:#4bc0d4; --accent-soft:#12333a; --accent-ink:#a9e5ee;
+    --good:#5bc47a; --good-soft:#123020; --warn:#e0b44a; --warn-soft:#33290f;
+    --crit:#ef6b62; --crit-soft:#3a1815; --info:#7db0e0; --info-soft:#122232;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 6px 20px rgba(0,0,0,.28);
+  }}
+  :root[data-theme="dark"]{
+    --ink:#e8eef2; --surface:#0e1418; --panel:#151d23; --panel-2:#1b252c;
+    --muted:#9fb0bc; --faint:#6f818d; --border:#243138; --border-strong:#33454e;
+    --accent:#4bc0d4; --accent-soft:#12333a; --accent-ink:#a9e5ee;
+    --good:#5bc47a; --good-soft:#123020; --warn:#e0b44a; --warn-soft:#33290f;
+    --crit:#ef6b62; --crit-soft:#3a1815; --info:#7db0e0; --info-soft:#122232;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 6px 20px rgba(0,0,0,.28);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--surface);color:var(--ink);
+    font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:16px;line-height:1.6;
+    -webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1000px;margin:0 auto;padding:clamp(1.2rem,4vw,3.5rem) clamp(1rem,4vw,2rem);}
+  h1,h2,h3{font-family:"Newsreader",Georgia,serif;font-weight:500;line-height:1.15;
+    text-wrap:balance;letter-spacing:-.01em;}
+  h1{font-size:clamp(2rem,5vw,3rem);margin:.2em 0 .1em;}
+  h2{font-size:clamp(1.4rem,3vw,1.9rem);margin:2.6rem 0 .4rem;padding-top:1.4rem;
+    border-top:1px solid var(--border);}
+  h3{font-size:1.15rem;margin:1.6rem 0 .3rem;font-weight:600;}
+  p{margin:.5rem 0;max-width:68ch;color:var(--ink)}
+  .lede{font-size:1.15rem;color:var(--muted);max-width:70ch}
+  a{color:var(--accent-ink);text-decoration-color:var(--border-strong)}
+  code,.mono{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.9em}
+  .eyebrow{font-family:"IBM Plex Mono",monospace;text-transform:uppercase;
+    letter-spacing:.16em;font-size:.72rem;color:var(--accent);font-weight:500;}
+  .meta{display:flex;flex-wrap:wrap;gap:.5rem 1.5rem;margin:1.2rem 0 0;
+    font-family:"IBM Plex Mono",monospace;font-size:.8rem;color:var(--muted)}
+  .meta b{color:var(--ink);font-weight:500}
+  /* scorecard */
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+    gap:.9rem;margin:1.6rem 0}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;
+    padding:1rem 1.1rem;box-shadow:var(--shadow)}
+  .card .n{font-family:"Newsreader",serif;font-size:2.1rem;font-weight:600;
+    color:var(--accent-ink);font-variant-numeric:tabular-nums;line-height:1}
+  .card .l{font-size:.82rem;color:var(--muted);margin-top:.35rem}
+  /* pills */
+  .pill{display:inline-flex;align-items:center;gap:.35em;font-size:.74rem;
+    font-family:"IBM Plex Mono",monospace;font-weight:500;padding:.14em .6em;
+    border-radius:999px;white-space:nowrap;border:1px solid transparent}
+  .p-live{background:var(--good-soft);color:var(--good);border-color:var(--good)}
+  .p-unit{background:var(--info-soft);color:var(--info);border-color:var(--info)}
+  .p-part{background:var(--warn-soft);color:var(--warn);border-color:var(--warn)}
+  .p-no{background:var(--panel-2);color:var(--faint);border-color:var(--border-strong)}
+  .dot{width:.5em;height:.5em;border-radius:50%;background:currentColor;flex:none}
+  .tablewrap{overflow-x:auto;margin:1rem 0;border:1px solid var(--border);
+    border-radius:12px;box-shadow:var(--shadow)}
+  table{border-collapse:collapse;width:100%;font-size:.9rem;background:var(--panel)}
+  th,td{text-align:left;padding:.62rem .8rem;border-bottom:1px solid var(--border);
+    vertical-align:top}
+  th{background:var(--panel-2);font-weight:600;font-size:.76rem;
+    text-transform:uppercase;letter-spacing:.05em;color:var(--muted);position:sticky;top:0}
+  tr:last-child td{border-bottom:none}
+  td.mono,td .mono{color:var(--ink)}
+  .tag{font-family:"IBM Plex Mono",monospace;font-size:.82em;background:var(--accent-soft);
+    color:var(--accent-ink);padding:.05em .4em;border-radius:5px}
+  .callout{background:var(--accent-soft);border:1px solid var(--border);
+    border-left:3px solid var(--accent);border-radius:10px;padding:.9rem 1.1rem;margin:1.2rem 0}
+  .callout.warn{background:var(--warn-soft);border-left-color:var(--warn)}
+  .legend{display:flex;flex-wrap:wrap;gap:.6rem 1.2rem;margin:.6rem 0 0;font-size:.8rem;color:var(--muted)}
+  ul{padding-left:1.2rem;max-width:70ch}li{margin:.25rem 0}
+  .foot{margin-top:2.5rem;padding-top:1.2rem;border-top:1px solid var(--border);
+    color:var(--faint);font-size:.8rem}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:1rem 0}
+  @media(max-width:640px){.grid2{grid-template-columns:1fr}}
+</style>
+
+<div class="wrap">
+  <div class="eyebrow">Verification report &middot; feature/abac_refactor</div>
+  <h1>UC Governance Migration</h1>
+  <p class="lede">A full refactor of the UC metadata-sync utility into a governance-migration
+  tool that reproduces Unity Catalog <b>structure + full table definitions + governance</b>
+  from one metastore to another — verified end-to-end across two Azure regions
+  (East US → East US 2), without moving a single row of data.</p>
+  <div class="meta">
+    <span><b>7</b> phases</span><span><b>7</b> commits</span>
+    <span><b>121</b> offline tests pass</span>
+    <span>live: <b>eastus → eastus2</b></span>
+    <span>date <b>2026-08-23</b></span>
+  </div>
+
+  <div class="cards">
+    <div class="card"><div class="n">30/30</div><div class="l">objects migrated cross-region (clean run, toggles set for pre-created infra)</div></div>
+    <div class="card"><div class="n">3</div><div class="l">ABAC policies recreated — <span class="mono">EXCEPT</span> preserved verbatim</div></div>
+    <div class="card"><div class="n">7</div><div class="l">governed-tag assignments across 5 grains</div></div>
+    <div class="card"><div class="n">100%</div><div class="l">table fidelity: identity, generated, PK, CHECK, partition, clustering</div></div>
+  </div>
+
+  <div class="callout">
+    <b>Bottom line.</b> The engine is proven live: inventory → export → migrate → import
+    reproduces structure, full table definitions, governed tags, ABAC policies (with their
+    exempt-principal lists), classic column masks + row filters, and grants — under identical
+    names in a different-region metastore. Re-runs are additive and idempotent. 121 offline
+    tests pass. Notebooks, a scenario-driven runbook, and a clean Excel report ship with it.
+  </div>
+
+  <h2>Feature verification matrix</h2>
+  <div class="legend">
+    <span class="pill p-live"><span class="dot"></span>LIVE</span> verified on real workspaces
+    <span class="pill p-unit"><span class="dot"></span>UNIT</span> covered by the offline suite
+    <span class="pill p-part"><span class="dot"></span>PARTIAL</span> works with a noted limit
+  </div>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Feature</th><th>Status</th><th>How it was verified</th></tr></thead>
+    <tbody>
+      <tr><td><b>Inventory</b> — structure over REST</td><td><span class="pill p-live"><span class="dot"></span>LIVE</span></td><td>20 securables discovered from <span class="tag">ai27_uc_gov_src</span> (catalog→schemas→tables/views/volumes/functions + external location & credential)</td></tr>
+      <tr><td>Inventory — grants</td><td><span class="pill p-live"><span class="dot"></span>LIVE</span></td><td>Permissions API per object, incl. <span class="mono">OWNER</span></td></tr>
+      <tr><td>Inventory — governed tags</td><td><span class="pill p-live"><span class="dot"></span>LIVE</span></td><td><span class="mono">information_schema.*_tags</span> at catalog/schema/table/column/volume grain</td></tr>
+      <tr><td>Inventory — ABAC policies</td><td><span class="pill p-live"><span class="dot"></span>LIVE</span></td><td><span class="mono">abac_policy_definitions</span> + <span class="mono">DESCRIBE POLICY</span> (function, on-column, comment)</td></tr>
+      <tr><td>Inventory — classic masks / row filters</td><td><span class="pill p-live"><span class="dot"></span>LIVE</span></td><td>Directly-defined mask + row filter captured from the table payload</td></tr>
+      <tr><td><b>Export</b> — full-fidelity DDL</td><td><span class="pill p-live"><span class="dot"></span>LIVE</span></td><td><span class="mono">SHOW CREATE</span> preferred, synthesis fallback; 20 DDL + governance artifacts</td></tr>
+      <tr><td>Migrate — storage-path rewrite (names kept)</td><td><span class="pill p-live"><span class="dot"></span>LIVE</span></td><td>Source ADLS root → target root; catalog managed location rewritten, identifiers untouched</td></tr>
+      <tr><td><b>Import</b> — structure creation</td><td><span class="pill p-live"><span class="dot"></span>LIVE</span></td><td>Catalog, 5 schemas, 5 functions, 2 views, 1 volume, 4 tables created on target</td></tr>
+      <tr><td>Import — <b>full table fidelity</b></td><td><span class="pill p-live"><span class="dot"></span>LIVE</span></td><td>Target <span class="mono">SHOW CREATE</span> matches source: identity col, generated col, PK, partitioning, clustering, user properties, comments</td></tr>
+      <tr><td>Import — governed tags</td><td><span class="pill p-live"><span class="dot"></span>LIVE</span></td><td>All 7 assignments recreated (verified via target <span class="mono">information_schema</span>)</td></tr>
+      <tr><td>Import — ABAC policies (verbatim + <span class="mono">EXCEPT</span>)</td><td><span class="pill p-live"><span class="dot"></span>LIVE</span></td><td>3 policies recreated; exempt principal preserved on 2 (mask + row filter)</td></tr>
+      <tr><td>Import — classic masks / row filters</td><td><span class="pill p-live"><span class="dot"></span>LIVE</span></td><td><span class="mono">ssn</span> mask + <span class="mono">dept</span> row filter applied and confirmed</td></tr>
+      <tr><td>Import — grants + ownership (last)</td><td><span class="pill p-live"><span class="dot"></span>LIVE</span></td><td>Grants replayed as-is after governance</td></tr>
+      <tr><td><span class="mono">create_*</span> / <span class="mono">apply_*</span> toggles</td><td><span class="pill p-live"><span class="dot"></span>LIVE</span></td><td>Storage toggles off → pre-created infra skipped → clean 30/30</td></tr>
+      <tr><td>Incremental additive re-run</td><td><span class="pill p-live"><span class="dot"></span>LIVE</span></td><td>New source grant applied on re-run; existing objects idempotent; no revokes</td></tr>
+      <tr><td>Infosec prerequisite gate</td><td><span class="pill p-unit"><span class="dot"></span>UNIT</span></td><td>Missing governed-tag def / function → <span class="mono">GOVERNANCE_PREREQ_MISSING</span> (reactive; classifier unit-tested)</td></tr>
+      <tr><td>DDL replay sanitizers</td><td><span class="pill p-unit"><span class="dot"></span>UNIT</span></td><td>Collation, <span class="mono">delta.*</span>/<span class="mono">databricks.*</span> props, paren-in-value, inline policy stripping</td></tr>
+      <tr><td>Clean Excel report (spine + governance sheets)</td><td><span class="pill p-live"><span class="dot"></span>LIVE</span></td><td>Generated from real inventory: Tags 7, masks/filters 2, ABAC 3, grants 29 rows</td></tr>
+      <tr><td>Direct cross-workspace (remote SP)</td><td><span class="pill p-part"><span class="dot"></span>PARTIAL</span></td><td>REST read path present; full <span class="mono">SHOW CREATE</span> fidelity needs source SQL → use airgap</td></tr>
+      <tr><td>Notebooks as a Databricks job</td><td><span class="pill p-part"><span class="dot"></span>PARTIAL</span></td><td>Compile clean + reuse the proven services; not executed as a deployed job</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>Scenario coverage</h2>
+  <p>The runbook is organized as seven operator scenarios. Each was exercised at the level its risk warrants.</p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>#</th><th>Scenario</th><th>Status</th><th>Evidence</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>From scratch (new target metastore)</td><td><span class="pill p-live"><span class="dot"></span>LIVE</span></td><td>Catalog + all objects created from the mapping file</td></tr>
+      <tr><td>2</td><td>Catalog already exists</td><td><span class="pill p-live"><span class="dot"></span>LIVE</span></td><td><span class="mono">create_catalogs=false</span> → skip create, still govern (idempotent re-run)</td></tr>
+      <tr><td>3</td><td>Creds / locations pre-created</td><td><span class="pill p-live"><span class="dot"></span>LIVE</span></td><td>Storage toggles off → clean 30/30, no failures</td></tr>
+      <tr><td>4</td><td>Single-catalog scope</td><td><span class="pill p-live"><span class="dot"></span>LIVE</span></td><td>Every run scoped to <span class="tag">catalogs=ai27_uc_gov_src</span></td></tr>
+      <tr><td>5</td><td>Airgap (move the bundle)</td><td><span class="pill p-live"><span class="dot"></span>LIVE</span></td><td>Inventory+export on source (eastus) → bundle → import on target (eastus2)</td></tr>
+      <tr><td>6</td><td>Direct / local</td><td><span class="pill p-part"><span class="dot"></span>PARTIAL</span></td><td>Supported; same-metastore needs two metastores for a real move (names identical)</td></tr>
+      <tr><td>7</td><td>Incremental re-run</td><td><span class="pill p-live"><span class="dot"></span>LIVE</span></td><td>Added a source grant → re-ran 4 stages → applied additively, rest idempotent</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>Live evidence — the target after migration</h2>
+  <p>Final state of <span class="tag">ai27_uc_gov_src</span> on the target metastore (East US 2),
+  read back from its own <span class="mono">information_schema</span>:</p>
+  <div class="grid2">
+    <div class="tablewrap"><table>
+      <thead><tr><th>What</th><th>Count</th></tr></thead>
+      <tbody>
+        <tr><td>Tables + views</td><td class="mono">6</td></tr>
+        <tr><td>Functions (incl. mask/filter UDFs)</td><td class="mono">5</td></tr>
+        <tr><td>ABAC policies</td><td class="mono">3</td></tr>
+        <tr><td>Classic column masks</td><td class="mono">1</td></tr>
+        <tr><td>Classic row filters</td><td class="mono">1</td></tr>
+        <tr><td>Governed-tag assignments</td><td class="mono">7</td></tr>
+      </tbody>
+    </table></div>
+    <div class="tablewrap"><table>
+      <thead><tr><th>ABAC policy</th><th>Kind</th><th>EXCEPT</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">ai27_uc_mask_bank</td><td>mask</td><td>—</td></tr>
+        <tr><td class="mono">ai27_uc_mask_email</td><td>mask</td><td class="mono">abhishek.iyer@…</td></tr>
+        <tr><td class="mono">ai27_uc_rowfilter_region</td><td>row filter</td><td class="mono">abhishek.iyer@…</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+  <div class="callout"><b>Fidelity spot-check.</b> The target <span class="mono">hr.employees</span>
+  reproduces <span class="mono">GENERATED ALWAYS AS IDENTITY</span>, a generated
+  <span class="mono">hire_year</span> column, <span class="mono">PRIMARY KEY pk_employees</span>,
+  <span class="mono">PARTITIONED BY (dept)</span>, user <span class="mono">TBLPROPERTIES</span>,
+  every column comment, its classic <span class="mono">MASK</span> on <span class="mono">ssn</span>,
+  and its <span class="mono">ROW FILTER</span> on <span class="mono">dept</span> — while all
+  <span class="mono">delta.*</span> internals were correctly stripped for replay.</div>
+
+  <h2>Resources created for testing</h2>
+  <p>Everything provisioned for this verification, prefixed <span class="tag">ai27_uc</span> where I
+  named it. Listed so you can keep or remove it.</p>
+
+  <h3>Account-level governed tags <span class="pill p-part" style="vertical-align:middle"><span class="dot"></span>shared across both regions</span></h3>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Tag key</th><th>Allowed values</th><th>Drives</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">ai27_uc_classification</td><td>PUBLIC, INTERNAL, CONFIDENTIAL, RESTRICTED</td><td>classification tags</td></tr>
+      <tr><td class="mono">ai27_uc_pii</td><td>SSN, EMAIL, PHONE, BANK_ACCOUNT</td><td>ABAC column masks</td></tr>
+      <tr><td class="mono">ai27_uc_row_access</td><td>restricted, open</td><td>ABAC row filters</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Azure (subscription <span class="mono">edd4cc45…</span>, resource group <span class="mono">ai27-uc-rg</span>, East US)</h3>
+  <ul>
+    <li>ADLS Gen2 storage account <span class="mono">ai27ucsrc32568</span> (HNS), container <span class="mono">uc-root</span></li>
+    <li>Databricks access connector <span class="mono">ai27-uc-connector</span> (system managed identity), granted <b>Storage Blob Data Contributor</b> on the account</li>
+  </ul>
+  <p class="mono" style="color:var(--muted);font-size:.82rem">Created because the old <span>ai27rg</span> / <span>ai27accconn</span> had been deleted — every existing source-region credential was broken.</p>
+
+  <h3>Unity Catalog</h3>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Workspace</th><th>Object</th><th>Name</th></tr></thead>
+    <tbody>
+      <tr><td>source_ws (eastus)</td><td>Storage credential</td><td class="mono">ai27_uc_src_cred</td></tr>
+      <tr><td>source_ws (eastus)</td><td>External location</td><td class="mono">ai27_uc_src_el</td></tr>
+      <tr><td>source_ws (eastus)</td><td>Catalog (source fixture)</td><td class="mono">ai27_uc_gov_src</td></tr>
+      <tr><td>target_ws (eastus2)</td><td>Catalog (migration output)</td><td class="mono">ai27_uc_gov_src</td></tr>
+    </tbody>
+  </table></div>
+  <div class="callout warn"><b>Cleanup.</b> To remove: <span class="mono">DROP CATALOG ai27_uc_gov_src CASCADE</span>
+  on both workspaces; drop <span class="mono">ai27_uc_src_el</span> + <span class="mono">ai27_uc_src_cred</span>
+  on source_ws; delete the three <span class="mono">ai27_uc_*</span> tag policies via
+  <span class="mono">DELETE /api/2.1/tag-policies/{id}</span>; and
+  <span class="mono">az group delete -n ai27-uc-rg</span>. The scoped test fixtures live only under these names.</div>
+
+  <h2>What ships</h2>
+  <div class="grid2">
+    <div>
+      <h3>Code</h3>
+      <ul>
+        <li>New <span class="mono">governance.py</span> (tag + ABAC read/DDL), <span class="mono">report.py</span> (Excel)</li>
+        <li>Path-only <span class="mono">rewrite.py</span>; hardened DDL sanitizers</li>
+        <li>New widget contract: <span class="mono">stage</span>, <span class="mono">connectivity_mode</span>, <span class="mono">mapping_file_path</span>, <span class="mono">create_*/apply_*</span></li>
+        <li>Toggle-aware, idempotent <span class="mono">PackageImportEngine</span></li>
+        <li>121 offline tests (no workspace needed)</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Notebooks &amp; docs</h3>
+      <ul>
+        <li>Thin stage notebooks <span class="mono">01_Inventory</span> / <span class="mono">02_Export</span> / <span class="mono">03_Import</span></li>
+        <li>Scenario-driven <span class="mono">runbook.md</span> (decision tree + 7 scenarios)</li>
+        <li><span class="mono">configuration</span>, <span class="mono">manual-actions</span>, <span class="mono">object-support-matrix</span>, <span class="mono">architecture</span>, <span class="mono">troubleshooting</span></li>
+        <li>Stale SOP / local-mode / feasibility docs retired</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>Honest limits</h2>
+  <ul>
+    <li><b>Direct cross-workspace</b> reads structure over REST, but full <span class="mono">SHOW CREATE</span>
+    fidelity needs SQL on the source — so the <b>airgap</b> flow (run inventory+export on the source) is the
+    recommended high-fidelity path and the one verified here.</li>
+    <li><b>Notebooks</b> compile and wrap the services proven by the local driver, but were not executed as a
+    deployed Databricks job in this pass.</li>
+    <li><b>Infosec gate</b> is reactive — it fails an object with a precise reason when a governed-tag
+    definition or function is missing — rather than a proactive preflight scan.</li>
+    <li><b>Materialized views / streaming tables</b> are inventoried and governed but not created (pipeline-backed, by design).</li>
+    <li>An optional job installer (<span class="mono">00_Install_Jobs</span> + <span class="mono">jobs/*.json</span>) was not built.</li>
+  </ul>
+
+  <h2>Commits</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Phase</th><th>Commit</th></tr></thead>
+    <tbody>
+      <tr><td>1a</td><td class="mono">rewrite.py path-only; drop catalog-name mapping</td></tr>
+      <tr><td>1b</td><td class="mono">stage / connectivity_mode / mapping_file_path + toggles</td></tr>
+      <tr><td>2a</td><td class="mono">keep+rewrite catalog managed location; harden TBLPROPERTIES</td></tr>
+      <tr><td>3</td><td class="mono">governed-tag + ABAC inventory, export, apply</td></tr>
+      <tr><td>2 (finish)</td><td class="mono">honor create_*/apply_* toggles</td></tr>
+      <tr><td>6</td><td class="mono">thin stage notebooks + lean doc set</td></tr>
+      <tr><td>5</td><td class="mono">clean migration report (spine + governance sheets)</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="foot">
+    Branch <span class="mono">feature/abac_refactor</span> &middot; source
+    <span class="mono">fevm-shared-sandbox-eastus</span> &middot; target
+    <span class="mono">fevm-shared-sandbox-eastus2</span> &middot; utility never moves table data.
+  </div>
+</div>

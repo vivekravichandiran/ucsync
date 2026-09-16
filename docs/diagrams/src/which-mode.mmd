@@ -1,0 +1,10 @@
+graph TD
+    Q{"Can the target workspace reach<br/>the source over the network?"}
+    Q -->|"yes"| D["<b>direct</b> (default)<br/>one job, no bundle hand-off<br/>reads source over REST + source warehouse"]
+    Q -->|"no connectivity"| G["<b>airgap</b><br/>run 01+02 on source, move run_&lt;id&gt;/,<br/>run 03 on target"]
+    classDef gate fill:#FFF8E1,stroke:#F57F17,stroke-width:2px,color:#E65100;
+    classDef d fill:#E8F5E9,stroke:#2E7D32,stroke-width:2px,color:#1B5E20;
+    classDef g fill:#E3F2FD,stroke:#1565C0,stroke-width:2px,color:#0D47A1;
+    class Q gate
+    class D d
+    class G g

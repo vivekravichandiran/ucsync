@@ -171,20 +171,6 @@ def _sdk_client(
     return WorkspaceClient()
 
 
-def _as_job_settings(settings: Mapping[str, Any]) -> Any:
-    """Convert a plain settings dict into an SDK JobSettings when available."""
-
-    payload = dict(settings)
-    try:
-        from databricks.sdk.service.jobs import JobSettings
-
-        if hasattr(JobSettings, "from_dict"):
-            return JobSettings.from_dict(payload)
-    except Exception:  # noqa: BLE001 - fall back to raw dict / REST
-        pass
-    return payload
-
-
 def _jobs_create(ws: Any, settings: Mapping[str, Any]) -> int:
     """Create a job via SDK objects or the Jobs REST API."""
 
@@ -195,18 +181,10 @@ def _jobs_create(ws: Any, settings: Mapping[str, Any]) -> int:
         response = api_client.do("POST", "/api/2.1/jobs/create", body=payload)
         return int(response["job_id"])
 
-    job_settings = _as_job_settings(payload)
-    if hasattr(job_settings, "as_dict"):
-        response = ws.jobs.create(
-            name=getattr(job_settings, "name", None),
-            tasks=getattr(job_settings, "tasks", None),
-            job_clusters=getattr(job_settings, "job_clusters", None),
-            max_concurrent_runs=getattr(job_settings, "max_concurrent_runs", None),
-            tags=getattr(job_settings, "tags", None),
-            timeout_seconds=getattr(job_settings, "timeout_seconds", None),
-        )
-    else:
-        response = ws.jobs.create(**payload)
+    # SDK fallback: pass the plain settings dict straight through. The Jobs SDK
+    # accepts keyword args mirroring the REST body; keeping dicts (rather than
+    # typed JobSettings) preserves nested task/cluster shapes.
+    response = ws.jobs.create(**payload)
     return int(response.job_id)
 
 
@@ -220,7 +198,7 @@ def _jobs_reset(ws: Any, job_id: int, settings: Mapping[str, Any]) -> None:
             body={"job_id": job_id, "new_settings": payload},
         )
         return
-    ws.jobs.reset(job_id=job_id, new_settings=_as_job_settings(payload))
+    ws.jobs.reset(job_id=job_id, new_settings=payload)
 
 
 def _jobs_run_now(ws: Any, job_id: int) -> int:
@@ -366,7 +344,7 @@ def create_uc_sync_job(
             params=UCSyncJobParams(
                 execution_mode="LOCAL",
                 mode="SYNC",
-                catalog_mapping_json='{"ril_sandbox":"ril_sandbox_copy"}',
+                catalog_mapping_json='{"demo_sandbox":"demo_sandbox_copy"}',
                 dry_run="true",
             ),
             run_now=True,
@@ -532,14 +510,14 @@ def create_local_stage_jobs(
 
         create_local_stage_jobs(
             stages="ALL",
-            catalog_mapping_json='{"ril_sandbox":"ril_sandbox_ucsync_local"}',
+            catalog_mapping_json='{"demo_sandbox":"demo_sandbox_ucsync_local"}',
             location_mapping_csv_path="/Volumes/.../config/location-mapping.csv",
-            catalogs="ril_sandbox",
-            schemas="ril_sandbox.ucsync_local_01",
-            ops_catalog="catalog_2_pih5aa",
-            ops_schema="wsmig_operations",
-            output_volume_path="/Volumes/catalog_2_pih5aa/wsmig_operations/uc_exports",
-            existing_cluster_id="0813-072811-phmehy1u",
+            catalogs="demo_sandbox",
+            schemas="demo_sandbox.ucsync_local_01",
+            ops_catalog="uc_sync_ops",
+            ops_schema="ops",
+            output_volume_path="/Volumes/uc_sync_ops/ops/uc_exports",
+            existing_cluster_id="0000-000000-xxxxxxxx",
             dry_run="false",
             run_now=False,
         )

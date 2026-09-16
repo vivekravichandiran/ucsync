@@ -82,6 +82,40 @@ def load_workspace_auth(
     )
 
 
+def direct_workspace_auth(
+    host: str,
+    client_id: str = "",
+    client_secret: str = "",
+    token: str = "",
+) -> WorkspaceAuth:
+    """Build auth from credential values supplied directly (not via a secret scope).
+
+    Convenience for quick or one-off runs where creating a secret scope is
+    overkill. Accepts either an OAuth ``client_id`` + ``client_secret`` pair or a
+    PAT ``token``.
+
+    SECURITY: values passed this way are carried in notebook widget values and job
+    ``base_parameters`` (visible in the Jobs UI / API and not redacted like a
+    ``{{secrets/...}}`` reference). Prefer :func:`load_workspace_auth` with a secret
+    scope for anything shared or long-lived.
+    """
+    if not host:
+        raise ValueError("workspace host is required")
+    client_id = (client_id or "").strip()
+    client_secret = (client_secret or "").strip()
+    token = (token or "").strip()
+    if not ((client_id and client_secret) or token):
+        raise RuntimeError(
+            "direct auth requires either client_id + client_secret, or a token"
+        )
+    return WorkspaceAuth(
+        host=host.rstrip("/"),
+        client_id=client_id or None,
+        client_secret=client_secret or None,
+        token=token or None,
+    )
+
+
 def dbutils_secrets_provider(dbutils: Any) -> SecretsProvider:
     class _Provider:
         def get(self, scope: str, key: str) -> str:

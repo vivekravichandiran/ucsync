@@ -10,6 +10,7 @@ from uc_sync.audit import (
     add_missing_columns_sql,
     stage_audit_row,
 )
+from uc_sync.mapping import MappingResolver
 from uc_sync.migrate_export import MigrateExportService
 from uc_sync.package_import import PackageImportEngine, _split_statements
 from uc_sync.rewrite import rewrite_text
@@ -27,33 +28,51 @@ class FakeSql:
         self.statements.append(sql)
 
 
-def test_rewrite_text_catalog_and_quoted():
+def _resolver_mappings():
+    """Mappings dict with one longest-prefix ADLS path rewrite."""
+    return {
+        "location_mappings": [
+            {
+                "source_location": "abfss://src@acct.dfs.core.windows.net/root",
+                "target_location": "abfss://tgt@acct.dfs.core.windows.net/migrated",
+            }
+        ]
+    }
+
+
+def test_rewrite_text_paths_only_leaves_identifiers_untouched():
+    """Names are never rewritten; only storage URLs are mapped to target paths."""
+    resolver = MappingResolver(_resolver_mappings())
     text = (
-        "CREATE TABLE `ril_sandbox`.`ucsync_local_01`.`t1` AS "
-        "SELECT * FROM ril_sandbox.ucsync_local_01.t0;"
+        "CREATE TABLE `demo_sandbox`.`s`.`t1` "
+        "LOCATION 'abfss://src@acct.dfs.core.windows.net/root/t1';"
     )
-    out = rewrite_text(text, {"ril_sandbox": "ril_sandbox_ucsync_local"})
-    assert "`ril_sandbox_ucsync_local`.`ucsync_local_01`.`t1`" in out
-    assert "ril_sandbox_ucsync_local.ucsync_local_01.t0" in out
-    assert "ril_sandbox." not in out.replace("ril_sandbox_ucsync_local", "")
+    out = rewrite_text(text, location_resolver=resolver)
+    # Identifiers preserved verbatim (no catalog renaming).
+    assert "`demo_sandbox`.`s`.`t1`" in out
+    # Storage URL rewritten to the mapped target path.
+    assert "abfss://tgt@acct.dfs.core.windows.net/migrated/t1" in out
+    # With no resolver, text is returned unchanged.
+    assert rewrite_text(text) == text
 
 
-def test_migrate_rewrites_files_and_renames(tmp_path: Path):
+def test_migrate_rewrites_paths_and_preserves_names(tmp_path: Path):
     source = tmp_path / "export_staging" / "run1"
     (source / "ddl").mkdir(parents=True)
     (source / "inventory").mkdir()
-    (source / "ddl" / "TABLE_ril_sandbox__s__t.sql").write_text(
-        "CREATE TABLE IF NOT EXISTS `ril_sandbox`.`s`.`t` (id INT);\n",
+    (source / "ddl" / "EXTERNAL_TABLE_demo_sandbox__s__t.sql").write_text(
+        "CREATE TABLE IF NOT EXISTS `demo_sandbox`.`s`.`t` (id INT) "
+        "LOCATION 'abfss://src@acct.dfs.core.windows.net/root/t';\n",
         encoding="utf-8",
     )
     (source / "inventory" / "objects.json").write_text(
         json.dumps(
             [
                 {
-                    "object_type": "TABLE",
-                    "full_name": "ril_sandbox.s.t",
-                    "catalog": "ril_sandbox",
-                    "definition": "CREATE TABLE `ril_sandbox`.`s`.`t` (id INT)",
+                    "object_type": "EXTERNAL_TABLE",
+                    "full_name": "demo_sandbox.s.t",
+                    "catalog": "demo_sandbox",
+                    "storage_location": "abfss://src@acct.dfs.core.windows.net/root/t",
                     "definition_hash": "abc",
                     "object_id": "oid-1",
                 }
@@ -65,32 +84,106 @@ def test_migrate_rewrites_files_and_renames(tmp_path: Path):
     result = MigrateExportService(
         source_root=str(source),
         target_root=str(target),
-        catalog_mapping={"ril_sandbox": "ril_sandbox_ucsync_local"},
+        mappings=_resolver_mappings(),
         run_id="run1",
     ).run(dry_run=False)
 
     assert result["migrated"] >= 2
-    migrated_ddl = target / "ddl" / "TABLE_ril_sandbox_ucsync_local__s__t.sql"
+    # File name is NOT renamed — catalog names are never mapped.
+    migrated_ddl = target / "ddl" / "EXTERNAL_TABLE_demo_sandbox__s__t.sql"
     assert migrated_ddl.exists()
-    assert "ril_sandbox_ucsync_local" in migrated_ddl.read_text(encoding="utf-8")
+    ddl_text = migrated_ddl.read_text(encoding="utf-8")
+    assert "`demo_sandbox`.`s`.`t`" in ddl_text
+    # External-table storage path IS rewritten to the target ADLS location.
+    assert "abfss://tgt@acct.dfs.core.windows.net/migrated/t" in ddl_text
     inv = json.loads((target / "inventory" / "objects.json").read_text(encoding="utf-8"))
-    assert inv[0]["full_name"] == "ril_sandbox.s.t"
-    assert inv[0]["source_full_name"] == "ril_sandbox.s.t"
-    assert inv[0]["target_full_name"] == "ril_sandbox_ucsync_local.s.t"
-    assert inv[0]["catalog"] == "ril_sandbox_ucsync_local"
-    assert "`ril_sandbox_ucsync_local`.`s`.`t`" in inv[0]["definition"]
+    assert inv[0]["full_name"] == "demo_sandbox.s.t"
+    assert inv[0]["source_full_name"] == "demo_sandbox.s.t"
+    assert inv[0]["target_full_name"] == "demo_sandbox.s.t"
+    assert inv[0]["catalog"] == "demo_sandbox"
+    assert inv[0]["storage_location"] == (
+        "abfss://tgt@acct.dfs.core.windows.net/migrated/t"
+    )
+
+
+def test_migrate_rewrites_each_credential_to_its_own_connector(tmp_path: Path):
+    """Per-catalog credentials must each be rewritten to the target connector of
+    the source location they back — not all to the first mapping row's connector
+    (regression: finance+sales credentials both got the gov connector, so their
+    external locations failed UC's managed-identity validation)."""
+    source = tmp_path / "export_staging" / "run1"
+    (source / "ddl").mkdir(parents=True)
+    (source / "inventory").mkdir()
+    # Two credentials, each backing an external location in a distinct account.
+    for cred, connector in (
+        ("fin_cred", "src-fin"),
+        ("sal_cred", "src-sal"),
+    ):
+        (source / "ddl" / f"STORAGE_CREDENTIAL_{cred}.sql").write_text(
+            f"CREATE STORAGE CREDENTIAL `{cred}` WITH AZURE_MANAGED_IDENTITY "
+            f"(ACCESS_CONNECTOR_ID = '/subscriptions/SRC/connectors/{connector}');\n",
+            encoding="utf-8",
+        )
+    (source / "inventory" / "objects.json").write_text(
+        json.dumps(
+            [
+                {
+                    "object_type": "EXTERNAL_LOCATION",
+                    "full_name": "fin_el",
+                    "storage_location": "abfss://data@fin.dfs.core.windows.net",
+                    "storage_credential_name": "fin_cred",
+                },
+                {
+                    "object_type": "EXTERNAL_LOCATION",
+                    "full_name": "sal_el",
+                    "storage_location": "abfss://data@sal.dfs.core.windows.net",
+                    "storage_credential_name": "sal_cred",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    mappings = {
+        "location_mappings": [
+            {
+                "source_location": "abfss://data@fin.dfs.core.windows.net",
+                "target_location": "abfss://data@tgtfin.dfs.core.windows.net",
+                "target_access_connector_id": "/subscriptions/TGT/connectors/tgt-fin",
+            },
+            {
+                "source_location": "abfss://data@sal.dfs.core.windows.net",
+                "target_location": "abfss://data@tgtsal.dfs.core.windows.net",
+                "target_access_connector_id": "/subscriptions/TGT/connectors/tgt-sal",
+            },
+        ]
+    }
+    target = tmp_path / "migrated"
+    MigrateExportService(
+        source_root=str(source),
+        target_root=str(target),
+        mappings=mappings,
+        run_id="run1",
+    ).run(dry_run=False)
+
+    fin = (target / "ddl" / "STORAGE_CREDENTIAL_fin_cred.sql").read_text()
+    sal = (target / "ddl" / "STORAGE_CREDENTIAL_sal_cred.sql").read_text()
+    assert "/subscriptions/TGT/connectors/tgt-fin" in fin
+    assert "/subscriptions/TGT/connectors/tgt-sal" in sal
+    # The finance credential must NOT get the sales connector, and vice versa.
+    assert "tgt-sal" not in fin
+    assert "tgt-fin" not in sal
 
 
 def test_package_import_executes_and_records_failure(tmp_path: Path):
     root = tmp_path / "migrated"
     (root / "ddl").mkdir(parents=True)
     (root / "inventory").mkdir()
-    (root / "ddl" / "SCHEMA_ril_sandbox_ucsync_local__s.sql").write_text(
-        "CREATE SCHEMA IF NOT EXISTS `ril_sandbox_ucsync_local`.`s`;\n",
+    (root / "ddl" / "SCHEMA_demo_sandbox_ucsync_local__s.sql").write_text(
+        "CREATE SCHEMA IF NOT EXISTS `demo_sandbox_ucsync_local`.`s`;\n",
         encoding="utf-8",
     )
-    (root / "ddl" / "TABLE_ril_sandbox_ucsync_local__s__t.sql").write_text(
-        "CREATE TABLE IF NOT EXISTS `ril_sandbox_ucsync_local`.`s`.`t` (id INT);\n",
+    (root / "ddl" / "TABLE_demo_sandbox_ucsync_local__s__t.sql").write_text(
+        "CREATE TABLE IF NOT EXISTS `demo_sandbox_ucsync_local`.`s`.`t` (id INT);\n",
         encoding="utf-8",
     )
     (root / "inventory" / "objects.json").write_text(
@@ -98,15 +191,15 @@ def test_package_import_executes_and_records_failure(tmp_path: Path):
             [
                 {
                     "object_type": "SCHEMA",
-                    "full_name": "ril_sandbox.s",
-                    "source_full_name": "ril_sandbox.s",
-                    "target_full_name": "ril_sandbox_ucsync_local.s",
+                    "full_name": "demo_sandbox.s",
+                    "source_full_name": "demo_sandbox.s",
+                    "target_full_name": "demo_sandbox_ucsync_local.s",
                 },
                 {
                     "object_type": "TABLE",
-                    "full_name": "ril_sandbox.s.t",
-                    "source_full_name": "ril_sandbox.s.t",
-                    "target_full_name": "ril_sandbox_ucsync_local.s.t",
+                    "full_name": "demo_sandbox.s.t",
+                    "source_full_name": "demo_sandbox.s.t",
+                    "target_full_name": "demo_sandbox_ucsync_local.s.t",
                     "definition_hash": "h1",
                     "object_id": "oid-t",
                 },
@@ -118,10 +211,385 @@ def test_package_import_executes_and_records_failure(tmp_path: Path):
     results = PackageImportEngine(str(root), sql, dry_run=False).run()
     by_type = {row.object_type: row for row in results}
     assert by_type["SCHEMA"].status == "SUCCESS"
-    assert by_type["SCHEMA"].source_full_name == "ril_sandbox.s"
-    assert by_type["SCHEMA"].target_full_name == "ril_sandbox_ucsync_local.s"
+    assert by_type["SCHEMA"].source_full_name == "demo_sandbox.s"
+    assert by_type["SCHEMA"].target_full_name == "demo_sandbox_ucsync_local.s"
     assert by_type["TABLE"].status == "FAILURE"
     assert by_type["TABLE"].source_definition_hash == "h1"
+
+
+def test_import_scope_filter_selects_subset(tmp_path: Path):
+    """The import scope filter creates only in-scope objects; a table outside the
+    filter is SKIP_FILTERED, while the catalog/schema it needs still come along."""
+    root = tmp_path / "migrated"
+    (root / "ddl").mkdir(parents=True)
+    (root / "inventory").mkdir()
+    for fn, ddl in (
+        ("CATALOG_c.sql", "CREATE CATALOG IF NOT EXISTS `c`;\n"),
+        ("SCHEMA_c__s.sql", "CREATE SCHEMA IF NOT EXISTS `c`.`s`;\n"),
+        ("TABLE_c__s__keep.sql", "CREATE TABLE IF NOT EXISTS `c`.`s`.`keep` (id INT);\n"),
+        ("TABLE_c__s__drop.sql", "CREATE TABLE IF NOT EXISTS `c`.`s`.`drop` (id INT);\n"),
+        ("FUNCTION_c__s__fn.sql", "CREATE FUNCTION IF NOT EXISTS `c`.`s`.`fn`() RETURNS INT RETURN 1;\n"),
+    ):
+        (root / "ddl" / fn).write_text(ddl, encoding="utf-8")
+    (root / "inventory" / "objects.json").write_text("[]", encoding="utf-8")
+
+    sql = FakeSql()
+    results = PackageImportEngine(
+        str(root), sql, dry_run=False, select_tables=["c.s.keep"],
+    ).run()
+    by_name = {r.target_full_name: r for r in results}
+
+    # The selected table + its parents + non-table securables are created.
+    for name in ("c", "c.s", "c.s.keep", "c.s.fn"):  # function comes along
+        assert by_name[name].action != "SKIP_FILTERED"
+        assert by_name[name].status == "SUCCESS"
+    # The unselected table is skipped, and its CREATE never ran.
+    assert by_name["c.s.drop"].action == "SKIP_FILTERED"
+    assert not any("`drop`" in s for s in sql.statements)
+
+
+def test_rewrite_catalog_references():
+    from uc_sync.package_import import rewrite_catalog_references
+    m = {"src_cat": "tgt_cat"}
+    assert rewrite_catalog_references("CREATE CATALOG src_cat", m) == "CREATE CATALOG tgt_cat"
+    assert rewrite_catalog_references(
+        "CREATE TABLE src_cat.s.t (id INT)", m) == "CREATE TABLE tgt_cat.s.t (id INT)"
+    assert rewrite_catalog_references(
+        "CREATE TABLE `src_cat`.`s`.`t`", m) == "CREATE TABLE `tgt_cat`.`s`.`t`"
+    assert rewrite_catalog_references("USE CATALOG src_cat", m) == "USE CATALOG tgt_cat"
+    # unmapped catalog and substring look-alikes are untouched (word boundary)
+    assert rewrite_catalog_references("CREATE TABLE other.s.t", m) == "CREATE TABLE other.s.t"
+    assert rewrite_catalog_references("src_cat_extra.s.t", m) == "src_cat_extra.s.t"
+
+
+def test_import_applies_catalog_mapping(tmp_path: Path):
+    """A catalog mapping replays the (source-named) bundle under the target
+    catalog: every executed statement is rewritten, and result tracking shows
+    the target name."""
+    root = tmp_path / "migrated"
+    (root / "ddl").mkdir(parents=True)
+    (root / "inventory").mkdir()
+    (root / "ddl" / "CATALOG_src_cat.sql").write_text(
+        "CREATE CATALOG src_cat;\n", encoding="utf-8")
+    (root / "ddl" / "TABLE_src_cat__s__t.sql").write_text(
+        "CREATE TABLE src_cat.s.t (id INT);\n", encoding="utf-8")
+    (root / "inventory" / "objects.json").write_text("[]", encoding="utf-8")
+
+    sql = FakeSql()
+    results = PackageImportEngine(
+        str(root), sql, dry_run=False, catalog_mapping={"src_cat": "tgt_cat"},
+    ).run()
+
+    assert any("CATALOG" in s.upper() and "tgt_cat" in s for s in sql.statements)
+    # The table create carries the fully-qualified 3-level target name.
+    assert any("`tgt_cat`.`s`.`t`" in s for s in sql.statements)
+    # source catalog name never reaches the executor
+    assert not any("src_cat" in s for s in sql.statements)
+    by = {r.object_type: r for r in results}
+    assert by["TABLE"].target_full_name == "tgt_cat.s.t"
+
+
+def test_import_results_produce_audit_and_state_rows():
+    """The 03_Import ops-table glue: every PackageImportResult must convert into a
+    well-formed uc_sync_audit (IMPORT) row and a uc_sync_state upsert row."""
+    from uc_sync.audit import AUDIT_COLUMNS, stage_audit_row
+    from uc_sync.package_import import PackageImportResult
+    from uc_sync.sync_state import STATE_COLUMNS, state_row_from_import
+
+    results = [
+        PackageImportResult(
+            object_type="TABLE",
+            source_full_name="src.s.t",
+            target_full_name="tgt.s.t",
+            full_name="tgt.s.t",
+            action="CREATE",
+            status="SUCCESS",
+            source_definition_hash="h1",
+        ),
+        PackageImportResult(
+            object_type="VIEW",
+            source_full_name="src.s.v",
+            target_full_name="tgt.s.v",
+            full_name="tgt.s.v",
+            action="CREATE",
+            status="FAILURE",
+            error_code="BOOM",
+            message="nope",
+        ),
+    ]
+    for r in results:
+        rd = r.to_dict()
+        audit = stage_audit_row(run_id="r1", stage="IMPORT", result=rd)
+        assert set(audit) == set(AUDIT_COLUMNS)
+        assert audit["operation_mode"] == "IMPORT"
+        assert audit["import_status"] == audit["status"]
+        assert audit["target_full_name"] == r.target_full_name
+
+        state = state_row_from_import(
+            batch_id="b1", run_id="r1", result=rd, ran_by="me", utility_version="9.9",
+        )
+        assert set(state) == set(STATE_COLUMNS)
+        assert state["source_full_name"] == "src.s.t" if r.status == "SUCCESS" else True
+        assert state["last_synced_by"] == "me"
+
+    ok = stage_audit_row(run_id="r1", stage="IMPORT", result=results[0].to_dict())
+    bad = state_row_from_import(
+        batch_id="b1", run_id="r1", result=results[1].to_dict(), ran_by="me",
+        utility_version="9.9",
+    )
+    assert ok["status"] == "SUCCESS"
+    assert bad["last_action"] == "failed"
+
+
+def test_state_last_action_vocabulary_and_message_split():
+    """The unified last_action vocabulary (shared with the report via uc_sync.vocab) +
+    error_message reserved for real failures while informational text (skip reason,
+    etc.) goes to `detail`."""
+    from uc_sync.sync_state import state_row_from_import
+
+    def _row(**result):
+        return state_row_from_import(
+            batch_id="b", run_id="r", result=result, ran_by="me", utility_version="9",
+        )
+
+    # UNCHANGED skip → last_action 'skipped', message → detail, error_message empty.
+    unchanged = _row(
+        object_type="TABLE", source_full_name="s.s.t", action="UNCHANGED",
+        status="UNCHANGED", message="unchanged since last run (incremental: skipped)",
+    )
+    assert unchanged["last_action"] == "skipped"
+    assert unchanged["error_message"] == ""
+    assert "unchanged since last run" in unchanged["detail"]
+
+    # A real failure → error_message carries the error, detail is empty.
+    failed = _row(
+        object_type="EXTERNAL_TABLE", source_full_name="s.s.e", status="FAILURE",
+        error_code="EXTERNAL_CREATE_FAILED", error_message="DELTA property mismatch",
+    )
+    assert failed["last_action"] == "failed"
+    assert "DELTA property mismatch" in failed["error_message"]
+    assert failed["detail"] == ""
+
+    # Pre-existing (adopted) and report-only get their own honest states in the
+    # SAME vocabulary the report renders.
+    assert _row(object_type="TABLE", source_full_name="s.s.a",
+                action="SKIP_EXISTING", status="SKIP_EXISTING")["last_action"] == "adopted"
+    # A report-only asset type is an inventory-only manual step (B4), not skipped_no_object.
+    assert _row(object_type="MONITOR", source_full_name="s.s.m",
+                action="REPORT_ONLY", status="PENDING")["last_action"] == "manual"
+    # BYO / create-disabled is its own Skipped variant (B3), never conflated with adopted.
+    assert _row(object_type="CATALOG", source_full_name="s",
+                action="SKIP_CREATE_DISABLED",
+                status="SUCCESS")["last_action"] == "skipped_create_disabled"
+
+
+def test_ensure_table_backfills_last_action_from_legacy_column():
+    """Live-regression: on an OLD state table (has last_sync_status, no last_action) the
+    upgrade must ADD last_action AND backfill it from last_sync_status. A blank last_action
+    reads as 'clean' and would MASK a prior FAILURE (bug #18) — so the backfill must fire.
+    (The first fix built the ADD-COLUMNS list as 'name type' strings and then tested
+    `'last_action' in missing`, which was always False, so the UPDATE never ran.)"""
+    from uc_sync.sync_state import SyncStateService
+
+    class _Field:
+        def __init__(self, name): self.name = name
+
+    class _Table:
+        # OLD schema: last_sync_status present, last_action + parity cols absent.
+        schema = [_Field(n) for n in (
+            "batch_id", "run_id", "object_type", "source_full_name", "target_full_name",
+            "source_object_id", "source_definition_hash", "ddl_hash", "governance_hash",
+            "grants_json", "source_last_modified_at", "last_sync_status", "last_sync_at",
+            "last_synced_by", "ddl_path", "grants_path", "error_code", "error_message",
+            "detail", "utility_version", "updated_at",
+        )]
+
+    class _FakeSpark:
+        def __init__(self): self.sql_log = []
+        def sql(self, sql): self.sql_log.append(sql); return None
+        def table(self, name): return _Table()
+
+    spark = _FakeSpark()
+    SyncStateService(spark, "ops.ops.uc_sync_state").ensure_table()
+    joined = "\n".join(spark.sql_log)
+    assert "ADD COLUMNS" in joined and "last_action STRING" in joined
+    # The backfill UPDATE actually fires (the regression: it didn't).
+    assert any(
+        s.strip().upper().startswith("UPDATE")
+        and "LAST_ACTION" in s.upper()
+        and "LAST_SYNC_STATUS" in s.upper()
+        for s in spark.sql_log
+    ), spark.sql_log
+
+
+def test_ensure_table_backfill_self_heals_when_column_already_exists():
+    """Second live-regression: the backfill must run whenever the legacy column is
+    present — NOT only on the run that ADDS last_action. A first (buggy) upgrade that
+    added last_action but skipped the backfill left rows stranded NULL forever, because
+    later runs saw the column already present and never backfilled. Self-heal: with
+    last_action ALREADY in the schema (nothing to ADD) but last_sync_status still there,
+    the UPDATE must still fire."""
+    from uc_sync.sync_state import SyncStateService
+
+    class _Field:
+        def __init__(self, name): self.name = name
+
+    class _Table:
+        # last_action ALREADY exists (added by a prior run) AND legacy col still present.
+        schema = [_Field(n) for n in (
+            "batch_id", "run_id", "object_type", "source_full_name", "last_action",
+            "last_sync_status", "ddl_hash", "governance_hash", "grants_json", "detail",
+            "first_seen", "connectivity_mode", "failure_category", "last_error_raw",
+        )]
+
+    class _FakeSpark:
+        def __init__(self): self.sql_log = []
+        def sql(self, sql): self.sql_log.append(sql); return None
+        def table(self, name): return _Table()
+
+    spark = _FakeSpark()
+    SyncStateService(spark, "ops.ops.uc_sync_state").ensure_table()
+    # Nothing to ADD (all columns present), but the self-healing backfill still fires.
+    assert not any("ADD COLUMNS" in s for s in spark.sql_log)
+    assert any(
+        s.strip().upper().startswith("UPDATE") and "LAST_ACTION" in s.upper()
+        for s in spark.sql_log
+    ), spark.sql_log
+
+
+def test_state_parity_columns_populated():
+    """Part D: first_seen / connectivity_mode / failure_category / last_error_raw are
+    written, and the row still matches STATE_COLUMNS exactly."""
+    from uc_sync.sync_state import STATE_COLUMNS, state_row_from_import
+
+    failed = state_row_from_import(
+        batch_id="b", run_id="r", ran_by="me", utility_version="9",
+        connectivity_mode="airgap",
+        result={
+            "object_type": "EXTERNAL_TABLE", "source_full_name": "s.s.e",
+            "status": "FAILURE", "error_code": "EXTERNAL_CREATE_FAILED",
+            "error_message": "x" * 9000,  # long → last_error_raw keeps it all
+        },
+    )
+    assert set(failed) == set(STATE_COLUMNS)
+    assert failed["connectivity_mode"] == "airgap"
+    assert failed["failure_category"] == "STORAGE"       # mapped from error_code
+    assert failed["first_seen"] is not None
+    assert len(failed["last_error_raw"]) == 9000          # untruncated
+    assert len(failed["error_message"]) == 4000           # display copy truncated
+
+    ok = state_row_from_import(
+        batch_id="b", run_id="r", ran_by="me", utility_version="9",
+        result={"object_type": "TABLE", "source_full_name": "s.s.t",
+                "status": "SUCCESS", "action": "CREATE_OR_SKIP"},
+    )
+    assert ok["failure_category"] == ""  # only set for failures
+    assert ok["last_error_raw"] == ""
+
+
+def test_state_upsert_preserves_first_seen_on_update(tmp_path):
+    """first_seen is set once (first insert) and preserved across MERGE updates — the
+    UPDATE SET clause must exclude it."""
+    from uc_sync.sync_state import SyncStateService, _PRESERVE_ON_UPDATE
+    assert "first_seen" in _PRESERVE_ON_UPDATE
+    # The MERGE builds its UPDATE SET from the schema minus the preserved columns; a
+    # light structural check that the service exposes the preserve set (behavioural
+    # preservation is covered live — it needs a real Delta MERGE).
+    assert "first_seen" not in {
+        c for c in SyncStateService.__dict__  # sanity: not an attribute clash
+    }
+
+
+def _owner_package(tmp_path: Path) -> Path:
+    """An external location + a catalog whose managed location is that EL, with
+    an `OWNER TO <source-owner>` grant on the EL (as the export bundle emits)."""
+    root = tmp_path / "migrated"
+    (root / "ddl").mkdir(parents=True)
+    (root / "grants").mkdir(parents=True)
+    (root / "inventory").mkdir(parents=True)
+    (root / "ddl" / "EXTERNAL_LOCATION_ai27_el.sql").write_text(
+        "CREATE EXTERNAL LOCATION `ai27_el` URL 'abfss://data@x/' "
+        "WITH (STORAGE CREDENTIAL `ai27_cred`);\n",
+        encoding="utf-8",
+    )
+    (root / "ddl" / "CATALOG_ai27_cat.sql").write_text(
+        "CREATE CATALOG `ai27_cat` MANAGED LOCATION 'abfss://data@x/';\n",
+        encoding="utf-8",
+    )
+    (root / "grants" / "EXTERNAL_LOCATION_ai27_el.sql").write_text(
+        "ALTER EXTERNAL LOCATION `ai27_el` OWNER TO `source_owner@databricks.com`;\n",
+        encoding="utf-8",
+    )
+    (root / "inventory" / "objects.json").write_text("[]", encoding="utf-8")
+    return root
+
+
+def test_owner_transfer_deferred_until_after_creates():
+    """`ALTER … OWNER TO` must run AFTER the catalog is created, not right after
+    the EL — otherwise the run principal loses CREATE MANAGED STORAGE on the EL
+    before the catalog (the PERMISSION_DENIED cascade we hit)."""
+    from uc_sync.package_import import _is_owner_statement, _owner_statement_target
+
+    # helper-level checks
+    stmt = "ALTER EXTERNAL LOCATION `ai27_el` OWNER TO `o@x`;"
+    assert _is_owner_statement(stmt)
+    assert _owner_statement_target(stmt) == ("EXTERNAL_LOCATION", "ai27_el")
+    assert _owner_statement_target("ALTER TABLE `c`.`s`.`t` OWNER TO `g`") == (
+        "TABLE", "c.s.t")
+    assert not _is_owner_statement("GRANT SELECT ON TABLE c.s.t TO `u`")
+
+
+def test_owner_transfer_runs_last(tmp_path: Path):
+    root = _owner_package(tmp_path)
+    sql = FakeSql()
+    engine = PackageImportEngine(str(root), sql, dry_run=False)
+    results = engine.run()
+
+    owner_idx = next(i for i, s in enumerate(sql.statements) if "OWNER TO" in s.upper())
+    cat_idx = next(i for i, s in enumerate(sql.statements) if "CREATE CATALOG" in s.upper())
+    el_idx = next(
+        i for i, s in enumerate(sql.statements) if "CREATE EXTERNAL LOCATION" in s.upper()
+    )
+    # Ownership transfer happens after BOTH the EL and the catalog were created.
+    assert owner_idx > cat_idx > el_idx
+    assert engine._ownership_transferred == 1
+    assert engine._ownership_skipped == 0
+    by = {r.object_type: r for r in results}
+    assert by["EXTERNAL_LOCATION"].status == "SUCCESS"
+    assert by["CATALOG"].status == "SUCCESS"
+
+
+def test_missing_owner_is_a_warning_not_a_failure(tmp_path: Path):
+    """A source owner absent on the target degrades to a warning; the objects
+    stay SUCCESS and the run does not raise."""
+    root = _owner_package(tmp_path)
+    sql = FakeSql(fail_on="OWNER TO")  # simulate: principal doesn't exist on target
+    engine = PackageImportEngine(str(root), sql, dry_run=False)
+    results = engine.run()  # must not raise
+
+    by = {r.object_type: r for r in results}
+    assert by["EXTERNAL_LOCATION"].status == "SUCCESS"
+    assert by["CATALOG"].status == "SUCCESS"
+    assert engine._ownership_skipped == 1
+    assert engine._ownership_transferred == 0
+    # No object result was marked FAILURE because of the ownership hand-off.
+    assert all(r.status != "FAILURE" for r in results)
+
+
+def test_regular_grants_still_applied_inline(tmp_path: Path):
+    """Only OWNER TO is deferred; ordinary GRANTs still run during the object's
+    own step and are never queued."""
+    root = _package_with(
+        tmp_path,
+        "TABLE_c__s__t.sql",
+        "CREATE TABLE c.s.t (id INT);\n",
+        grants="GRANT SELECT ON TABLE c.s.t TO `analyst`;\n",
+    )
+    sql = FakeSql()
+    engine = PackageImportEngine(str(root), sql, dry_run=False)
+    engine.run()
+    assert any("GRANT SELECT" in s.upper() for s in sql.statements)
+    assert engine._deferred_owner == []
 
 
 def test_split_statements_preserves_dollar_blocks():
@@ -136,6 +604,34 @@ GRANT SELECT ON VIEW v TO `user`;
     assert len(statements) == 2
     assert "$$" in statements[0]
     assert statements[1].startswith("GRANT")
+
+
+def test_split_statements_preserves_comments_bug11():
+    """Bug #11: comments are preserved (not line-dropped), and a ``;`` inside a
+    string / comment does not split a statement."""
+    sql = (
+        "-- header comment\n"
+        "CREATE VIEW v AS SELECT id -- inline comment; not a boundary\n"
+        "FROM t WHERE name = 'a;b';\n"
+        "/* block; comment */\n"
+        "GRANT SELECT ON VIEW v TO `user`;\n"
+    )
+    statements = _split_statements(sql)
+    assert len(statements) == 2
+    # The author's comments survive.
+    assert "-- header comment" in statements[0]
+    assert "-- inline comment; not a boundary" in statements[0]
+    # A ``;`` inside the string literal did not split the statement.
+    assert "'a;b'" in statements[0]
+    assert statements[1].startswith("/* block; comment */") or "GRANT" in statements[1]
+    assert "GRANT SELECT ON VIEW v" in statements[1]
+
+
+def test_split_statements_inline_semicolon_in_string_not_split():
+    sql = "INSERT INTO t VALUES ('x;y'); INSERT INTO t VALUES ('z');"
+    statements = _split_statements(sql)
+    assert len(statements) == 2
+    assert "'x;y'" in statements[0]
 
 
 def test_normalize_create_adds_if_not_exists():
@@ -177,8 +673,10 @@ def test_already_exists_treated_as_success(tmp_path: Path):
     assert result.action == "SKIP_EXISTING"
 
 
-def test_unqualified_create_runs_under_target_context(tmp_path: Path):
-    """SHOW CREATE emits `schema.view`, which must not hit the default catalog."""
+def test_unqualified_create_is_rewritten_to_three_level_name(tmp_path: Path):
+    """SHOW CREATE emits `schema.view`; replay rewrites it to the fully-qualified
+    3-level name and issues NO USE CATALOG/SCHEMA — so it resolves correctly on any
+    (stateless) executor, never against a default catalog."""
     root = _package_with(
         tmp_path,
         "VIEW_tgt__s__v.sql",
@@ -187,9 +685,13 @@ def test_unqualified_create_runs_under_target_context(tmp_path: Path):
     sql = FakeSql()
     result = PackageImportEngine(str(root), sql, dry_run=False).run()[0]
     assert result.status == "SUCCESS"
-    assert sql.statements[0] == "USE CATALOG `tgt`"
-    assert sql.statements[1] == "USE SCHEMA `s`"
-    assert sql.statements[2].startswith("CREATE OR REPLACE VIEW")
+    # No USE context statements at all.
+    assert not any(s.upper().startswith("USE ") for s in sql.statements)
+    # The create carries its own 3-level namespace.
+    create = next(
+        s for s in sql.statements if s.upper().lstrip().startswith("CREATE")
+    )
+    assert create.startswith("CREATE OR REPLACE VIEW `tgt`.`s`.`v`")
 
 
 def test_location_overlap_is_a_failure_not_a_skip(tmp_path: Path):
@@ -267,12 +769,14 @@ def test_grant_not_found_fails_the_object(tmp_path: Path):
         tmp_path,
         "VOLUME_tgt__s__v.sql",
         "CREATE VOLUME tgt.s.v;\n",
-        grants="ALTER VOLUME tgt.s.v OWNER TO `someone`;\n",
+        # A non-owner grant: OWNER TO is now deferred, but ordinary grants still
+        # run inline, so a NOT_FOUND here still proves the object never created.
+        grants="GRANT READ VOLUME ON VOLUME tgt.s.v TO `someone`;\n",
     )
 
     class MissingAfterCreate:
         def execute(self, sql: str):
-            if sql.upper().startswith("ALTER"):
+            if sql.upper().startswith("GRANT"):
                 raise RuntimeError("[UC_VOLUME_NOT_FOUND] Volume does not exist")
 
     result = PackageImportEngine(str(root), MissingAfterCreate(), dry_run=False).run()[0]
@@ -285,13 +789,13 @@ def test_grant_warning_still_allows_success(tmp_path: Path):
         tmp_path,
         "TABLE_tgt__s__t.sql",
         "CREATE TABLE tgt.s.t (id INT);\n",
-        grants="ALTER TABLE tgt.s.t OWNER TO `someone`;\n",
+        grants="GRANT SELECT ON TABLE tgt.s.t TO `someone`;\n",
     )
 
     class PermissionDenied:
         def execute(self, sql: str):
-            if sql.upper().startswith("ALTER"):
-                raise RuntimeError("PERMISSION_DENIED: cannot set owner")
+            if sql.upper().startswith("GRANT"):
+                raise RuntimeError("PERMISSION_DENIED: cannot grant")
 
     result = PackageImportEngine(str(root), PermissionDenied(), dry_run=False).run()[0]
     assert result.status == "SUCCESS"
@@ -339,26 +843,26 @@ def test_add_missing_columns_upgrades_old_table():
 def test_migrate_results_carry_object_identity(tmp_path: Path):
     source = tmp_path / "export_staging" / "run1"
     (source / "ddl").mkdir(parents=True)
-    (source / "ddl" / "EXTERNAL_TABLE_ril_sandbox__s__ext.sql").write_text(
-        "CREATE TABLE `ril_sandbox`.`s`.`ext` (id INT);\n", encoding="utf-8"
+    (source / "ddl" / "EXTERNAL_TABLE_demo_sandbox__s__ext.sql").write_text(
+        "CREATE TABLE `demo_sandbox`.`s`.`ext` (id INT);\n", encoding="utf-8"
     )
     result = MigrateExportService(
         source_root=str(source),
         target_root=str(tmp_path / "migrated"),
-        catalog_mapping={"ril_sandbox": "ril_sandbox_ucsync_local"},
         run_id="run1",
     ).run(dry_run=False)
 
     row = next(r for r in result["results"] if r["artifact"] == "ddl")
     assert row["object_type"] == "EXTERNAL_TABLE"
-    assert row["source_full_name"] == "ril_sandbox.s.ext"
-    assert row["target_full_name"] == "ril_sandbox_ucsync_local.s.ext"
+    assert row["source_full_name"] == "demo_sandbox.s.ext"
+    # Names are never mapped: target identity == source identity.
+    assert row["target_full_name"] == "demo_sandbox.s.ext"
     # Success rows must not put paths into the error column.
     assert row["error_message"] == ""
 
     audit = stage_audit_row(run_id="r1", stage="MIGRATE", result=row)
     assert audit["status"] == "SUCCESS"
-    assert audit["full_name"] == "ril_sandbox.s.ext"
+    assert audit["full_name"] == "demo_sandbox.s.ext"
     assert audit["error_message"] is None
 
 
@@ -399,6 +903,6 @@ def test_stage_audit_and_state_rows():
         ran_by="tester",
         utility_version="0.0.0",
     )
-    assert state["last_sync_status"] == "FAILURE"
+    assert state["last_action"] == "failed"
     assert state["batch_id"] == "b1"
     assert state["last_synced_by"] == "tester"

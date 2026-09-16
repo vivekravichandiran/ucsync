@@ -7,6 +7,7 @@ import re
 from typing import Any, Iterable, Optional
 
 from uc_sync.models import ObjectType, UCObject
+from uc_sync.rewrite import is_replayable_table_property
 
 # Prefer live SHOW CREATE for these types when a SQL executor is available.
 SHOW_CREATE_TABLE_TYPES = {
@@ -265,6 +266,16 @@ def _table_ddl_from_definition(obj: UCObject) -> Optional[str]:
     columns = definition.get("columns") or []
     if not columns:
         return None
+    # Defense-in-depth (plan P2-D): emit inline column MASK / WITH ROW FILTER so a
+    # synthesized rebuild can never silently strip classic protection. With the
+    # warehouse-only capture path (P2-A) this synthesizer is not reached for tables
+    # in normal operation (a SHOW CREATE failure is a hard FAILURE, not a rebuild),
+    # but keeping the clauses here removes the last way protection could be lost.
+    masks_by_col = {
+        str(mask.get("column_name")): mask
+        for mask in obj.column_masks()
+        if mask.get("column_name") and mask.get("function_name")
+    }
     definitions = []
     for column in sorted(columns, key=lambda item: item.get("position", 0)):
         name = quote_identifier(str(column["name"]))
@@ -274,8 +285,19 @@ def _table_ddl_from_definition(obj: UCObject) -> Optional[str]:
         if not data_type:
             return None
         nullable = "" if column.get("nullable", True) else " NOT NULL"
+        mask = masks_by_col.get(str(column["name"]))
+        mask_clause = ""
+        if mask:
+            using = mask.get("using_column_names") or []
+            using_clause = (
+                f" USING COLUMNS ({_column_list(using)})" if using else ""
+            )
+            mask_clause = (
+                f" MASK {quote_full_name(str(mask['function_name']))}{using_clause}"
+            )
         definitions.append(
-            f"{name} {data_type}{nullable}{comment_clause(column.get('comment'))}"
+            f"{name} {data_type}{nullable}"
+            f"{comment_clause(column.get('comment'))}{mask_clause}"
         )
     data_format = str(
         definition.get("data_source_format")
@@ -286,10 +308,14 @@ def _table_ddl_from_definition(obj: UCObject) -> Optional[str]:
     location_clause = (
         f" LOCATION '{escape_literal(location)}'" if location else ""
     )
+    # Bug #7: keep every replayable table property (incl. meaningful delta.* like
+    # dataSkippingStatsColumns / feature.allowColumnDefaults); drop only the
+    # genuinely un-replayable keys (row-tracking materialized column names + min
+    # reader/writer protocol versions).
     portable_properties = {
         key: value
         for key, value in (obj.properties or {}).items()
-        if not str(key).lower().startswith("delta.")
+        if is_replayable_table_property(key)
     }
     properties = ""
     if portable_properties:
@@ -298,12 +324,21 @@ def _table_ddl_from_definition(obj: UCObject) -> Optional[str]:
             for key, value in sorted(portable_properties.items())
         )
         properties = f" TBLPROPERTIES ({pairs})"
+    row_filter_clause = ""
+    row_filter = obj.row_filter()
+    if row_filter and row_filter.get("function_name"):
+        columns_sql = _column_list(row_filter.get("input_column_names") or [])
+        row_filter_clause = (
+            f" WITH ROW FILTER "
+            f"{quote_full_name(str(row_filter['function_name']))} "
+            f"ON ({columns_sql})"
+        )
     target = quote_full_name(obj.full_name)
     return (
         f"CREATE TABLE IF NOT EXISTS {target} "
         f"({', '.join(definitions)}) USING {data_format}"
         f"{location_clause}{comment_clause(definition.get('comment'))}"
-        f"{properties};"
+        f"{properties}{row_filter_clause};"
     )
 
 
@@ -367,10 +402,118 @@ def _function_ddl_from_definition(obj: UCObject) -> Optional[str]:
     if not return_type or not body:
         return None
     target = quote_full_name(obj.full_name)
+    # CREATE OR REPLACE (not IF NOT EXISTS) — see function_ddl_from_information_schema:
+    # IF NOT EXISTS silently no-ops on a re-run, leaving a CHANGED function stale.
     return (
-        f"CREATE FUNCTION IF NOT EXISTS {target}"
+        f"CREATE OR REPLACE FUNCTION {target}"
         f"({', '.join(declarations)}) RETURNS {return_type}"
         f"{comment_clause(definition.get('comment'))} RETURN {body};"
+    )
+
+
+def _rows(sql: Any, statement: str) -> list[list[Any]]:
+    out = sql.execute(statement)
+    return [list(r) if not isinstance(r, str) else [r] for r in (out or [])]
+
+
+def function_ddl_from_information_schema(
+    sql: Any, full_name: str
+) -> Optional[str]:
+    """Reassemble ``CREATE FUNCTION`` from ``information_schema`` over a warehouse.
+
+    Plan P2-A: functions are captured warehouse-only via ``information_schema``
+    (``routines`` = body/return, ``parameters`` = args), NOT via
+    ``DESCRIBE FUNCTION EXTENDED`` (noisy ~130-line session-config dump, fragile to
+    parse) and NOT via the REST catalog API (keeps capture warehouse-only).
+    ``SHOW CREATE FUNCTION`` is unsupported in Databricks SQL. Functions carry no
+    masks/row filters, so this is lossless. Returns ``None`` when the routine is
+    absent or its body/return type cannot be read (caller decides the fallback).
+
+    ``full_name`` is ``catalog.schema.function``. Overloaded UDFs are matched by
+    ``specific_name`` so the parameter list belongs to the same overload.
+    """
+
+    parts = [p for p in str(full_name or "").split(".") if p]
+    if len(parts) != 3:
+        return None
+    catalog, schema, name = parts
+    cat_q = quote_identifier(catalog)
+    routine_sql = (
+        "SELECT specific_name, data_type, full_data_type, routine_definition, "
+        "routine_body, external_language, is_deterministic, comment "
+        f"FROM {cat_q}.information_schema.routines "
+        f"WHERE routine_schema = '{escape_literal(schema)}' "
+        f"AND routine_name = '{escape_literal(name)}' "
+        "ORDER BY specific_name LIMIT 1"
+    )
+    rows = _rows(sql, routine_sql)
+    if not rows:
+        return None
+    row = (list(rows[0]) + [None] * 8)[:8]
+    (specific_name, data_type, full_data_type, routine_definition,
+     routine_body, external_language, _det, comment) = row
+    return_type = str(full_data_type or data_type or "").strip()
+    body = str(routine_definition or "").strip()
+    if not return_type or not body:
+        return None
+    # A table-valued function's return type is a column list; information_schema reports
+    # data_type='TABLE' (full_data_type='(col type, ...)') WITHOUT the TABLE keyword, so
+    # emit RETURNS TABLE(...). A Python (or other external-language) UDF carries its body
+    # in a LANGUAGE <lang> AS $$...$$ block, NOT a SQL `RETURN <expr>` (bug: both were
+    # rebuilt as scalar SQL UDFs → PARSE_SYNTAX_ERROR).
+    is_table_return = (
+        str(data_type or "").strip().upper() in {"TABLE", "TABLE_TYPE"}
+        or return_type.startswith("(")
+    )
+    returns_clause = f"TABLE {return_type}" if is_table_return else return_type
+    language = str(external_language or "").strip()
+    if str(routine_body or "").strip().upper() == "EXTERNAL" and language:
+        body_clause = f" LANGUAGE {language.upper()} AS $$\n{body}\n$$"
+    else:
+        body_clause = f" RETURN {body}"
+
+    declarations: list[str] = []
+    if specific_name:
+        param_sql = (
+            "SELECT parameter_name, full_data_type, data_type, parameter_mode, "
+            "ordinal_position "
+            f"FROM {cat_q}.information_schema.parameters "
+            f"WHERE specific_schema = '{escape_literal(schema)}' "
+            f"AND specific_name = '{escape_literal(str(specific_name))}' "
+            "ORDER BY ordinal_position"
+        )
+        try:
+            param_rows = _rows(sql, param_sql)
+        except Exception:  # noqa: BLE001 - parameters read is best-effort
+            param_rows = []
+        for prow in param_rows:
+            prow = (list(prow) + [None] * 5)[:5]
+            pname, pfull, pdata, pmode, _ord = prow
+            # The RETURN row (and any OUT parameter) is not an input argument.
+            if str(pmode or "IN").upper() != "IN":
+                continue
+            if pname is None or str(pname) == "":
+                continue
+            ptype = str(pfull or pdata or "").strip()
+            if not ptype:
+                continue
+            raw = str(pname)
+            pident = (
+                raw
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", raw)
+                else quote_identifier(raw)
+            )
+            declarations.append(f"{pident} {ptype}")
+
+    target = quote_full_name(full_name)
+    # CREATE OR REPLACE (not IF NOT EXISTS): functions carry no data, so replace is
+    # safe + idempotent. IF NOT EXISTS would SILENTLY NO-OP on a re-run, leaving a
+    # CHANGED/REPLACED function body stale on target even though the delta plan
+    # correctly marked it REPLACED (bug: incremental function update lost).
+    return (
+        f"CREATE OR REPLACE FUNCTION {target}"
+        f"({', '.join(declarations)}) RETURNS {returns_clause}"
+        f"{comment_clause(comment)}{body_clause};"
     )
 
 
