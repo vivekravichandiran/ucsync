@@ -150,7 +150,7 @@ class ExportService:
         self.fs = fs
         self.root = Path(volume_root.rstrip("/")) / f"run_{run_id}"
         default_workspace = (
-            "/Workspace/Users/vivek.ravichandiran@databricks.com/"
+            "/Workspace/Shared/"
             f"UCSync/export_staging/{run_id}"
         )
         self.workspace_root = Path(workspace_root or default_workspace)

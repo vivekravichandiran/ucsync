@@ -26,8 +26,8 @@ class FakeClient:
 def _cfg(**widgets):
     return from_sources(
         {
-            "catalogs": "ril_sandbox",
-            "catalog_mapping_json": '{"ril_sandbox":"target"}',
+            "catalogs": "demo_sandbox",
+            "catalog_mapping_json": '{"demo_sandbox":"target"}',
             **widgets,
         },
         {},
@@ -37,20 +37,20 @@ def _cfg(**widgets):
 def test_bare_schema_name_selects_objects():
     cfg = _cfg(schemas="edge")
     schema = UCObject(
-        ObjectType.SCHEMA, "edge", "ril_sandbox.edge", catalog="ril_sandbox"
+        ObjectType.SCHEMA, "edge", "demo_sandbox.edge", catalog="demo_sandbox"
     )
     table = UCObject(
         ObjectType.TABLE,
         "t1",
-        "ril_sandbox.edge.t1",
-        catalog="ril_sandbox",
+        "demo_sandbox.edge.t1",
+        catalog="demo_sandbox",
         schema="edge",
     )
     other = UCObject(
         ObjectType.TABLE,
         "t2",
-        "ril_sandbox.other.t2",
-        catalog="ril_sandbox",
+        "demo_sandbox.other.t2",
+        catalog="demo_sandbox",
         schema="other",
     )
 
@@ -60,35 +60,35 @@ def test_bare_schema_name_selects_objects():
 
 
 def test_qualified_schema_name_still_selects_objects():
-    cfg = _cfg(schemas="ril_sandbox.edge")
+    cfg = _cfg(schemas="demo_sandbox.edge")
     table = UCObject(
         ObjectType.TABLE,
         "t1",
-        "ril_sandbox.edge.t1",
-        catalog="ril_sandbox",
+        "demo_sandbox.edge.t1",
+        catalog="demo_sandbox",
         schema="edge",
     )
 
     assert allowed(table, cfg)
-    assert schema_selected(["ril_sandbox.edge"], "ril_sandbox", "edge")
-    assert not schema_selected(["ril_sandbox.edge"], "other", "edge")
+    assert schema_selected(["demo_sandbox.edge"], "demo_sandbox", "edge")
+    assert not schema_selected(["demo_sandbox.edge"], "other", "edge")
 
 
 def test_streaming_table_is_classified_from_table_type():
     client = FakeClient(
         {
-            "catalogs": [{"name": "ril_sandbox"}],
-            "schemas": [{"name": "edge", "catalog_name": "ril_sandbox"}],
+            "catalogs": [{"name": "demo_sandbox"}],
+            "schemas": [{"name": "edge", "catalog_name": "demo_sandbox"}],
             "tables": [
                 {
                     "name": "st1",
-                    "full_name": "ril_sandbox.edge.st1",
+                    "full_name": "demo_sandbox.edge.st1",
                     "table_type": "STREAMING_TABLE",
                     "columns": [],
                 },
                 {
                     "name": "mt1",
-                    "full_name": "ril_sandbox.edge.mt1",
+                    "full_name": "demo_sandbox.edge.mt1",
                     "table_type": "MANAGED",
                     "columns": [],
                 },

@@ -14,12 +14,12 @@ resources:
               update_if_exists: "true"
               job_name: UC-Sync
               notebook_path: /Repos/UCSync/notebooks/UC_Sync_Main
-              catalog_mapping_json: '{"ril_sandbox":"ril_sandbox_copy"}'
+              catalog_mapping_json: '{"demo_sandbox":"demo_sandbox_copy"}'
               catalog_mapping_path: ""
-              location_mapping_csv_path: /Volumes/classic_stable_target_vk/uc_sync_ops/uc_exports/config/location-mapping.csv
-              export_volume_path: /Volumes/classic_stable_target_vk/uc_sync_ops/uc_exports
-              report_volume_path: /Volumes/classic_stable_target_vk/uc_sync_ops/uc_exports
-              audit_table: classic_stable_target_vk.uc_sync_ops.uc_sync_audit
+              location_mapping_csv_path: /Volumes/uc_sync_ops/ops/uc_exports/config/location-mapping.csv
+              export_volume_path: /Volumes/uc_sync_ops/ops/uc_exports
+              report_volume_path: /Volumes/uc_sync_ops/ops/uc_exports
+              audit_table: uc_sync_ops.ops.uc_sync_audit
 
     uc_sync_local_create_jobs:
       name: UC-Sync-Local-Create-Jobs
@@ -29,15 +29,15 @@ resources:
             notebook_path: ../notebooks/UC_Sync_Local_Create_Jobs
             base_parameters:
               stages: ALL
-              catalog_mapping_json: '{"ril_sandbox":"ril_sandbox_ucsync_local"}'
-              location_mapping_csv_path: /Volumes/classic_stable_target_vk/uc_sync_ops/uc_exports/config/location-mapping.csv
-              catalogs: ril_sandbox
-              schemas: ril_sandbox.ucsync_local_01
+              catalog_mapping_json: '{"demo_sandbox":"demo_sandbox_ucsync_local"}'
+              location_mapping_csv_path: /Volumes/uc_sync_ops/ops/uc_exports/config/location-mapping.csv
+              catalogs: demo_sandbox
+              schemas: demo_sandbox.ucsync_local_01
               dry_run: "false"
               run_now: "false"
               job_name_prefix: UC-Sync-Local
               existing_cluster_id: ""
-              notebook_path: /Workspace/Users/vivek.ravichandiran@databricks.com/UCSync/notebooks/UC_Sync_Main
+              notebook_path: /Workspace/Shared/UCSync/notebooks/UC_Sync_Main
 
     uc_sync_job:
       name: UC-Sync
@@ -48,9 +48,9 @@ resources:
             base_parameters:
               execution_mode: LOCAL
               mode: SYNC
-              catalog_mapping_json: '{"ril_sandbox":"ril_sandbox_copy"}'
+              catalog_mapping_json: '{"demo_sandbox":"demo_sandbox_copy"}'
               catalog_mapping_path: ""
-              location_mapping_csv_path: /Volumes/classic_stable_target_vk/uc_sync_ops/uc_exports/config/location-mapping.csv
+              location_mapping_csv_path: /Volumes/uc_sync_ops/ops/uc_exports/config/location-mapping.csv
               catalogs: ""
               schemas: ""
               components: ALL
@@ -60,6 +60,6 @@ resources:
               include_regex: ""
               exclude_regex: ".*_TEMP$"
               dry_run: "true"
-              export_volume_path: /Volumes/classic_stable_target_vk/uc_sync_ops/uc_exports
-              report_volume_path: /Volumes/classic_stable_target_vk/uc_sync_ops/uc_exports
-              audit_table: classic_stable_target_vk.uc_sync_ops.uc_sync_audit
+              export_volume_path: /Volumes/uc_sync_ops/ops/uc_exports
+              report_volume_path: /Volumes/uc_sync_ops/ops/uc_exports
+              audit_table: uc_sync_ops.ops.uc_sync_audit

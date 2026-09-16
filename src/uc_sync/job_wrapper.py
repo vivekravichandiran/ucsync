@@ -344,7 +344,7 @@ def create_uc_sync_job(
             params=UCSyncJobParams(
                 execution_mode="LOCAL",
                 mode="SYNC",
-                catalog_mapping_json='{"ril_sandbox":"ril_sandbox_copy"}',
+                catalog_mapping_json='{"demo_sandbox":"demo_sandbox_copy"}',
                 dry_run="true",
             ),
             run_now=True,
@@ -510,14 +510,14 @@ def create_local_stage_jobs(
 
         create_local_stage_jobs(
             stages="ALL",
-            catalog_mapping_json='{"ril_sandbox":"ril_sandbox_ucsync_local"}',
+            catalog_mapping_json='{"demo_sandbox":"demo_sandbox_ucsync_local"}',
             location_mapping_csv_path="/Volumes/.../config/location-mapping.csv",
-            catalogs="ril_sandbox",
-            schemas="ril_sandbox.ucsync_local_01",
-            ops_catalog="catalog_2_pih5aa",
-            ops_schema="wsmig_operations",
-            output_volume_path="/Volumes/catalog_2_pih5aa/wsmig_operations/uc_exports",
-            existing_cluster_id="0813-072811-phmehy1u",
+            catalogs="demo_sandbox",
+            schemas="demo_sandbox.ucsync_local_01",
+            ops_catalog="uc_sync_ops",
+            ops_schema="ops",
+            output_volume_path="/Volumes/uc_sync_ops/ops/uc_exports",
+            existing_cluster_id="0000-000000-xxxxxxxx",
             dry_run="false",
             run_now=False,
         )

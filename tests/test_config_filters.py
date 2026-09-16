@@ -9,13 +9,13 @@ from uc_sync.models import ObjectType, UCObject
 
 def test_widgets_override_yaml_catalogs():
     cfg = from_sources(
-        {"catalogs": "ril_sandbox", "mode": "EXPORT", "dry_run": "true"},
+        {"catalogs": "demo_sandbox", "mode": "EXPORT", "dry_run": "true"},
         {
-            "selection": {"catalogs": ["ril_raw", "ril_curated"]},
+            "selection": {"catalogs": ["demo_raw", "demo_curated"]},
             "runtime": {"dry_run": False, "execution_mode": "CROSS_WORKSPACE"},
         },
     )
-    assert cfg.catalogs == ["ril_sandbox"]
+    assert cfg.catalogs == ["demo_sandbox"]
     assert cfg.mode == "EXPORT"
     assert cfg.dry_run is True
 
@@ -23,8 +23,8 @@ def test_widgets_override_yaml_catalogs():
 def test_filter_skips_information_schema_and_system():
     cfg = from_sources(
         {
-            "catalogs": "ril_sandbox",
-            "catalog_mapping_json": '{"ril_sandbox":"ril_sandbox_copy"}',
+            "catalogs": "demo_sandbox",
+            "catalog_mapping_json": '{"demo_sandbox":"demo_sandbox_copy"}',
         },
         {},
     )
@@ -32,15 +32,15 @@ def test_filter_skips_information_schema_and_system():
     info = UCObject(
         ObjectType.SCHEMA,
         "information_schema",
-        "ril_sandbox.information_schema",
-        catalog="ril_sandbox",
+        "demo_sandbox.information_schema",
+        catalog="demo_sandbox",
         schema="information_schema",
     )
     ok = UCObject(
         ObjectType.TABLE,
         "t1",
-        "ril_sandbox.edge.t1",
-        catalog="ril_sandbox",
+        "demo_sandbox.edge.t1",
+        catalog="demo_sandbox",
         schema="edge",
     )
     assert allowed(sys_cat, cfg) is False

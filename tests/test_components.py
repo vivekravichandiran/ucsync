@@ -58,29 +58,29 @@ def test_filter_honors_component_include_list():
     cfg = from_sources(
         {
             "execution_mode": "LOCAL",
-            "catalog_mapping_json": '{"ril_sandbox":"ril_sandbox_copy"}',
+            "catalog_mapping_json": '{"demo_sandbox":"demo_sandbox_copy"}',
             "components": "tables",
         }
     )
     table = UCObject(
         ObjectType.TABLE,
         "t1",
-        "ril_sandbox.edge.t1",
-        catalog="ril_sandbox",
+        "demo_sandbox.edge.t1",
+        catalog="demo_sandbox",
         schema="edge",
     )
     view = UCObject(
         ObjectType.VIEW,
         "v1",
-        "ril_sandbox.edge.v1",
-        catalog="ril_sandbox",
+        "demo_sandbox.edge.v1",
+        catalog="demo_sandbox",
         schema="edge",
     )
     schema = UCObject(
         ObjectType.SCHEMA,
         "edge",
-        "ril_sandbox.edge",
-        catalog="ril_sandbox",
+        "demo_sandbox.edge",
+        catalog="demo_sandbox",
         schema="edge",
     )
     assert allowed(table, cfg) is True

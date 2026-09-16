@@ -26,7 +26,7 @@ SOURCE_ROOT = (
     "7405609958717235/ucsync/ucsync_local/tables"
 )
 STAMP = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-TARGET_CATALOG = "ril_sandbox_ucsync_local"
+TARGET_CATALOG = "demo_sandbox_ucsync_local"
 TARGET_EXTERNAL_LOCATION = "classic_stable_target_vk"
 TARGET_EXTERNAL_LOCATION_URL = (
     "abfss://unity-catalog-storage@dbstorageisbf2ky3sgcdc.dfs.core.windows.net/"
@@ -94,11 +94,11 @@ def run_job(mode):
         "mode": mode,
         "dry_run": "false" if mode == "IMPORT" else "true",
         "catalog_mapping_json": json.dumps(
-            {"ril_sandbox": TARGET_CATALOG}
+            {"demo_sandbox": TARGET_CATALOG}
         ),
         "location_mapping_csv_path": CSV_PATH,
-        "catalogs": "ril_sandbox",
-        "schemas": "ril_sandbox.ucsync_local_01",
+        "catalogs": "demo_sandbox",
+        "schemas": "demo_sandbox.ucsync_local_01",
         "components": "external_tables",
         "include_parents": "true",
         "exclude_object_types": "",

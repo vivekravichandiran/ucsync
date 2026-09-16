@@ -194,7 +194,7 @@ def test_create_uc_sync_job_creates_and_runs():
             execution_mode="LOCAL",
             mode="INVENTORY",
             catalog_mapping_json=json.dumps(
-                {"ril_sandbox": "ril_sandbox_copy"}
+                {"demo_sandbox": "demo_sandbox_copy"}
             ),
             ops_catalog="ops_cat",
             ops_schema="ops_sch",
@@ -314,10 +314,10 @@ def test_create_local_stage_jobs_creates_three_for_all():
     client = _FakeClient()
     results = create_local_stage_jobs(
         stages="ALL",
-        catalog_mapping_json='{"ril_sandbox":"ril_sandbox_ucsync_local"}',
+        catalog_mapping_json='{"demo_sandbox":"demo_sandbox_ucsync_local"}',
         location_mapping_csv_path="/Volumes/x/config/location-mapping.csv",
-        catalogs="ril_sandbox",
-        schemas="ril_sandbox.ucsync_local_01",
+        catalogs="demo_sandbox",
+        schemas="demo_sandbox.ucsync_local_01",
         ops_catalog="ops_cat",
         ops_schema="ops_sch",
         output_volume_path="/Volumes/ops_cat/ops_sch/out",
@@ -346,5 +346,5 @@ def test_create_local_stage_jobs_creates_three_for_all():
     )
     assert (
         results[0].parameters["catalog_mapping_json"]
-        == '{"ril_sandbox":"ril_sandbox_ucsync_local"}'
+        == '{"demo_sandbox":"demo_sandbox_ucsync_local"}'
     )

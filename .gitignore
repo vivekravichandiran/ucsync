@@ -12,6 +12,14 @@ venv/
 # OS
 .DS_Store
 
+# Agent / assistant + IDE local state — never commit
+.claude/
+.isaac/
+.idea/
+.vscode/
+.vibe/
+*.iml
+
 # Local secrets / credentials — never commit
 .databrickscfg
 *.pem

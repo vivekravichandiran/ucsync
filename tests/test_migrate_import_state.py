@@ -44,12 +44,12 @@ def test_rewrite_text_paths_only_leaves_identifiers_untouched():
     """Names are never rewritten; only storage URLs are mapped to target paths."""
     resolver = MappingResolver(_resolver_mappings())
     text = (
-        "CREATE TABLE `ril_sandbox`.`s`.`t1` "
+        "CREATE TABLE `demo_sandbox`.`s`.`t1` "
         "LOCATION 'abfss://src@acct.dfs.core.windows.net/root/t1';"
     )
     out = rewrite_text(text, location_resolver=resolver)
     # Identifiers preserved verbatim (no catalog renaming).
-    assert "`ril_sandbox`.`s`.`t1`" in out
+    assert "`demo_sandbox`.`s`.`t1`" in out
     # Storage URL rewritten to the mapped target path.
     assert "abfss://tgt@acct.dfs.core.windows.net/migrated/t1" in out
     # With no resolver, text is returned unchanged.
@@ -60,8 +60,8 @@ def test_migrate_rewrites_paths_and_preserves_names(tmp_path: Path):
     source = tmp_path / "export_staging" / "run1"
     (source / "ddl").mkdir(parents=True)
     (source / "inventory").mkdir()
-    (source / "ddl" / "EXTERNAL_TABLE_ril_sandbox__s__t.sql").write_text(
-        "CREATE TABLE IF NOT EXISTS `ril_sandbox`.`s`.`t` (id INT) "
+    (source / "ddl" / "EXTERNAL_TABLE_demo_sandbox__s__t.sql").write_text(
+        "CREATE TABLE IF NOT EXISTS `demo_sandbox`.`s`.`t` (id INT) "
         "LOCATION 'abfss://src@acct.dfs.core.windows.net/root/t';\n",
         encoding="utf-8",
     )
@@ -70,8 +70,8 @@ def test_migrate_rewrites_paths_and_preserves_names(tmp_path: Path):
             [
                 {
                     "object_type": "EXTERNAL_TABLE",
-                    "full_name": "ril_sandbox.s.t",
-                    "catalog": "ril_sandbox",
+                    "full_name": "demo_sandbox.s.t",
+                    "catalog": "demo_sandbox",
                     "storage_location": "abfss://src@acct.dfs.core.windows.net/root/t",
                     "definition_hash": "abc",
                     "object_id": "oid-1",
@@ -90,17 +90,17 @@ def test_migrate_rewrites_paths_and_preserves_names(tmp_path: Path):
 
     assert result["migrated"] >= 2
     # File name is NOT renamed — catalog names are never mapped.
-    migrated_ddl = target / "ddl" / "EXTERNAL_TABLE_ril_sandbox__s__t.sql"
+    migrated_ddl = target / "ddl" / "EXTERNAL_TABLE_demo_sandbox__s__t.sql"
     assert migrated_ddl.exists()
     ddl_text = migrated_ddl.read_text(encoding="utf-8")
-    assert "`ril_sandbox`.`s`.`t`" in ddl_text
+    assert "`demo_sandbox`.`s`.`t`" in ddl_text
     # External-table storage path IS rewritten to the target ADLS location.
     assert "abfss://tgt@acct.dfs.core.windows.net/migrated/t" in ddl_text
     inv = json.loads((target / "inventory" / "objects.json").read_text(encoding="utf-8"))
-    assert inv[0]["full_name"] == "ril_sandbox.s.t"
-    assert inv[0]["source_full_name"] == "ril_sandbox.s.t"
-    assert inv[0]["target_full_name"] == "ril_sandbox.s.t"
-    assert inv[0]["catalog"] == "ril_sandbox"
+    assert inv[0]["full_name"] == "demo_sandbox.s.t"
+    assert inv[0]["source_full_name"] == "demo_sandbox.s.t"
+    assert inv[0]["target_full_name"] == "demo_sandbox.s.t"
+    assert inv[0]["catalog"] == "demo_sandbox"
     assert inv[0]["storage_location"] == (
         "abfss://tgt@acct.dfs.core.windows.net/migrated/t"
     )
@@ -178,12 +178,12 @@ def test_package_import_executes_and_records_failure(tmp_path: Path):
     root = tmp_path / "migrated"
     (root / "ddl").mkdir(parents=True)
     (root / "inventory").mkdir()
-    (root / "ddl" / "SCHEMA_ril_sandbox_ucsync_local__s.sql").write_text(
-        "CREATE SCHEMA IF NOT EXISTS `ril_sandbox_ucsync_local`.`s`;\n",
+    (root / "ddl" / "SCHEMA_demo_sandbox_ucsync_local__s.sql").write_text(
+        "CREATE SCHEMA IF NOT EXISTS `demo_sandbox_ucsync_local`.`s`;\n",
         encoding="utf-8",
     )
-    (root / "ddl" / "TABLE_ril_sandbox_ucsync_local__s__t.sql").write_text(
-        "CREATE TABLE IF NOT EXISTS `ril_sandbox_ucsync_local`.`s`.`t` (id INT);\n",
+    (root / "ddl" / "TABLE_demo_sandbox_ucsync_local__s__t.sql").write_text(
+        "CREATE TABLE IF NOT EXISTS `demo_sandbox_ucsync_local`.`s`.`t` (id INT);\n",
         encoding="utf-8",
     )
     (root / "inventory" / "objects.json").write_text(
@@ -191,15 +191,15 @@ def test_package_import_executes_and_records_failure(tmp_path: Path):
             [
                 {
                     "object_type": "SCHEMA",
-                    "full_name": "ril_sandbox.s",
-                    "source_full_name": "ril_sandbox.s",
-                    "target_full_name": "ril_sandbox_ucsync_local.s",
+                    "full_name": "demo_sandbox.s",
+                    "source_full_name": "demo_sandbox.s",
+                    "target_full_name": "demo_sandbox_ucsync_local.s",
                 },
                 {
                     "object_type": "TABLE",
-                    "full_name": "ril_sandbox.s.t",
-                    "source_full_name": "ril_sandbox.s.t",
-                    "target_full_name": "ril_sandbox_ucsync_local.s.t",
+                    "full_name": "demo_sandbox.s.t",
+                    "source_full_name": "demo_sandbox.s.t",
+                    "target_full_name": "demo_sandbox_ucsync_local.s.t",
                     "definition_hash": "h1",
                     "object_id": "oid-t",
                 },
@@ -211,8 +211,8 @@ def test_package_import_executes_and_records_failure(tmp_path: Path):
     results = PackageImportEngine(str(root), sql, dry_run=False).run()
     by_type = {row.object_type: row for row in results}
     assert by_type["SCHEMA"].status == "SUCCESS"
-    assert by_type["SCHEMA"].source_full_name == "ril_sandbox.s"
-    assert by_type["SCHEMA"].target_full_name == "ril_sandbox_ucsync_local.s"
+    assert by_type["SCHEMA"].source_full_name == "demo_sandbox.s"
+    assert by_type["SCHEMA"].target_full_name == "demo_sandbox_ucsync_local.s"
     assert by_type["TABLE"].status == "FAILURE"
     assert by_type["TABLE"].source_definition_hash == "h1"
 
@@ -843,8 +843,8 @@ def test_add_missing_columns_upgrades_old_table():
 def test_migrate_results_carry_object_identity(tmp_path: Path):
     source = tmp_path / "export_staging" / "run1"
     (source / "ddl").mkdir(parents=True)
-    (source / "ddl" / "EXTERNAL_TABLE_ril_sandbox__s__ext.sql").write_text(
-        "CREATE TABLE `ril_sandbox`.`s`.`ext` (id INT);\n", encoding="utf-8"
+    (source / "ddl" / "EXTERNAL_TABLE_demo_sandbox__s__ext.sql").write_text(
+        "CREATE TABLE `demo_sandbox`.`s`.`ext` (id INT);\n", encoding="utf-8"
     )
     result = MigrateExportService(
         source_root=str(source),
@@ -854,15 +854,15 @@ def test_migrate_results_carry_object_identity(tmp_path: Path):
 
     row = next(r for r in result["results"] if r["artifact"] == "ddl")
     assert row["object_type"] == "EXTERNAL_TABLE"
-    assert row["source_full_name"] == "ril_sandbox.s.ext"
+    assert row["source_full_name"] == "demo_sandbox.s.ext"
     # Names are never mapped: target identity == source identity.
-    assert row["target_full_name"] == "ril_sandbox.s.ext"
+    assert row["target_full_name"] == "demo_sandbox.s.ext"
     # Success rows must not put paths into the error column.
     assert row["error_message"] == ""
 
     audit = stage_audit_row(run_id="r1", stage="MIGRATE", result=row)
     assert audit["status"] == "SUCCESS"
-    assert audit["full_name"] == "ril_sandbox.s.ext"
+    assert audit["full_name"] == "demo_sandbox.s.ext"
     assert audit["error_message"] is None
 
 
