@@ -132,6 +132,49 @@ def test_failclosed_correct_under_parallel_creates(tmp_path):
     assert tables1 == tables4
 
 
+def test_intra_rank_fk_dependency_retry(tmp_path):
+    """BUG-QA1: a same-rank table with a FK to a sibling can be attempted before the
+    sibling commits under parallelism → CREATE fails TABLE_OR_VIEW_NOT_FOUND. The
+    within-level failed-set retry pass must re-run it (sibling now exists) → SUCCESS."""
+    root = tmp_path / "migrated"
+    _write(root, "ddl/CATALOG_c.sql", "CREATE CATALOG `c`;\n")
+    _write(root, "ddl/SCHEMA_c__s.sql", "CREATE SCHEMA `c`.`s`;\n")
+    # `employees` (sorts after) has a FK to `departments`; both same rank (TABLE).
+    _write(root, "ddl/TABLE_c__s__departments.sql",
+           "CREATE TABLE `c`.`s`.`departments` (dept_id INT NOT NULL, "
+           "CONSTRAINT dept_pk PRIMARY KEY(dept_id));\n")
+    _write(root, "ddl/TABLE_c__s__employees.sql",
+           "CREATE TABLE `c`.`s`.`employees` (id INT, dept_id INT, "
+           "CONSTRAINT emp_fk FOREIGN KEY(dept_id) REFERENCES `c`.`s`.`departments`(dept_id));\n")
+    _write(root, "inventory/objects.json", "[]")
+
+    class FkSql(GovSql):
+        """Models the intra-rank FK race deterministically: `employees`' FIRST create
+        attempt fails as if `departments` were not yet committed (the parallel pass);
+        the retry pass re-runs it and it succeeds. Timing-independent."""
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.emp_attempts = 0
+
+        def execute(self, sql: str):
+            u = sql.strip().upper()
+            if u.startswith("CREATE TABLE") and "EMPLOYEES" in u:
+                self.emp_attempts += 1
+                if self.emp_attempts == 1:
+                    raise RuntimeError(
+                        "[TABLE_OR_VIEW_NOT_FOUND] departments cannot be found")
+            return super().execute(sql)
+
+    sql = FkSql()
+    results = PackageImportEngine(str(root), sql, dry_run=False, parallel_threads=4).run()
+    by = {r.target_full_name: r for r in results if r.object_type == "TABLE"}
+    # departments succeeds; employees fails pass 1 then SUCCEEDS on the retry pass.
+    assert by["c.s.departments"].status == "SUCCESS"
+    assert by["c.s.employees"].status == "SUCCESS"
+    assert sql.emp_attempts == 2  # proves the retry pass re-ran it
+    assert "c.s.employees" in sql.tables
+
+
 def test_parallel_threads_default_is_one():
     # The engine default is sequential (the kill-switch).
     e = PackageImportEngine.__init__

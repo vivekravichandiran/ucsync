@@ -1143,7 +1143,16 @@ class PackageImportEngine:
         The files are grouped by ``_type_rank`` and each rank-group is processed in
         order (a **barrier** between levels preserves dependency order — functions before
         tables, so a table's inline mask/row-filter clause resolves). Within a group,
-        same-rank objects are assumed mutually independent and run across a bounded pool.
+        same-rank objects run across a bounded pool.
+
+        Intra-rank dependency retry (BUG-QA1): same-rank objects are USUALLY independent,
+        but not always — a table may carry a FOREIGN KEY to a sibling table, or a function
+        may call a sibling function. Under parallelism a dependent can be attempted before
+        its sibling commits and fail (``TABLE_OR_VIEW_NOT_FOUND`` / ``ROUTINE_NOT_FOUND``).
+        So after the parallel pass we re-run the still-FAILED objects **sequentially**, up
+        to a few passes; each pass resolves one dependency layer, and we stop as soon as a
+        pass fixes nothing (the remaining failures are real). Sequential runs (or single
+        objects) skip the retry — there is no ordering hazard.
 
         Determinism: files are name-sorted within a rank and ``import_order`` is assigned
         sequentially from ``order_start`` in that order, so the result order + ordinals
@@ -1160,27 +1169,66 @@ class PackageImportEngine:
             ordered, key=lambda p: _type_rank(_parse_sql_filename(p.name)[0])
         ):
             group_paths = list(group)  # already name-sorted within the rank
-            if self.parallel_threads > 1 and len(group_paths) > 1 and not self.dry_run:
-                workers = min(self.parallel_threads, len(group_paths))
-                with ThreadPoolExecutor(max_workers=workers) as pool:
-                    # order=0 placeholder; import_order is assigned deterministically
-                    # below. pool.map preserves input (name) order.
-                    group_results = list(pool.map(
-                        lambda p: self._import_ddl_file(
-                            p, 0, inventory, by_target, executor=executor
-                        ),
-                        group_paths,
-                    ))
-            else:
-                group_results = [
-                    self._import_ddl_file(p, 0, inventory, by_target, executor=executor)
-                    for p in group_paths
-                ]
-            for result in group_results:
+            results = self._run_ddl_group(group_paths, inventory, by_target, executor)
+            # Retry the intra-rank dependency failures (only meaningful after a parallel
+            # pass; a sequential first pass already respected name order).
+            parallel = self.parallel_threads > 1 and not self.dry_run
+            if parallel:
+                for _attempt in range(3):
+                    failed = [p for p in group_paths if results[p].status == "FAILURE"]
+                    if not failed:
+                        break
+                    # Clear the stale "absent" marks so a now-succeeding retry is not
+                    # skipped by the governance phases, then re-run sequentially.
+                    for p in failed:
+                        self._absent_objects.discard(results[p].target_full_name)
+                    retried = self._run_ddl_group(
+                        failed, inventory, by_target, executor, force_sequential=True
+                    )
+                    results.update(retried)
+                    still_failed = sum(
+                        1 for p in failed if results[p].status == "FAILURE"
+                    )
+                    if still_failed >= len(failed):
+                        break  # no progress → remaining failures are real
+            for p in group_paths:  # deterministic (name-sorted) order + ordinals
                 order += 1
-                result.import_order = order
-                out.append(result)
+                results[p].import_order = order
+                out.append(results[p])
         return out
+
+    def _run_ddl_group(
+        self,
+        paths: list[Path],
+        inventory: dict[str, dict[str, Any]],
+        by_target: dict[str, dict[str, Any]],
+        executor: Any,
+        *,
+        force_sequential: bool = False,
+    ) -> dict[Path, "PackageImportResult"]:
+        """Create each file's object, returning ``{path: result}``. Runs in a bounded
+        pool when parallelism is on (unless ``force_sequential``, used for retry passes).
+        ``import_order`` is a placeholder (0) here — the caller assigns it deterministically."""
+        if (
+            not force_sequential
+            and self.parallel_threads > 1
+            and len(paths) > 1
+            and not self.dry_run
+        ):
+            workers = min(self.parallel_threads, len(paths))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                res = list(pool.map(
+                    lambda p: self._import_ddl_file(
+                        p, 0, inventory, by_target, executor=executor
+                    ),
+                    paths,
+                ))
+        else:
+            res = [
+                self._import_ddl_file(p, 0, inventory, by_target, executor=executor)
+                for p in paths
+            ]
+        return {p: r for p, r in zip(paths, res)}
 
     def _import_ddl_file(
         self,

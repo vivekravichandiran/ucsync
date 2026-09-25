@@ -710,6 +710,28 @@ seed plan (see the QA contract).
 _(QA agent appends confirmed bugs here — one subsection per bug, with repro + evidence — and reports
 them in its stop-and-ask summary after each run.)_
 
+#### BUG-QA1: parallel import breaks same-rank FK / intra-rank dependency ordering (CONFIRMED 2026-09-25, round 1)
+**Repro:** e2e LIVE, commit `bf0c069`, `parallel_threads=4`, testcat bed. `core_tables.employees`
+has `CONSTRAINT emp_dept_fk FOREIGN KEY(dept_id) REFERENCES core_tables.departments`. Both are
+same `_type_rank` (TABLE), so `_process_ddl_level` submits them to the pool concurrently. `employees`
+was attempted before `departments` committed → `CREATE TABLE employees` FAILED with
+`[TABLE_OR_VIEW_NOT_FOUND] … departments cannot be found`. **Evidence:** on target, `departments`
+EXISTS but `employees` is absent; import.log shows the FK error. Cascaded to 4 dependents of
+`employees` (`emp_summary`, `emp_over_masked`, `emp_dynamic`, `emp_metrics`) → 5 spurious FAILUREs
++ a red run. At `parallel_threads=1` the filename sort (departments < employees) avoids it, and the
+**120 independent `tc_parallel` tables replicated cleanly at `threads=4`** (so the pool itself is
+correct — the gap is only intra-rank *dependencies*). The plan's Item-3 "intra-rank independence
+assumption" caveat. **Fix:** a bounded failed-set retry pass within each rank level (re-run the
+still-FAILED objects sequentially after the parallel pass; each pass resolves one dependency layer).
+**Status: FIXED same session** — `_process_ddl_level` retry pass + `tests/test_import_parallelism_feat3.py`.
+
+#### Env note (NOT a code bug): orphaned ops audit/state tables after the 2-week Azure wipe
+`uc_sync_audit`/`uc_sync_state` metadata survived the wipe but their gov-account storage was
+recreated empty → `ensure_table`'s CREATE-IF-NOT-EXISTS sees the metadata and skips, so append hits
+`DELTA_TABLE_NOT_FOUND` and the best-effort ops write is skipped (no state/audit persisted). Fix in
+the rebuild recipe: DROP the orphaned `ai27_ucsync_ops.ops.uc_sync_{audit,state,volume_files}` tables
+so the run recreates them fresh. (Recorded in the env-blocker memory.)
+
 ---
 
 ## Implementation sequencing (proposed 2026-09-24)
