@@ -46,6 +46,7 @@
           "connectivity_mode": "airgap",
           "catalogs": "${catalogs}",
           "schemas": "${schemas}",
+          "exclude_regex": "${exclude_regex}",
           "output_volume_path": "${output_volume_path}",
           "ops_catalog": "${ops_catalog}",
           "ops_schema": "${ops_schema}",
@@ -57,7 +58,9 @@
           "source_warehouse_id": "${source_warehouse_id}",
           "run_id": "{{job.run_id}}",
           "external_locations_path": "${external_locations_path}",
-          "preflight_enforce": "${preflight_enforce}"
+          "preflight_enforce": "${preflight_enforce}",
+          "log_level": "${log_level}",
+          "parallel_threads": "${parallel_threads}"
         }
       }
     },
@@ -101,7 +104,9 @@
           "source_secret_key": "${source_secret_key}",
           "source_warehouse_id": "${source_warehouse_id}",
           "run_id": "{{job.run_id}}",
-          "preflight_enforce": "${preflight_enforce}"
+          "preflight_enforce": "${preflight_enforce}",
+          "log_level": "${log_level}",
+          "parallel_threads": "${parallel_threads}"
         }
       }
     }

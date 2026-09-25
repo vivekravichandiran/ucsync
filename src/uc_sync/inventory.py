@@ -6,9 +6,12 @@ from typing import Any, Iterable, List, Optional
 
 from uc_sync.config import SyncConfig
 from uc_sync.filters import allowed
+from uc_sync.logging_util import get_log
 from uc_sync.mapping import MappingResolver
 from uc_sync.models import LastModifiedSource, ObjectType, UCObject
 from uc_sync.workspace_client import WorkspaceClient
+
+log = get_log(__name__)
 
 
 def _ts(obj: dict, key: str = "updated_at") -> tuple[int | None, LastModifiedSource]:
@@ -178,6 +181,10 @@ class InventoryService:
         self.cfg = cfg
         self.sql = sql_executor
         self.mapper = MappingResolver(cfg.mappings)
+        # Bounded pool for the per-object grant fan-out (backlog item 3). Each
+        # _attach_grants(obj) is an independent REST read that mutates only its own
+        # object, so the fan-out is safe to parallelize; 1 = sequential (fallback).
+        self.parallel_threads = max(1, int(getattr(cfg, "parallel_threads", 1) or 1))
 
     def run(self) -> List[UCObject]:
         objects: list[UCObject] = []
@@ -259,8 +266,7 @@ class InventoryService:
         }
         objects.extend(self._iter_storage_credentials(credential_names))
         filtered = [o for o in objects if allowed(o, self.cfg)]
-        for obj in filtered:
-            self._attach_grants(obj)
+        self._attach_grants_all(filtered)
         if self.sql is not None:
             self._attach_governance(filtered)
         # Tier-A AI-asset discovery (task 4): report-only inventory of the UC object
@@ -358,9 +364,9 @@ class InventoryService:
                     try:
                         assets.extend(collector(cat.name, schema.name))
                     except Exception as exc:  # noqa: BLE001 - report-only, never fail
-                        print(
-                            f"[inventory] Tier-A {collector.__name__} skipped for "
-                            f"{cat.name}.{schema.name}: {exc!r}"
+                        log.warning(
+                            "Tier-A %s skipped for %s.%s: %r",
+                            collector.__name__, cat.name, schema.name, exc,
                         )
         assets.extend(self._iter_quality_monitors(in_scope))
         return assets
@@ -459,8 +465,8 @@ class InventoryService:
                     and "cannot find" not in msg.lower():
                 # A genuine error (e.g. a permission gap) — note it, but never fail
                 # inventory (monitors are report-only).
-                print(
-                    f"[inventory] monitor probe skipped for {table_full_name}: {exc!r}"
+                log.warning(
+                    "monitor probe skipped for %s: %r", table_full_name, exc,
                 )
             return None
         return monitor if isinstance(monitor, dict) and monitor else None
@@ -490,7 +496,10 @@ class InventoryService:
             try:
                 tags = read_tags(self.sql, catalog)
             except Exception as exc:  # noqa: BLE001 - keep inventory usable
-                print(f"[inventory] tag read failed for {catalog}: {exc!r}")
+                log.warning(
+                    "governance read EMPTY for %s (tags) — check source SPN system "
+                    "access: %r", catalog, exc,
+                )
                 tags = {"objects": {}, "columns": {}}
             object_tags = tags.get("objects", {})
             column_tags = tags.get("columns", {})
@@ -505,9 +514,31 @@ class InventoryService:
             try:
                 policies = read_abac_policies(self.sql, catalog)
             except Exception as exc:  # noqa: BLE001
-                print(f"[inventory] ABAC read failed for {catalog}: {exc!r}")
+                log.warning(
+                    "ABAC policies EMPTY for %s — check source SPN system access + "
+                    "a SQL warehouse: %r", catalog, exc,
+                )
                 policies = []
             objects.extend(policies)
+
+    def _attach_grants_all(self, filtered: list[UCObject]) -> None:
+        """Attach grants to every object, fanned out over a bounded pool (item 3).
+
+        Each ``_attach_grants(obj)`` reads that object's permissions (REST, per-call
+        retry) and mutates only that object, so the fan-out has no shared-state hazard
+        and results are order-independent. ``parallel_threads=1`` runs it sequentially.
+        """
+        if self.parallel_threads <= 1 or len(filtered) <= 1:
+            for obj in filtered:
+                self._attach_grants(obj)
+            return
+        from concurrent.futures import ThreadPoolExecutor
+
+        workers = min(self.parallel_threads, len(filtered))
+        log.info("grant fan-out: %d objects across %d threads", len(filtered), workers)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            # Consume the iterator so any worker exception propagates.
+            list(pool.map(self._attach_grants, filtered))
 
     def _attach_grants(self, obj: UCObject) -> None:
         if obj.grants:

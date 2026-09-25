@@ -73,8 +73,10 @@
           "apply_grants": "${apply_grants}",
           "apply_tags": "${apply_tags}",
           "apply_masks_row_filters": "${apply_masks_row_filters}",
-          "preflight_enforce": "${preflight_enforce}"
-
+          "preflight_enforce": "${preflight_enforce}",
+          "log_level": "${log_level}",
+          "retry_failed_only": "${retry_failed_only}",
+          "parallel_threads": "${parallel_threads}"
         }
       }
     }

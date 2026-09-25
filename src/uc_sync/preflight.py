@@ -21,6 +21,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+from uc_sync.logging_util import get_log
+
+log = get_log(__name__)
+
 # Minimum library versions for the DBR 15.4 closure (a minimal proxy allowlist:
 # databricks-sdk + openpyxl + et-xmlfile, no protobuf pull). Kept in lockstep with
 # requirements.txt / pyproject.toml / jobs/*.json.
@@ -177,7 +181,7 @@ def enforce_preflight(result: PreflightResult, *, enforce: bool = True) -> Prefl
     """Print the graded result. When ``enforce`` (default) and the verdict is NO-GO,
     raise ``PreflightError`` with an actionable message (a red run, never a silent
     degrade). When ``enforce`` is off, a NO-GO downgrades to a loud warning."""
-    print(result.render())
+    log.info("%s", result.render())
     if result.verdict == NO_GO:
         detail = "; ".join(
             f"{c.name}: {c.message}" for c in result.blocking_failures
@@ -186,6 +190,5 @@ def enforce_preflight(result: PreflightResult, *, enforce: bool = True) -> Prefl
             raise PreflightError(
                 "Preflight NO-GO (preflight_enforce=true): " + detail
             )
-        print("[preflight] WARNING: NO-GO but preflight_enforce=false — continuing "
-              "despite: " + detail)
+        log.warning("NO-GO but preflight_enforce=false — continuing despite: %s", detail)
     return result

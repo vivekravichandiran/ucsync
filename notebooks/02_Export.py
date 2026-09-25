@@ -29,31 +29,36 @@ from uc_sync.import_engine import SparkSqlExecutor, RestSqlExecutor
 from uc_sync.auth import local_workspace_auth, direct_workspace_auth
 from uc_sync.workspace_client import WorkspaceClient
 from uc_sync.models import UCObject, ObjectType, LastModifiedSource
+from uc_sync.logging_util import (
+    configure_logging, get_log, set_context, register_secret, get_captured_log,
+)
 
 # COMMAND ----------
 
-dbutils.widgets.dropdown("connectivity_mode", "direct", ["direct", "airgap"])
-dbutils.widgets.text("output_volume_path", "")
-dbutils.widgets.text("ops_catalog", "")
-dbutils.widgets.text("ops_schema", "")
-dbutils.widgets.text("run_id", "")
+# Widgets carry a numbered `label` (backlog item 10) so Databricks renders them
+# grouped + ordered. The widget NAME/key is never changed.
+dbutils.widgets.dropdown("connectivity_mode", "direct", ["direct", "airgap"], "1a. Source · Connectivity mode")
+dbutils.widgets.text("source_workspace_url", "", "1b. Source · Workspace URL (blank = current)")
+dbutils.widgets.text("source_client_id", "", "1c. Source · SP client id (plaintext)")
+dbutils.widgets.text("source_client_secret", "", "1d. Source · SP secret (plaintext, option 1)")
+dbutils.widgets.text("source_secret_scope", "", "1e. Source · secret scope (option 2)")
+dbutils.widgets.text("source_secret_key", "", "1f. Source · secret key (option 2)")
+dbutils.widgets.text("output_volume_path", "", "2d. Scope · Output volume path")
+dbutils.widgets.text("ops_catalog", "", "2e. Scope · Ops catalog")
+dbutils.widgets.text("ops_schema", "", "2f. Scope · Ops schema")
 # The single external-storage mapping file (task 2). Drives the export-time path
 # rewrite (source→target external LOCATIONs + external-location URLs). 2-col = BYO,
 # 3-col = create SC/EL on import. Blank = none.
-dbutils.widgets.text("external_locations_path", "")
-# Remote source (direct mode): the export stage captures full-fidelity SHOW CREATE
-# DDL from the SOURCE. In direct mode this job runs on the TARGET, where the source
-# objects do not exist yet, so — exactly like 01_Inventory — SHOW CREATE must run
-# over the source workspace's SQL warehouse. Leave source_workspace_url blank for
-# airgap (this notebook then runs on the source and uses local Spark).
-dbutils.widgets.text("source_workspace_url", "")
-dbutils.widgets.text("source_client_id", "")       # plaintext (never a secret)
-dbutils.widgets.text("source_client_secret", "")   # plaintext secret (option 1)
-dbutils.widgets.text("source_secret_scope", "")    # secret scope (option 2)
-dbutils.widgets.text("source_secret_key", "")      # secret key   (option 2)
-dbutils.widgets.text("source_warehouse_id", "")    # source SQL warehouse (direct)
+dbutils.widgets.text("external_locations_path", "", "2g. Scope · External locations file")
+dbutils.widgets.text("source_warehouse_id", "", "5a. Warehouse · Source (SHOW CREATE DDL)")
 # Graded environment preflight (task 9): enforced by default.
-dbutils.widgets.dropdown("preflight_enforce", "true", ["true", "false"])
+dbutils.widgets.dropdown("preflight_enforce", "true", ["true", "false"], "8a. Run · Preflight enforce")
+# Structured logging verbosity (backlog item 9). INFO by default; DEBUG opt-in.
+dbutils.widgets.dropdown("log_level", "INFO", ["INFO", "DEBUG", "WARNING", "ERROR"], "8b. Run · Log level")
+# Bounded parallelism for the SHOW CREATE capture burst (backlog item 3). 1 =
+# sequential. Keep ≤ the source warehouse's max concurrent queries.
+dbutils.widgets.text("parallel_threads", "4", "8g. Run · Parallel threads")
+dbutils.widgets.text("run_id", "", "8c. Run · Run id (from Inventory)")
 
 # COMMAND ----------
 
@@ -71,7 +76,13 @@ cfg = from_sources({
     "source_secret_key": dbutils.widgets.get("source_secret_key"),
     "source_warehouse_id": dbutils.widgets.get("source_warehouse_id"),
     "preflight_enforce": dbutils.widgets.get("preflight_enforce"),
+    "parallel_threads": dbutils.widgets.get("parallel_threads"),
 })
+
+# Structured logging: configure up front so preflight + every step is captured.
+configure_logging(stage="EXPORT", level=dbutils.widgets.get("log_level") or "INFO")
+log = get_log(__name__)
+log.info("stage EXPORT start (connectivity=%s)", cfg.connectivity_mode)
 
 # Graded environment preflight — required libraries importable, before any work.
 from uc_sync.preflight import run_preflight, enforce_preflight
@@ -80,6 +91,7 @@ enforce_preflight(run_preflight(check_libs=True), enforce=cfg.preflight_enforce)
 run_id = dbutils.widgets.get("run_id").strip()
 if not run_id:
     raise ValueError("run_id from the Inventory stage is required")
+set_context(run_id=run_id)
 base = f"{cfg.export_volume_path.rstrip('/')}/run_{run_id}"
 
 def _local(path):
@@ -113,15 +125,19 @@ if cfg.source_workspace_url:
     secret = cfg.source_client_secret
     if not secret and cfg.source_secret_scope and cfg.source_secret_key:
         secret = dbutils.secrets.get(scope=cfg.source_secret_scope, key=cfg.source_secret_key)
+    register_secret(secret)  # scrub the source SP secret from all log lines
     source = WorkspaceClient(direct_workspace_auth(cfg.source_workspace_url, cfg.source_client_id, secret))
 else:
     source = WorkspaceClient(local_workspace_auth(dbutils))
+log.info("DDL capture over source warehouse %s for %d objects",
+         cfg.source_warehouse_id, len(objects))
 ddl_sql = RestSqlExecutor.for_ddl_capture(source, cfg.source_warehouse_id)
 
 # Capture full-fidelity DDL + governance artifacts, then path-rewrite to target.
 export_root = f"{base}/export"
 result = ExportService(export_root, run_id, workspace_root=_local(export_root),
-                       sql_executor=ddl_sql).run(objects, dry_run=False)
+                       sql_executor=ddl_sql,
+                       parallel_threads=cfg.parallel_threads).run(objects, dry_run=False)
 MigrateExportService(
     source_root=_local(f"{export_root}/run_{run_id}"),
     target_root=_local(f"{base}/migrated"),
@@ -142,11 +158,9 @@ try:
             stage_audit_row(run_id=run_id, stage="EXPORT", result=r)
             for r in export_results
         )
-        print(f"audit: wrote {len(export_results)} EXPORT rows to {cfg.audit_table}")
+        log.info("audit: wrote %d EXPORT rows to %s", len(export_results), cfg.audit_table)
 except Exception as _exc:  # noqa: BLE001 - audit is best-effort
-    import traceback
-    print(f"audit write skipped: {_exc!r}")
-    traceback.print_exc()
+    log.warning("audit write skipped: %r", _exc, exc_info=True)
 
 # Operator-facing export report from the path-rewritten (migrated) bundle.
 try:
@@ -155,13 +169,12 @@ try:
     report_path = f"{_local(base)}/reports/export.xlsx"
     build_report_from_file(inv, report_path, run_id=run_id, stage="EXPORT",
                            export_results=export_results)
-    print(f"report: {report_path}")
+    log.info("report: %s", report_path)
 except Exception as _exc:  # noqa: BLE001 - report is best-effort
-    import traceback
-    print(f"report generation skipped: {_exc!r}")
-    traceback.print_exc()
+    log.error("report generation skipped: %r", _exc, exc_info=True)
 
-print(json.dumps({k: v for k, v in result.items() if k != "results"}, indent=2, default=str))
+log.info("export summary: %s",
+         json.dumps({k: v for k, v in result.items() if k != "results"}, default=str))
 
 # Bug #2: fail the export LOUDLY if any inventoried object could not be read
 # (permission-denied SHOW CREATE, failed DDL capture, …) rather than reporting
@@ -170,11 +183,17 @@ print(json.dumps({k: v for k, v in result.items() if k != "results"}, indent=2, 
 # the stage then exits non-zero so the pipeline stops before importing an incomplete
 # set. Fix the source permission / prerequisite and re-run.
 read_failures = export_read_failures(result)
+# Persist the full run log alongside the report so a handed-over artifact includes it.
+try:
+    with open(f"{_local(base)}/reports/export.log", "w") as fh:
+        fh.write(get_captured_log())
+except Exception as _exc:  # noqa: BLE001 - log persistence is best-effort
+    log.warning("run-log persistence skipped: %r", _exc)
 if read_failures:
-    print(f"\n[export] {len(read_failures)} object(s) could not be read — job will exit non-zero:")
+    log.error("%d object(s) could not be read — job will exit non-zero:", len(read_failures))
     for f in read_failures:
-        print(f"  [{f.get('error_code')}] {f.get('object_type')} {f.get('full_name')}: "
-              f"{str(f.get('error_message'))[:200]}")
+        log.error("  [%s] %s %s: %s", f.get('error_code'), f.get('object_type'),
+                  f.get('full_name'), str(f.get('error_message'))[:200])
     raise RuntimeError(
         f"UC Sync export could not read {len(read_failures)} inventoried object(s) "
         "(e.g. permission-denied SHOW CREATE / DDL capture failure). The report and "

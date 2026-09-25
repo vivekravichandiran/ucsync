@@ -25,51 +25,63 @@ from uc_sync.inventory import InventoryService
 from uc_sync.import_engine import SparkSqlExecutor, RestSqlExecutor
 from uc_sync.auth import local_workspace_auth, direct_workspace_auth
 from uc_sync.workspace_client import WorkspaceClient
+from uc_sync.logging_util import (
+    configure_logging, get_log, set_context, register_secret, get_captured_log,
+)
 
 # COMMAND ----------
 
-dbutils.widgets.dropdown("connectivity_mode", "direct", ["direct", "airgap"])
-dbutils.widgets.text("catalogs", "")           # csv; blank = whole metastore
-dbutils.widgets.text("schemas", "")            # csv catalog.schema; blank = all in scope
-dbutils.widgets.text("output_volume_path", "")  # /Volumes/<c>/<s>/<vol>
-dbutils.widgets.text("ops_catalog", "")
-dbutils.widgets.text("ops_schema", "")
-# Remote source (leave source_workspace_url blank to read the CURRENT workspace).
-# The service-principal client id is always plaintext (it is not a secret). For the
-# SECRET, pick ONE: paste source_client_secret (plaintext), OR name a secret
-# source_secret_scope + source_secret_key. If both are given, the plaintext wins.
-dbutils.widgets.text("source_workspace_url", "")
-dbutils.widgets.text("source_client_id", "")       # plaintext (never a secret)
-dbutils.widgets.text("source_client_secret", "")   # plaintext secret (option 1)
-dbutils.widgets.text("source_secret_scope", "")    # secret scope (option 2)
-dbutils.widgets.text("source_secret_key", "")      # secret key   (option 2)
+# Widgets carry a numbered `label` (backlog item 10) so Databricks renders them
+# grouped + ordered (it sorts by label). The widget NAME/key is never changed — every
+# dbutils.widgets.get(...) and job-spec ${...} placeholder is unchanged.
+dbutils.widgets.dropdown("connectivity_mode", "direct", ["direct", "airgap"], "1a. Source · Connectivity mode")
+dbutils.widgets.text("source_workspace_url", "", "1b. Source · Workspace URL (blank = current)")
+dbutils.widgets.text("source_client_id", "", "1c. Source · SP client id (plaintext)")
+dbutils.widgets.text("source_client_secret", "", "1d. Source · SP secret (plaintext, option 1)")
+dbutils.widgets.text("source_secret_scope", "", "1e. Source · secret scope (option 2)")
+dbutils.widgets.text("source_secret_key", "", "1f. Source · secret key (option 2)")
+dbutils.widgets.text("catalogs", "", "2a. Scope · Catalogs (csv; blank = all)")
+dbutils.widgets.text("schemas", "", "2b. Scope · Schemas (csv catalog.schema)")
+# Table EXCLUDE filter (backlog item 2): comma-separated Python regexes matched with
+# .search() on catalog.schema.table. Blank = exclude nothing. Escape dots (\.) and
+# anchor with $ — a bare `orders` substring-matches `orders_archive`. Parent
+# catalog/schema are never excluded. e.g. `.*_TEMP$, sales\.public\.orders_raw$`.
+dbutils.widgets.text("exclude_regex", "", "2c. Scope · Exclude regex (csv)")
+dbutils.widgets.text("output_volume_path", "", "2d. Scope · Output volume path")
+dbutils.widgets.text("ops_catalog", "", "2e. Scope · Ops catalog")
+dbutils.widgets.text("ops_schema", "", "2f. Scope · Ops schema")
+dbutils.widgets.text("external_locations_path", "", "2g. Scope · External locations file")
 # SQL warehouse used for governance reads (tags + ABAC policies, which live in
-# information_schema). REQUIRED for a remote source (source_workspace_url set).
-# STRONGLY RECOMMENDED even for airgap-on-source: classic job-cluster Spark cannot
-# serve `information_schema.abac_policy_definitions`, so ABAC policies come back
-# EMPTY without a warehouse (tags still work, but ABAC/Policy-Matched-Columns are
-# blank). Point it at any SQL warehouse on the workspace that owns the objects.
-dbutils.widgets.text("source_warehouse_id", "")
-# The single external-storage mapping file (task 2). Lets inventory include the
-# external locations backing the configured source base paths. Blank = ELs are
-# still discovered by table-path coverage.
-dbutils.widgets.text("external_locations_path", "")
+# information_schema). REQUIRED for a remote source; STRONGLY RECOMMENDED even for
+# airgap-on-source (classic Spark returns EMPTY ABAC).
+dbutils.widgets.text("source_warehouse_id", "", "5a. Warehouse · Source (governance reads)")
 # Graded environment preflight (task 9): enforced by default — a missing report
 # library is a red run, never a silent degrade.
-dbutils.widgets.dropdown("preflight_enforce", "true", ["true", "false"])
-dbutils.widgets.text("run_id", "")
+dbutils.widgets.dropdown("preflight_enforce", "true", ["true", "false"], "8a. Run · Preflight enforce")
+# Structured logging verbosity (backlog item 9). INFO by default; DEBUG opt-in.
+dbutils.widgets.dropdown("log_level", "INFO", ["INFO", "DEBUG", "WARNING", "ERROR"], "8b. Run · Log level")
+# Bounded parallelism for the per-object grant fan-out (backlog item 3). 1 = sequential.
+dbutils.widgets.text("parallel_threads", "4", "8g. Run · Parallel threads")
+dbutils.widgets.text("run_id", "", "8c. Run · Run id")
 
 # COMMAND ----------
 
 widgets = {k: dbutils.widgets.get(k) for k in (
-    "connectivity_mode", "catalogs", "schemas", "output_volume_path",
+    "connectivity_mode", "catalogs", "schemas", "exclude_regex", "output_volume_path",
     "ops_catalog", "ops_schema", "source_workspace_url",
     "source_client_id", "source_client_secret", "source_secret_scope",
     "source_secret_key", "source_warehouse_id", "external_locations_path",
-    "preflight_enforce",
+    "preflight_enforce", "parallel_threads",
 )}
 widgets["stage"] = "INVENTORY"
 cfg = from_sources(widgets)
+
+# Structured logging: configure once, up front, so preflight + every step below is
+# captured (INVENTORY stage; run_id is stamped in once resolved). The buffer captures
+# the whole run's log into a string written alongside the report on the volume.
+configure_logging(stage="INVENTORY", level=dbutils.widgets.get("log_level") or "INFO")
+log = get_log(__name__)
+log.info("stage INVENTORY start (connectivity=%s)", cfg.connectivity_mode)
 
 # Graded environment preflight — required libraries importable, before any work.
 from uc_sync.preflight import run_preflight, enforce_preflight
@@ -81,8 +93,10 @@ def _local(path):
     return "/dbfs/" + path[len("dbfs:/"):] if path.startswith("dbfs:/") else path
 
 run_id = dbutils.widgets.get("run_id").strip() or spark.sql("SELECT uuid()").collect()[0][0][:8]
+set_context(run_id=run_id)
 run_dir = f"{cfg.export_volume_path.rstrip('/')}/run_{run_id}/bundle"
 dbutils.fs.mkdirs(run_dir)
+log.info("run_id=%s run_dir=%s", run_id, run_dir)
 
 # Source client: current workspace unless a remote source SP is provided.
 if cfg.source_workspace_url:
@@ -90,8 +104,11 @@ if cfg.source_workspace_url:
     secret = cfg.source_client_secret
     if not secret and cfg.source_secret_scope and cfg.source_secret_key:
         secret = dbutils.secrets.get(scope=cfg.source_secret_scope, key=cfg.source_secret_key)
+    register_secret(secret)  # scrub the source SP secret from all log lines
+    log.info("source: remote workspace %s (SP %s)", cfg.source_workspace_url, cfg.source_client_id)
     auth = direct_workspace_auth(cfg.source_workspace_url, cfg.source_client_id, secret)
 else:
+    log.info("source: current workspace (local auth)")
     auth = local_workspace_auth(dbutils)
 source = WorkspaceClient(auth)
 
@@ -102,6 +119,7 @@ source = WorkspaceClient(auth)
 # job-cluster Spark serves the tag views but returns EMPTY for ABAC, so airgap runs
 # without a warehouse silently drop all ABAC policies.
 if cfg.source_warehouse_id:
+    log.info("governance reads via SQL warehouse %s", cfg.source_warehouse_id)
     gov_sql = RestSqlExecutor(source, cfg.source_warehouse_id)
 elif cfg.source_workspace_url:
     raise ValueError(
@@ -110,16 +128,17 @@ elif cfg.source_workspace_url:
         "warehouse (Spark on this job runs against the target)."
     )
 else:
-    print(
-        "[inventory] WARNING: no source_warehouse_id set — ABAC policies are NOT "
-        "readable on classic job compute and will be EMPTY (tags still work). "
-        "Provide a SQL warehouse (or run on serverless) to capture ABAC policies."
+    log.warning(
+        "no source_warehouse_id set — ABAC policies are NOT readable on classic job "
+        "compute and will be EMPTY (tags still work). Provide a SQL warehouse (or run "
+        "on serverless) to capture ABAC policies."
     )
     gov_sql = SparkSqlExecutor(spark)
 
 # COMMAND ----------
 
 objects = InventoryService(source, cfg, gov_sql).run()
+log.info("inventory discovered %d objects", len(objects))
 
 # Append one INVENTORY row per object to {ops_catalog}.{ops_schema}.uc_sync_audit on
 # this workspace (best-effort: audit logging must never fail the inventory).
@@ -129,31 +148,37 @@ try:
             stage_audit_row(run_id=run_id, stage="INVENTORY", result=o.to_dict())
             for o in objects
         )
-        print(f"audit: wrote {len(objects)} INVENTORY rows to {cfg.audit_table}")
+        log.info("audit: wrote %d INVENTORY rows to %s", len(objects), cfg.audit_table)
 except Exception as _exc:  # noqa: BLE001 - audit is best-effort
-    import traceback
-    print(f"audit write skipped: {_exc!r}")
-    traceback.print_exc()
+    log.warning("audit write skipped: %r", _exc, exc_info=True)
 
 payload = json.dumps([o.to_dict() for o in objects], indent=2, default=str)
 dst = f"{_local(run_dir)}/inventory.json"
 with open(dst, "w") as fh:
     fh.write(payload)
+log.info("wrote bundle inventory.json (%d bytes)", len(payload))
 
 # Operator-facing inventory report (spine + governance sheets) under reports/.
 try:
     from uc_sync.report import build_report
     report_path = f"{cfg.export_volume_path.rstrip('/')}/run_{run_id}/reports/inventory.xlsx"
     build_report([o.to_dict() for o in objects], report_path, run_id=run_id, stage="INVENTORY")
-    print(f"report: {report_path}")
+    log.info("report: %s", report_path)
 except Exception as _exc:  # noqa: BLE001 - report is best-effort
-    import traceback
-    print(f"report generation skipped: {_exc!r}")
-    traceback.print_exc()
+    log.error("report generation skipped: %r", _exc, exc_info=True)
 
 by_type = {}
 for o in objects:
     by_type[o.object_type.value] = by_type.get(o.object_type.value, 0) + 1
 summary = {"run_id": run_id, "run_dir": run_dir, "objects": len(objects), "by_type": by_type}
-print(json.dumps(summary, indent=2))
+log.info("stage INVENTORY end: %s", json.dumps(by_type))
+
+# Persist the full run log alongside the report so a handed-over artifact includes it.
+try:
+    log_path = f"{_local(cfg.export_volume_path.rstrip('/'))}/run_{run_id}/reports/inventory.log"
+    with open(log_path, "w") as fh:
+        fh.write(get_captured_log())
+except Exception as _exc:  # noqa: BLE001 - log persistence is best-effort
+    log.warning("run-log persistence skipped: %r", _exc)
+
 dbutils.notebook.exit(json.dumps(summary))

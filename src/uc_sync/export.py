@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
 from uc_sync import __version__
+from uc_sync.logging_util import get_log
 from uc_sync.governance import (
     abac_policy_create_statement,
     governed_tag_create_statement,
@@ -27,6 +28,8 @@ from uc_sync.sql_ddl import (
     show_create_command,
     supports_show_create,
 )
+
+log = get_log(__name__)
 
 
 class DdlCaptureError(RuntimeError):
@@ -142,12 +145,17 @@ class ExportService:
         sql_executor: Any = None,
         workspace_root: str | None = None,
         fs: Any = None,
+        parallel_threads: int = 1,
     ):
         if not volume_root:
             raise ValueError("export_volume_path is required")
         self.run_id = run_id
         self.sql = sql_executor
         self.fs = fs
+        # Bounded pool size for the SHOW CREATE pre-capture burst (backlog item 3).
+        # 1 = today's sequential behavior exactly. Each worker's SHOW CREATE is an
+        # independent, idempotent read (per-call retry/backoff lives in the executor).
+        self.parallel_threads = max(1, int(parallel_threads or 1))
         self.root = Path(volume_root.rstrip("/")) / f"run_{run_id}"
         default_workspace = (
             "/Workspace/Shared/"
@@ -239,8 +247,15 @@ class ExportService:
                 warmup_warning = (
                     f"source warehouse warm-up did not confirm ready: {exc}"
                 )
-                print(f"[export] {warmup_warning}")
+                log.warning("%s", warmup_warning)
                 warnings_global.append(warmup_warning)
+
+        # DDL pre-capture (backlog item 3): SHOW CREATE per object is embarrassingly
+        # parallel — each is an independent, idempotent read with no ordering. Run the
+        # capture burst in a bounded pool, then assemble the bundle sequentially below
+        # (so all shared-state mutation + file writes + result ordinals stay
+        # deterministic). parallel_threads=1 keeps this fully sequential.
+        precaptured = self._precapture_ddl(objects_list)
 
         for obj in objects_list:
             try:
@@ -290,7 +305,13 @@ class ExportService:
                 workspace_policies_path = ""
                 warnings: list[str] = []
 
-                ddl_sql, ddl_source = self._capture_object_ddl(obj, warnings)
+                # Use the pre-captured DDL (parallel burst above). A capture that raised
+                # is re-raised here so the existing per-object error handling builds the
+                # ERROR result deterministically, in inventory order.
+                ddl_sql, ddl_source, cap_warnings, cap_error = precaptured[obj.full_name]
+                if cap_error is not None:
+                    raise cap_error
+                warnings.extend(cap_warnings)
                 if ddl_sql:
                     ddl_rel = f"ddl/{stem}.sql"
                     ddl_paths = self._write_text(ddl_rel, ddl_sql)
@@ -512,6 +533,47 @@ class ExportService:
             "warnings": warnings_global,
         }
 
+    def _precapture_ddl(
+        self, objects_list: list[UCObject]
+    ) -> dict[str, tuple[str | None, str | None, list[str], Optional[Exception]]]:
+        """Capture each object's DDL up front, in a bounded thread pool (item 3).
+
+        Returns ``{full_name: (ddl_sql, ddl_source, warnings, error)}``. ``error`` is the
+        exception raised by capture (re-raised in the sequential assembly so the existing
+        per-object error handling stays identical); the assembly is otherwise unchanged.
+        GOVERNED_TAG objects are skipped — the assembly loop handles them before it would
+        call capture, so they never look up this map.
+
+        The capture is a pure, per-call-retried read (``_capture_object_ddl`` only touches
+        ``self.sql`` and a local warnings list), so parallelizing it introduces no
+        shared-state hazard; results are keyed by name, order-independent.
+        """
+        targets = [o for o in objects_list if o.object_type != ObjectType.GOVERNED_TAG]
+
+        def _capture(obj: UCObject):
+            warns: list[str] = []
+            try:
+                ddl_sql, ddl_source = self._capture_object_ddl(obj, warns)
+                return obj.full_name, (ddl_sql, ddl_source, warns, None)
+            except Exception as exc:  # noqa: BLE001 - surfaced in sequential assembly
+                return obj.full_name, (None, None, warns, exc)
+
+        out: dict[str, tuple[str | None, str | None, list[str], Optional[Exception]]] = {}
+        if self.parallel_threads <= 1 or len(targets) <= 1:
+            for obj in targets:
+                name, val = _capture(obj)
+                out[name] = val
+            return out
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        workers = min(self.parallel_threads, len(targets))
+        log.info("DDL pre-capture: %d objects across %d threads", len(targets), workers)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for name, val in pool.map(lambda o: _capture(o), targets):
+                out[name] = val
+        return out
+
     def _capture_object_ddl(
         self, obj: UCObject, warnings: list[str]
     ) -> tuple[str | None, str | None]:
@@ -634,8 +696,8 @@ class ExportService:
                 if root == self.root and self.fs is not None:
                     try:
                         self.fs.mkdirs(str(root / relative))
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as exc:  # noqa: BLE001
+                        log.debug("mkdir fallback via fs failed for %s: %r", relative, exc)
 
     def _write_text(self, relative: str, content: str) -> dict[str, str]:
         """Write the same relative path under workspace and volume roots."""
@@ -661,6 +723,7 @@ class ExportService:
                 self.fs.mkdirs(remote.rsplit("/", 1)[0])
                 self.fs.cp(str(workspace_path), remote, recurse=False)
                 written["volume"] = remote
-            except Exception:  # noqa: BLE001 - workspace copy still usable
-                pass
+            except Exception as exc:  # noqa: BLE001 - workspace copy still usable
+                log.debug("volume copy of %s via fs failed (workspace copy kept): %r",
+                          relative, exc)
         return written

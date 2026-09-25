@@ -198,6 +198,20 @@ class DeltaPlan:
         governance_changed = str(prior.get("governance_hash") or "") != cur_gov
         ddl_changed = str(prior.get("ddl_hash") or "") != cur_ddl
 
+        # Per-facet retry (backlog item 8, rule #2): re-apply a facet when its prior
+        # status is `failed`, even if the source fingerprint is unchanged. This is what
+        # catches the field cases a hash-only diff misses:
+        #   * governance applied-then-failed but the object stayed clean (#7);
+        #   * a grant that RAISED (grants_status=failed) though ddl/governance are clean
+        #     — the external-object-created-later replay gap. Without this, a clean
+        #     last_action + unchanged hashes would skip the object entirely.
+        if str(prior.get("governance_status") or "") == "failed":
+            governance_changed = True
+        if str(prior.get("grants_status") or "") == "failed" and cur_grants:
+            # Force a grant replay: re-offer the full current grant set so the object is
+            # not skipped as fully-unchanged and its grants are re-applied.
+            grants_added = cur_grants
+
         if ddl_changed:
             if object_type in _VOLUME_TYPES:
                 # A volume's location is fixed once created; a DDL diff cannot be

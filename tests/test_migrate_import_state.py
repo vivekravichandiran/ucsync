@@ -440,6 +440,7 @@ def test_ensure_table_backfill_self_heals_when_column_already_exists():
             "batch_id", "run_id", "object_type", "source_full_name", "last_action",
             "last_sync_status", "ddl_hash", "governance_hash", "grants_json", "detail",
             "first_seen", "connectivity_mode", "failure_category", "last_error_raw",
+            "ddl_status", "governance_status", "grants_status",
         )]
 
     class _FakeSpark:

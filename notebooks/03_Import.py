@@ -37,78 +37,84 @@ from uc_sync.volume_copy import (
 )
 from uc_sync.audit import AuditService, stage_audit_row
 from uc_sync.sync_state import SyncStateService, state_row_from_import
+from uc_sync.logging_util import (
+    configure_logging, get_log, set_context, register_secret, get_captured_log,
+)
 
 # COMMAND ----------
 
-dbutils.widgets.text("output_volume_path", "")
-dbutils.widgets.text("ops_catalog", "")
-dbutils.widgets.text("ops_schema", "")
-dbutils.widgets.text("run_id", "")
-# Optional import TABLE filter: import only a subset of tables from the bundle
-# (catalog/schema scoping is done upstream at inventory via catalogs/schemas).
-# Blank = import every table. The catalogs/schemas/functions/volumes a selected
-# table needs still come along. Names accept fully-qualified (catalog.schema.table)
-# or the bare table name.
-dbutils.widgets.text("filter_tables", "")
-# Optional catalog rename: replicate a source catalog under a different target
-# name. JSON object {"source_catalog":"target_catalog"} (blank = keep source
-# names). Every replayed statement is rewritten source->target catalog.
-dbutils.widgets.text("catalog_mapping_json", "")
-# The single external-storage mapping file (CSV). Column shape auto-selects
-# behavior: 2 cols (source_base_path,target_base_path) → BYO (storage credential +
-# external location are prerequisites; the utility only prefix-swaps external
-# LOCATIONs); 3 cols (+access_connector_id) → the utility creates the storage
-# credential + external location. Blank = no base-path swap.
-dbutils.widgets.text("external_locations_path", "")
-# Optional per-object target locations (CSV: schema,volume,table,location) — an
-# exact override that BEATS the external_locations base-path swap for the rare
-# object that doesn't follow the base pattern. A schema row sets that MANAGED
-# LOCATION; an external volume/table row supplies that object's LOCATION. Blank =
-# rely on external_locations (base-path swap) / the catalog root.
-dbutils.widgets.text("object_locations_path", "")
-# SQL warehouse (this/target workspace) for the ABAC phase AND the view-creation
-# phase. CREATE POLICY is rejected at parse on a classic Spark cluster and only
-# runs on a SQL warehouse; likewise a CREATE VIEW over a masked/row-filtered base
-# table errors on classic Spark but succeeds on a warehouse. REQUIRED when the
-# bundle has ABAC policies (otherwise the import fails those closed and drops the
-# tables they protect) and strongly recommended whenever the bundle has views over
-# masked tables. When unset, views fall back to the Spark executor.
-dbutils.widgets.text("import_warehouse_id", "")
-# Incremental (delta) sync (task 1): run mode is AUTO-DETECTED — a baseline in
-# uc_sync_state (from a prior successful run) → incremental (only deltas applied,
-# unchanged objects skipped with zero writes); no baseline → full run + seed the
-# baseline. A plain re-run is idempotent; for a genuine reset use DROP SCHEMA …
-# CASCADE then recreate (only safe before any data is loaded into the target).
-# Streaming tables & materialized views are DLT/SDP-pipeline-managed → report-only
-# by default (task 4). Set true to opt into materialized-view migration; streaming
-# tables are always report-only.
-dbutils.widgets.dropdown("migrate_materialized_views", "false", ["true", "false"])
-# Volume data copy (FEAT-4): copy managed + external volume FILES source→target via
-# the Files API (securables are always created; the bytes are optional). Default off;
-# incremental via a control table (only new/modified files re-copied). >5 GB files are
-# reported, not silently dropped.
-dbutils.widgets.dropdown("copy_volume_data", "false", ["true", "false"])
-# Graded environment preflight (task 9): when enforced (default), a NO-GO (e.g. a
-# missing report library on a proxy-restricted cluster) is a red run, never a silent
-# degrade. Every run must also produce its report — a report-write failure fails the
-# run (bug #4, no opt-out).
-dbutils.widgets.dropdown("preflight_enforce", "true", ["true", "false"])
-# BYO-by-default: catalog / schema / storage-credential / external-location creation
-# defaults OFF (they are customer prerequisites); all other create + apply toggles
-# default ON. A 3-column external_locations.csv turns SC/EL creation back on.
+# Widgets carry a numbered `label` (backlog item 10) so Databricks renders them
+# grouped + ordered (it sorts by label). The widget NAME/key is never changed.
+# --- 1. Source auth (direct mode; needed only to read source volume FILES when
+#        copy_volume_data is on — volume bytes are not in the bundle). ---
+dbutils.widgets.text("source_workspace_url", "", "1b. Source · Workspace URL (blank = current)")
+dbutils.widgets.text("source_client_id", "", "1c. Source · SP client id (plaintext)")
+dbutils.widgets.text("source_client_secret", "", "1d. Source · SP secret (plaintext, option 1)")
+dbutils.widgets.text("source_secret_scope", "", "1e. Source · secret scope (option 2)")
+dbutils.widgets.text("source_secret_key", "", "1f. Source · secret key (option 2)")
+# --- 2. Scope + bundle location ---
+dbutils.widgets.text("output_volume_path", "", "2d. Scope · Output volume path")
+dbutils.widgets.text("ops_catalog", "", "2e. Scope · Ops catalog")
+dbutils.widgets.text("ops_schema", "", "2f. Scope · Ops schema")
+# The single external-storage mapping file (CSV). 2 cols = BYO prefix-swap; 3 cols
+# (+access connector) = create SC/EL. Blank = no base-path swap.
+dbutils.widgets.text("external_locations_path", "", "2g. Scope · External locations file")
+# Optional import TABLE filter: import only a subset of tables from the bundle. Blank
+# = import every table. Accepts catalog.schema.table or the bare table name.
+dbutils.widgets.text("filter_tables", "", "2h. Scope · Import table filter (allowlist)")
+# Optional catalog rename: JSON {"source_catalog":"target_catalog"} (blank = keep).
+dbutils.widgets.text("catalog_mapping_json", "", "2i. Scope · Catalog rename JSON")
+# Optional per-object target locations (CSV: schema,volume,table,location) — an exact
+# override that BEATS the external_locations base-path swap for the rare object.
+dbutils.widgets.text("object_locations_path", "", "2j. Scope · Object locations file")
+# --- 4. Apply / behavior toggles (materialized views + volume data copy) ---
+# Streaming tables & materialized views are DLT/SDP-managed → report-only by default;
+# set true to migrate materialized views (streaming tables stay report-only).
+dbutils.widgets.dropdown("migrate_materialized_views", "false", ["true", "false"], "4d. Apply · Migrate materialized views")
+# Volume data copy (FEAT-4): copy managed + external volume FILES source→target via the
+# Files API. Default off; incremental via a control table; >5 GB reported.
+dbutils.widgets.dropdown("copy_volume_data", "false", ["true", "false"], "4e. Apply · Copy volume data")
+# Retry-failed-only (backlog item 4): replay ONLY the prior run's failed objects (read
+# from uc_sync_state) + their parents, skipping everything else. Same run_id/bundle as a
+# normal import; requires a prior run that seeded state. Default off.
+dbutils.widgets.dropdown("retry_failed_only", "false", ["true", "false"], "4f. Apply · Retry failed only")
+# --- 5. Warehouse ---
+# SQL warehouse (target) for the ABAC phase AND the view-creation phase. REQUIRED when
+# the bundle has ABAC policies; strongly recommended for views over masked tables.
+dbutils.widgets.text("import_warehouse_id", "", "5b. Warehouse · Import (ABAC + views)")
+# --- 8. Run controls ---
+dbutils.widgets.text("run_id", "", "8c. Run · Run id (from Export)")
+dbutils.widgets.dropdown("dry_run", "false", ["true", "false"], "8d. Run · Dry run")
+# Graded environment preflight (task 9): enforced by default. Every run also always
+# produces its report — a report-write failure fails the run (bug #4, no opt-out).
+dbutils.widgets.dropdown("preflight_enforce", "true", ["true", "false"], "8a. Run · Preflight enforce")
+# Structured logging verbosity (backlog item 9). INFO by default; DEBUG opt-in.
+dbutils.widgets.dropdown("log_level", "INFO", ["INFO", "DEBUG", "WARNING", "ERROR"], "8b. Run · Log level")
+# Within-level import parallelism (backlog item 3). 1 = sequential (safe fallback).
+# Keep ≤ the import warehouse's max concurrent queries.
+dbutils.widgets.text("parallel_threads", "4", "8g. Run · Parallel threads")
+# --- 3. Create toggles + 4a-c apply toggles (BYO-by-default: catalog / schema / SC /
+#        EL creation defaults OFF; contents + governance default ON). A 3-column
+#        external_locations.csv turns SC/EL creation back on. ---
+_TOGGLE_LABELS = {
+    "create_storage_credentials": "3a. Create · Storage credentials",
+    "create_external_locations": "3b. Create · External locations",
+    "create_catalogs": "3c. Create · Catalogs",
+    "create_schemas": "3d. Create · Schemas",
+    "create_volumes": "3e. Create · Volumes",
+    "create_functions": "3f. Create · Functions",
+    "create_tables": "3g. Create · Tables",
+    "create_views": "3h. Create · Views",
+    "create_abac_policies": "3i. Create · ABAC policies",
+    "apply_grants": "4a. Apply · Grants",
+    "apply_tags": "4b. Apply · Tags",
+    "apply_masks_row_filters": "4c. Apply · Masks & row filters",
+}
 for _t in (*CREATE_TOGGLES, *APPLY_TOGGLES):
     dbutils.widgets.dropdown(
-        _t, "false" if _t in BYO_PREREQUISITE_TOGGLES else "true", ["true", "false"]
+        _t, "false" if _t in BYO_PREREQUISITE_TOGGLES else "true", ["true", "false"],
+        _TOGGLE_LABELS.get(_t, _t),
     )
-dbutils.widgets.dropdown("dry_run", "false", ["true", "false"])
-# Source-workspace auth (direct mode) — needed only to read source volume FILES when
-# copy_volume_data is on (volume bytes are not in the bundle). Blank in airgap / when
-# the toggle is off.
-dbutils.widgets.text("source_workspace_url", "")
-dbutils.widgets.text("source_client_id", "")       # plaintext (never a secret)
-dbutils.widgets.text("source_client_secret", "")   # plaintext secret (option 1)
-dbutils.widgets.text("source_secret_scope", "")    # secret scope (option 2)
-dbutils.widgets.text("source_secret_key", "")      # secret key   (option 2)
 
 # COMMAND ----------
 
@@ -123,6 +129,8 @@ cfg = from_sources({
     "external_locations_path": dbutils.widgets.get("external_locations_path"),
     "migrate_materialized_views": dbutils.widgets.get("migrate_materialized_views"),
     "copy_volume_data": dbutils.widgets.get("copy_volume_data"),
+    "retry_failed_only": dbutils.widgets.get("retry_failed_only"),
+    "parallel_threads": dbutils.widgets.get("parallel_threads"),
     "preflight_enforce": dbutils.widgets.get("preflight_enforce"),
     "source_workspace_url": dbutils.widgets.get("source_workspace_url"),
     "source_client_id": dbutils.widgets.get("source_client_id"),
@@ -132,6 +140,11 @@ cfg = from_sources({
     **{t: dbutils.widgets.get(t) for t in (*CREATE_TOGGLES, *APPLY_TOGGLES)},
 })
 
+# Structured logging: configure up front so preflight + every phase is captured.
+configure_logging(stage="IMPORT", level=dbutils.widgets.get("log_level") or "INFO")
+log = get_log(__name__)
+log.info("stage IMPORT start (dry_run=%s)", cfg.dry_run)
+
 # Graded environment preflight — libraries importable at the right versions (the
 # openpyxl-missing silent-no-report failure mode), before any work is done.
 from uc_sync.preflight import run_preflight, enforce_preflight
@@ -139,6 +152,7 @@ enforce_preflight(run_preflight(check_libs=True), enforce=cfg.preflight_enforce)
 run_id = dbutils.widgets.get("run_id").strip()
 if not run_id:
     raise ValueError("run_id from the Export stage is required")
+set_context(run_id=run_id)
 def _local(path):
     # UC Volumes are read/written directly at /Volumes/...; only dbfs:/ paths use
     # the /dbfs FUSE mount. (Prefixing /dbfs onto a /Volumes path is wrong.)
@@ -190,9 +204,9 @@ prior_state = {}
 try:
     if cfg.state_table:
         prior_state = SyncStateService(spark, cfg.state_table).load_baseline()
-        print(f"delta: read baseline of {len(prior_state)} objects from {cfg.state_table}")
+        log.info("delta: read baseline of %d objects from %s", len(prior_state), cfg.state_table)
 except Exception as _exc:  # noqa: BLE001 - no baseline → full run
-    print(f"delta: baseline read skipped ({_exc!r}) — running full")
+    log.warning("delta: baseline read skipped (%r) — running full", _exc)
     prior_state = {}
 
 # The run-as SPN = the identity this import runs as. The utility never re-grants to
@@ -202,6 +216,21 @@ try:
     _run_as_spn = spark.sql("SELECT current_user()").collect()[0][0]
 except Exception:  # noqa: BLE001
     _run_as_spn = ""
+
+# Retry-failed-only (backlog item 4): replay ONLY the prior run's failed set (read from
+# uc_sync_state's per-facet *_status) + required parents. Requires a state baseline (a
+# run that never seeded state has nothing to retry). Same run_id / bundle as a normal
+# import — no re-export.
+retry_failed_set = set()
+if cfg.retry_failed_only:
+    try:
+        retry_failed_set = SyncStateService(spark, cfg.state_table).failed_object_names()
+    except Exception as _exc:  # noqa: BLE001
+        log.warning("retry-failed-only: could not read failed set (%r)", _exc)
+    log.info("retry-failed-only: %d prior-failed object(s) to replay", len(retry_failed_set))
+    if not retry_failed_set:
+        log.warning("retry-failed-only: no failed objects in %s — nothing to replay "
+                    "(a prior run must have seeded state)", cfg.state_table)
 
 engine = PackageImportEngine(
     migrated, warehouse_executor, dry_run=cfg.dry_run, toggles=toggles,
@@ -214,12 +243,15 @@ engine = PackageImportEngine(
     migrate_materialized_views=cfg.migrate_materialized_views,
     run_as_spn=_run_as_spn,
     abac_sql_executor=abac_executor,
+    retry_failed_only=cfg.retry_failed_only,
+    retry_failed_set=retry_failed_set,
+    parallel_threads=cfg.parallel_threads,
 )
 results = engine.run()
 _mode = "incremental" if (engine.delta_plan and engine.delta_plan.incremental) else "full"
-print(f"delta: run mode = {_mode}"
-      + (f"; {engine.delta_plan.unchanged_count()} unchanged (skipped)"
-         if engine.delta_plan else ""))
+log.info("delta: run mode = %s%s", _mode,
+         (f"; {engine.delta_plan.unchanged_count()} unchanged (skipped)"
+          if engine.delta_plan else ""))
 
 # Operations tables under {ops_catalog}.{ops_schema} on THIS (target) workspace:
 #   uc_sync_audit — one IMPORT row per object (append-only history).
@@ -239,7 +271,7 @@ try:
                 stage_audit_row(run_id=run_id, stage="IMPORT", result=rd)
                 for rd in result_dicts
             )
-            print(f"audit: wrote {len(result_dicts)} IMPORT rows to {cfg.audit_table}")
+            log.info("audit: wrote %d IMPORT rows to %s", len(result_dicts), cfg.audit_table)
         if cfg.state_table:
             batch_id = str(uuid.uuid4())
             # uc_sync_state = ONE row per source OBJECT (the incremental baseline).
@@ -267,19 +299,17 @@ try:
                 )
                 for rd in state_dicts
             )
-            print(f"state: upserted {len(state_dicts)} object rows into {cfg.state_table}")
+            log.info("state: upserted %d object rows into %s", len(state_dicts), cfg.state_table)
             # Outstanding (Part E): cumulative still-broken objects from state across ALL
             # runs, read AFTER this run's upsert so the report's Outstanding sheet is the
             # authoritative "everything still broken" view. Best-effort.
             try:
                 outstanding_rows = _state_svc.outstanding_rows()
-                print(f"state: {len(outstanding_rows)} outstanding (cumulative failures)")
+                log.info("state: %d outstanding (cumulative failures)", len(outstanding_rows))
             except Exception as _ox:  # noqa: BLE001
-                print(f"outstanding read skipped: {_ox!r}")
+                log.warning("outstanding read skipped: %r", _ox)
 except Exception as _exc:  # noqa: BLE001 - ops tables are best-effort
-    import traceback
-    print(f"ops audit/state write skipped: {_exc!r}")
-    traceback.print_exc()
+    log.warning("ops audit/state write skipped: %r", _exc, exc_info=True)
 
 # Volume data copy (FEAT-4): copy managed + external volume FILES source→target via
 # the Files API — the bundle carries the volume securables, not their bytes. Toggle
@@ -299,15 +329,16 @@ if cfg.copy_volume_data:
         ]
         if not cfg.source_workspace_url:
             vol_copy_status = "skipped: no source_workspace_url (set source auth)"
-            print(f"[volume-copy] {vol_copy_status}")
+            log.warning("volume-copy %s", vol_copy_status)
         elif not _volumes:
             vol_copy_status = "no volumes in scope"
-            print(f"[volume-copy] {vol_copy_status}")
+            log.info("volume-copy: %s", vol_copy_status)
         else:
             _secret = cfg.source_client_secret
             if not _secret and cfg.source_secret_scope and cfg.source_secret_key:
                 _secret = dbutils.secrets.get(
                     scope=cfg.source_secret_scope, key=cfg.source_secret_key)
+            register_secret(_secret)  # scrub the source SP secret from all log lines
             _src_client = WorkspaceClient(direct_workspace_auth(
                 cfg.source_workspace_url, cfg.source_client_id, _secret))
             # FEAT-1: persist the control table through the import WAREHOUSE executor
@@ -328,7 +359,7 @@ if cfg.copy_volume_data:
                 _control = WarehouseVolumeCopyControl(warehouse_executor, _ctrl_table)
             except Exception as _cx:  # noqa: BLE001
                 _control_kind = f"in-memory (control table unavailable: {_cx!r})"
-                print(f"[volume-copy] {_control_kind}")
+                log.warning("volume-copy %s", _control_kind)
                 _control = InMemoryVolumeCopyControl()
             _copier = VolumeDataCopier(_src_client, wc, control=_control)
             _all_copy = []
@@ -351,19 +382,17 @@ if cfg.copy_volume_data:
                     _flush_status = "flushed"
                 except Exception as _fx:  # noqa: BLE001
                     _flush_status = f"flush FAILED: {_fx!r}"
-                    print(f"[volume-copy] {_flush_status}")
+                    log.error("volume-copy %s", _flush_status)
             vol_copy_status = (
                 f"control={_control_kind}; {copy_summary(_all_copy)}; flush={_flush_status}"
             )
-            print(f"[volume-copy] {vol_copy_status}")
+            log.info("volume-copy: %s", vol_copy_status)
             for _r in _all_copy:
                 if _r.status in ("FAILED", "SKIPPED_TOO_LARGE"):
-                    print(f"  [{_r.status}] {_r.source_path}: {_r.message[:160]}")
+                    log.warning("volume-copy [%s] %s: %s", _r.status, _r.source_path, _r.message[:160])
     except Exception as _exc:  # noqa: BLE001 - volume data copy is best-effort
-        import traceback
         vol_copy_status = f"skipped: {_exc!r}"
-        print(f"[volume-copy] {vol_copy_status}")
-        traceback.print_exc()
+        log.error("volume-copy %s", vol_copy_status, exc_info=True)
 
 # Clean migration report (spine + governance sheets) under reports/. Written AFTER the
 # volume-data copy so the report includes the FEAT-4 copy results (bug #17). The import
@@ -393,10 +422,9 @@ try:
         outstanding=outstanding_rows,
         workspace_url=getattr(wc.auth, "host", ""),
     )
-    print(f"report: {report_path}")
+    log.info("report: %s", report_path)
 except Exception as _exc:  # noqa: BLE001
-    import traceback
-    traceback.print_exc()
+    log.error("report generation failed: %r", _exc, exc_info=True)
     # Bug #4 — every run must produce its report; there is no opt-out. A failure to
     # write the report always fails the run.
     raise RuntimeError(
@@ -407,10 +435,18 @@ except Exception as _exc:  # noqa: BLE001
 summary = {}
 for r in results:
     summary[r.status] = summary.get(r.status, 0) + 1
-print(json.dumps({"run_id": run_id, "by_status": summary}, indent=2))
+log.info("import by_status: %s", json.dumps(summary))
 for r in results:
     if r.status not in ("SUCCESS", "SKIP_EXISTING", "PENDING", "UNCHANGED"):
-        print(f"  [{r.status}] {r.object_type} {r.target_full_name}: {str(r.message)[:200]}")
+        log.warning("[%s] %s %s: %s", r.status, r.object_type,
+                    r.target_full_name, str(r.message)[:200])
+
+# Persist the full run log alongside the report so a handed-over artifact includes it.
+try:
+    with open(f"{_local(base)}/reports/import.log", "w") as fh:
+        fh.write(get_captured_log())
+except Exception as _exc:  # noqa: BLE001 - log persistence is best-effort
+    log.warning("run-log persistence skipped: %r", _exc)
 
 # Task 10 — a governance failure is NEVER a silently green run. The report and the
 # audit/state tables were already written above (so the run is fully accounted for),
@@ -423,10 +459,10 @@ exit_payload = {"run_id": run_id, "by_status": summary,
                 "governance_failed": len(gov_failed),
                 "volume_copy": vol_copy_status}
 if gov_failed:
-    print(f"\n[import] {len(gov_failed)} GOVERNANCE FAILURE(S) — job will exit non-zero:")
+    log.error("%d GOVERNANCE FAILURE(S) — job will exit non-zero:", len(gov_failed))
     for r in gov_failed:
-        print(f"  [{r.error_code}] {r.object_type} {r.target_full_name}: "
-              f"{str(r.message)[:200]}")
+        log.error("  [%s] %s %s: %s", r.error_code, r.object_type,
+                  r.target_full_name, str(r.message)[:200])
     raise RuntimeError(
         f"UC Sync import completed with {len(gov_failed)} governance failure(s) "
         "(PROTECTION_FAILED / GOVERNANCE_FAILED / ABAC_WAREHOUSE_REQUIRED). The "
