@@ -1170,27 +1170,27 @@ class PackageImportEngine:
         ):
             group_paths = list(group)  # already name-sorted within the rank
             results = self._run_ddl_group(group_paths, inventory, by_target, executor)
-            # Retry the intra-rank dependency failures (only meaningful after a parallel
-            # pass; a sequential first pass already respected name order).
+            # ONE retry pass per object type (BUG-QA1). The parallel pass can attempt a
+            # same-rank object before a sibling it depends on commits (e.g. a table with
+            # a FK to another table in this level) → a transient TABLE_OR_VIEW_NOT_FOUND
+            # / ROUTINE_NOT_FOUND. A single sequential re-run of the failed set — where
+            # the siblings now exist — resolves that. Deliberately just ONE pass: whatever
+            # still fails is a real failure and is reported as-is (no loop). This keeps
+            # behaviour simple and matches the sequential path (which does no retry and is
+            # what customers run today — same-rank dependencies are rare). Skipped when
+            # sequential (threads=1) or dry-run: there is no ordering hazard to undo.
             parallel = self.parallel_threads > 1 and not self.dry_run
             if parallel:
-                for _attempt in range(3):
-                    failed = [p for p in group_paths if results[p].status == "FAILURE"]
-                    if not failed:
-                        break
+                failed = [p for p in group_paths if results[p].status == "FAILURE"]
+                if failed:
                     # Clear the stale "absent" marks so a now-succeeding retry is not
-                    # skipped by the governance phases, then re-run sequentially.
+                    # skipped by the governance phases, then re-run the failed set once
+                    # sequentially.
                     for p in failed:
                         self._absent_objects.discard(results[p].target_full_name)
-                    retried = self._run_ddl_group(
+                    results.update(self._run_ddl_group(
                         failed, inventory, by_target, executor, force_sequential=True
-                    )
-                    results.update(retried)
-                    still_failed = sum(
-                        1 for p in failed if results[p].status == "FAILURE"
-                    )
-                    if still_failed >= len(failed):
-                        break  # no progress → remaining failures are real
+                    ))
             for p in group_paths:  # deterministic (name-sorted) order + ordinals
                 order += 1
                 results[p].import_order = order

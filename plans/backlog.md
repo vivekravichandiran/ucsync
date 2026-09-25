@@ -721,9 +721,12 @@ EXISTS but `employees` is absent; import.log shows the FK error. Cascaded to 4 d
 + a red run. At `parallel_threads=1` the filename sort (departments < employees) avoids it, and the
 **120 independent `tc_parallel` tables replicated cleanly at `threads=4`** (so the pool itself is
 correct — the gap is only intra-rank *dependencies*). The plan's Item-3 "intra-rank independence
-assumption" caveat. **Fix:** a bounded failed-set retry pass within each rank level (re-run the
-still-FAILED objects sequentially after the parallel pass; each pass resolves one dependency layer).
-**Status: FIXED same session** — `_process_ddl_level` retry pass + `tests/test_import_parallelism_feat3.py`.
+assumption" caveat. **Fix (agreed simple, 2026-09-25):** ONE retry pass per object type — after
+the parallel pass, re-run the failed set once sequentially (siblings now exist); whatever still
+fails is reported as-is (no loop, no FK-deferral, no topo-sort — same-rank FKs are rare, Delta FKs
+are informational, and sequential runs are unchanged). **Status: FIXED + validated LIVE round 1b**
+— `_process_ddl_level` single retry + `tests/test_import_parallelism_feat3.py`; on the target,
+`employees` + its 4 views are `created` (cascade gone), only the 3 intended `tc_negative` cases fail.
 
 #### Env note (NOT a code bug): orphaned ops audit/state tables after the 2-week Azure wipe
 `uc_sync_audit`/`uc_sync_state` metadata survived the wipe but their gov-account storage was
