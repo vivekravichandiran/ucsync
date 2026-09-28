@@ -19,6 +19,9 @@ stated as the asserted minimum and can be **verified live** with `testing/permis
 > | **Target run SP** | Target catalog | `ALL PRIVILEGES` **+ `MANAGE`** **+ `APPLY TAG`** + `CREATE EXTERNAL TABLE/VOLUME` on the EL + ops-schema grants + `CAN USE` on the import warehouse |
 >
 > `MANAGE` is the key privilege and is **not** part of `ALL PRIVILEGES` — grant it explicitly.
+> The source SP also needs **`system` access** (tags + ABAC read from `system.information_schema`),
+> and both SPs need the SCIM entitlements `workspace-access` + `databricks-sql-access` (**+
+> `allow-cluster-create` on the target run SP** for the job cluster). See the sections below.
 
 ## 📖 Contents
 
@@ -27,7 +30,7 @@ stated as the asserted minimum and can be **verified live** with `testing/permis
 3. [Target run SP (Import)](#-target-run-sp-import)
 4. [Why these specific privileges](#-why-these-specific-privileges)
 5. [External locations & storage credentials](#-external-locations--storage-credentials)
-6. [`information_schema` scope — verify live](#-information_schema-scope--verify-live)
+6. [`system` access — tags & ABAC](#-system-access--required-to-read-tags--abac)
 7. [Manual prerequisites the tool will never do](#-manual-prerequisites-the-tool-will-never-do)
 8. [Troubleshooting: symptom → cause → fix](#-troubleshooting-symptom--cause--fix)
 9. [Setup checklist](#-setup-checklist)
@@ -94,6 +97,42 @@ tighter than `ALL PRIVILEGES`, use the explicit `CREATE TABLE, CREATE FUNCTION, 
 > creates them needs the corresponding metastore-level create right on those securables, granted by
 > their owner — still not metastore admin.
 
+> **Governed tags are account-level.** `APPLY TAG` on the catalog is enough to *apply* a governed
+> tag's value. If a governed tag was **created by a different principal** and tag-policy assignment
+> permissions are enforced, the run SP also needs **`ASSIGN` on that governed tag** (granted by the
+> tag owner, or someone with `MANAGE` on it) — otherwise `SET TAGS` fails `GOVERNANCE_PREREQ_MISSING` /
+> `PROTECTION_FAILED`. Assignment permission is managed at the **account / tag-policy** level, not via
+> workspace SQL. Still not metastore admin.
+
+---
+
+## 🧩 Workspace entitlements & running a Job as a service principal
+
+The grants above are **Unity Catalog** privileges. To *run the notebooks/Jobs*, each SP also needs
+**workspace entitlements** (SCIM), which are separate and easy to miss:
+
+| Entitlement | Who | Why |
+|-------------|-----|-----|
+| `workspace-access` | both SPs | Sign in / use the workspace at all. |
+| `databricks-sql-access` | both SPs | Use SQL warehouses (all DDL/governance runs on a warehouse). |
+| **`allow-cluster-create`** | **target run SP** | The e2e/import Job creates a **new job cluster**; without this the run fails at cluster start: `PERMISSION_DENIED: You are not authorized to create clusters`. (Not needed if you point the job at an `existing_cluster_id`.) |
+
+```bash
+# Grant via SCIM (workspace admin), e.g.:
+databricks api patch /api/2.0/preview/scim/v2/ServicePrincipals/<sp_scim_id> --json \
+ '{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{"op":"add","path":"entitlements","value":[{"value":"workspace-access"},{"value":"databricks-sql-access"},{"value":"allow-cluster-create"}]}]}'
+```
+
+**Running a Job *as* the SP (`run_as`).** Setting a Job's `run_as` to a service principal requires the
+**job creator to hold the `servicePrincipal.user` role on that SP** — an **account-level** grant
+(account admin console / account SCIM), *not* something a catalog owner can do. Two ways:
+
+1. **Grant `servicePrincipal.user`** on the target SP to the operator who installs the jobs (via
+   `00_Install_Jobs` with `run_as_spn` set), then install as usual.
+2. **Create the Job while authenticated as the SP itself** (M2M OAuth) — the creator *is* the SP, so
+   `run_as` defaults to it and no extra role is needed. (The SP then also needs read access to the
+   notebooks — e.g. `CAN_MANAGE` on the git folder — and the entitlements above.)
+
 ---
 
 ## 3️⃣ Why these specific privileges
@@ -131,19 +170,29 @@ granted by the **EL owner** — again no metastore admin.
 
 ---
 
-## 🔎 `information_schema` scope — verify live
+## 🔎 `system` access — required to read tags & ABAC
 
-Databricks docs: the per-catalog `<catalog>.information_schema` needs only `USE CATALOG` +
-`SELECT`/`BROWSE` (covered above), **not** the `system` catalog. Some environments have been observed
-to require central `system.information_schema` access. **Don't assume — the permission probe proves
-it.** If `system` reads turn out to be needed, that is a `SELECT` grant on the `system` schema issued
-by whoever owns `system`; it does **not** make the SP a metastore admin:
+Governed **tags** and **ABAC policies** are read from `system.information_schema` (the `column_tags`
+and `abac_policy_definitions` views), so the source SP needs **`system` access** — not just the
+per-catalog `information_schema`. Without it, **grants still migrate** (they come from the permissions
+API) but **tags and ABAC come back empty**, and the run can still report success. Grant it (issued by
+the owner of `system`; it does **not** make the SP a metastore admin):
 
 ```sql
 GRANT USE CATALOG ON CATALOG system TO `<src_spn>`;
-GRANT USE SCHEMA ON SCHEMA system.information_schema TO `<src_spn>`;
-GRANT SELECT ON <the needed system.information_schema views> TO `<src_spn>`;
+GRANT USE SCHEMA  ON SCHEMA  system.information_schema TO `<src_spn>`;
+GRANT SELECT      ON SCHEMA  system.information_schema TO `<src_spn>`;
 ```
+
+**Verify as the SP** — both queries must return rows when the source has governance:
+
+```sql
+SELECT count(*) FROM <catalog>.information_schema.abac_policy_definitions;
+SELECT count(*) FROM <catalog>.information_schema.column_tags;
+```
+
+If either is empty while the source has tags or ABAC, the SP is missing `system` access. The
+permission probe checks this too.
 
 ---
 
@@ -173,19 +222,27 @@ manual actions** rather than failing or guessing.
 | **`EXTERNAL_LOCATION_MISSING`** on an external table/volume/schema | Its target `LOCATION` has no covering external location, or no `object_locations_path` row (existing-catalog mode) | Add an `object_locations.csv` row whose path is covered by an **existing** EL; grant `CREATE EXTERNAL …` on that EL. |
 | **`NO_SUCH_STORAGE_CREDENTIAL_EXCEPTION`** on external location | Source-named credential absent on target | Provide it in the mapping, or if the target EL already covers the path set `create_storage_credentials=false` + `create_external_locations=false`. |
 | **`ROW_COLUMN_ACCESS_POLICIES_NOT_SUPPORTED_ON_ASSIGNED_CLUSTERS`** | Masks/row filters on a single-user cluster | Use Standard (USER_ISOLATION) or serverless compute. |
+| **`PERMISSION_DENIED: … not authorized to create clusters`** at job start | The run-as SP lacks the `allow-cluster-create` **entitlement** for the job cluster | Grant `allow-cluster-create` (SCIM, above), or point the job at an `existing_cluster_id`. |
+| **Tags / ABAC sheets empty, grants present** | Source SP missing **`system`** access (governed tags/ABAC read via `system.information_schema`) | Grant `system` access to the source SP (see `information_schema` scope); verify with the two count queries. |
+| **`GOVERNANCE_PREREQ_MISSING` / `PROTECTION_FAILED` on a governed tag owned by another principal** | Run SP has `APPLY TAG` but not `ASSIGN` on that account-level governed tag | Grant `ASSIGN` on the governed tag (tag owner / account tag-policy), or pre-define it as the run SP. |
 | **Storage credential shows `MANUAL_ACTION_REQUIRED`** | Secrets are never exported | Recreate the credential by hand. |
 
 ---
 
 ## 🧰 Setup checklist
 
+**Entitlements (both SPs, SCIM):** `workspace-access`, `databricks-sql-access`; **plus
+`allow-cluster-create` on the target run SP** (it creates the job cluster). To run a Job *as* the SP,
+also arrange `servicePrincipal.user` (account) or create the Job authenticated as the SP.
+
 **Source read SP** — on the source catalog: `USE CATALOG`, `USE SCHEMA`, `SELECT`, `EXECUTE`,
-`READ VOLUME`, **`MANAGE`**; `CAN USE` on a source SQL warehouse.
+`READ VOLUME`, **`MANAGE`**; **`system` access** (`USE CATALOG`/`USE SCHEMA`/`SELECT` on
+`system.information_schema`, for tags + ABAC); `CAN USE` on a source SQL warehouse.
 
 **Target run SP** — on the pre-created target catalog + ops schema: `ALL PRIVILEGES`, **`MANAGE`**,
 **`APPLY TAG`** on the catalog; `USE CATALOG`/`USE SCHEMA`/`CREATE TABLE`/`MODIFY`/`SELECT` on the ops
 schema; `CREATE EXTERNAL TABLE`/`CREATE EXTERNAL VOLUME` on the EL (external objects only); `CAN USE`
-on a target SQL warehouse.
+on a target SQL warehouse; **`ASSIGN`** on any governed tag owned by another principal (conditional).
 
 **Prerequisites (before import):** target metastore + storage + access connector; identities present
 on target. *(Governed-tag definitions are recreated by the tool in Phase 0 — pre-provision them only

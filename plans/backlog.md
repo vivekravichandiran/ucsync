@@ -278,6 +278,16 @@ Decide whether to fold this into `retry_failed_only` or ship it independently.
 
 ## 5. Docs: SPN `system` access + governance-only re-apply (DOC UPDATE)
 
+**Status: DONE 2026-09-25 (v1.1.0).** Consolidated pass after QA. VERSION→1.1.0 + pyproject +
+CHANGELOG `[1.1.0]`. PERMISSIONS_GUIDE: `system` access now a first-class requirement (+ verify
+queries) [5a]; new "Workspace entitlements & running a Job as an SP" section (`workspace-access` /
+`databricks-sql-access` / **`allow-cluster-create`** / `servicePrincipal.user` — QA-surfaced) [holistic];
+governed-tag `ASSIGN` conditional [5d]; troubleshooting rows + checklist + TL;DR. CONFIGURATION_GUIDE:
+new widgets `log_level` / `parallel_threads` / `exclude_regex` / `retry_failed_only`; **install-time
+toggle gotcha** [5c]; per-facet `*_status` note; widget-grouping note; quick index. RUNBOOK:
+troubleshooting (system-access, cluster-create) + **governance-only re-apply** procedure [5b] +
+retry-failed-only + prerequisites. **All 10 backlog items now complete; 388 tests green.**
+
 **Timing (decided 2026-09-24):** track doc *requirements* here now (each feature/bug item notes its
 doc impact), but do the actual doc *writing* in **one consolidated pass after the code items are
 implemented and tested** — testing will refine behaviour and surface new caveats, and docs should

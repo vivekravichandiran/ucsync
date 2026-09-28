@@ -34,6 +34,12 @@ which `00_Install_Jobs` bakes in for you.
 - **`Config.validate()` fails fast** on a bad combination (e.g. `dry_run=false` with no
   `ops_catalog`/`ops_schema`, or `direct` remote mode with no `source_workspace_url`), so a mistake
   surfaces at config time, not halfway through a migration.
+- **Widgets render grouped + ordered.** Each widget carries a numbered `label`
+  (`1a. Source · …`, `2a. Scope · …`, `3a. Create · …`, `4a. Apply · …`, `5a. Warehouse · …`,
+  `6a. Cluster · …`, `7a. Proxy · …`, `8a. Run · …`) and Databricks sorts by label, so related
+  widgets cluster. The widget **name/key is unchanged**, so `dbutils.widgets.get(...)` and job
+  params are unaffected. *(If you ever saved a custom drag-reordered layout on a notebook,
+  Databricks keeps your layout instead of auto-sorting.)*
 
 ---
 
@@ -42,7 +48,7 @@ which `00_Install_Jobs` bakes in for you.
 | Value | How it's derived |
 |-------|------------------|
 | **`stage`** (`INVENTORY` / `EXPORT` / `IMPORT`) | Set by each notebook — you don't enter it. |
-| **State/audit table names** | Tool-owned in `ops_catalog.ops_schema`: `uc_sync_audit`, `uc_sync_state`, `uc_sync_volume_files`. Nothing to typo. |
+| **State/audit table names** | Tool-owned in `ops_catalog.ops_schema`: `uc_sync_audit`, `uc_sync_state`, `uc_sync_volume_files`. Nothing to typo. `uc_sync_state` tracks each object in three **facets** — `ddl_status`, `governance_status`, `grants_status` — so a partial failure (e.g. structure OK, tags failed) is recorded honestly and only the failed facet re-applies next run. New columns are added + backfilled in place on upgrade; existing baselines keep working. |
 | **`run_id` chaining** | Inside a Job it chains automatically (`{{job.run_id}}`). For the standalone **Airgap Import** job it is a **job parameter** — set it to the bundle-folder id printed by the source Inventory+Export run. |
 | **Bundle path** | `<output_volume_path>/run_<run_id>/…` |
 
@@ -58,6 +64,8 @@ which `00_Install_Jobs` bakes in for you.
 | **`run_id`** | string | 02, 03 | Ties Export/Import to the Inventory run. Chains automatically inside a Job; set explicitly for the standalone Airgap Import job. |
 | **`source_warehouse_id`** | warehouse id | 01, 02 | **SQL warehouse — REQUIRED for export in every mode (airgap included).** All full-fidelity DDL capture runs on it (`SHOW CREATE`; functions from `information_schema`). A failed capture is a **hard failure** (`DDL_CAPTURE_FAILED`) — no synthesized fallback. Also what stage 01 uses to read tags + ABAC (classic job-cluster Spark cannot read `information_schema.abac_policy_definitions`). Point it at any warehouse on the workspace that owns the objects. |
 | **`preflight_enforce`** | bool (default `true`) | all | Graded environment preflight. Enforced → a **NO-GO** (missing report library, unreachable warehouse) is a red run, never a silent degrade. `false` downgrades a NO-GO to a loud warning. |
+| **`log_level`** | `INFO` (default) \| `DEBUG` \| `WARNING` \| `ERROR` | all | Structured-logging verbosity. Every line carries `run_id` + stage; the full run log is written next to the report (`reports/<stage>.log`). `DEBUG` adds verbose per-object detail. |
+| **`parallel_threads`** | int (default `4`) | all | Bounded worker pool for the per-object work **inside** a stage (Export `SHOW CREATE`, Inventory grant fan-out, Import within-level creation). **`1` = fully sequential** (the safe fallback). Keep it **≤ the SQL warehouse's max concurrent queries** — every worker's DDL/governance runs through that warehouse. Final report/state/audit are identical regardless of thread count. |
 
 ---
 
@@ -67,6 +75,7 @@ which `00_Install_Jobs` bakes in for you.
 |--------|--------|-------------|
 | **`catalogs`** | csv or blank | Scope. Blank = whole metastore. This is the **source** scope — there is no separate "target catalog" input. |
 | **`schemas`** | csv `catalog.schema` or blank | Scope within the catalog(s). |
+| **`exclude_regex`** | csv of regexes or blank | **Table exclude filter.** Comma-separated Python regexes matched with `.search()` on `catalog.schema.table`; a matching table (and its DDL/grants/masks) is never captured. Escape dots (`\.`), anchor with `$`, and note a bare `orders` substring-matches `orders_archive`. Parent catalog/schema are never excluded. Blank = exclude nothing. e.g. `.*_TEMP$, sales\.public\.orders_raw$`. |
 
 ---
 
@@ -117,6 +126,7 @@ base-path swap → catalog root / skip.**
 | **`run_as_spn`** | SP appId or blank | Run the import as a target **service principal** so migrated securables are owned by it. Blank = run as the installing user. |
 | **`copy_volume_data`** | bool (default `false`) | Copy volume **file bytes** (not in the bundle) from source to target. Needs the source-connection widgets to read the source. Off = volume *definitions* migrate, contents don't. Recorded in `uc_sync_volume_files`. |
 | **`migrate_materialized_views`** | bool (default `false`) | Streaming tables & materialized views are DLT/SDP-managed and **report-only** by default. `true` migrates materialized views; streaming tables are always report-only. |
+| **`retry_failed_only`** | bool (default `false`) | Replay **only** the prior run's failed objects (read from `uc_sync_state`'s per-facet status) plus their required parents, skipping everything else regardless of deltas. Same `run_id`/bundle as a normal import — no re-export. Requires a prior run that seeded `uc_sync_state`. Off = normal incremental behavior. |
 
 ### Create / apply toggles
 
@@ -129,6 +139,13 @@ base-path swap → catalog root / skip.**
 > There is **no `force_full` widget** — incremental vs full is auto-detected from `uc_sync_state`
 > (baseline present → incremental; none → full + seed). To force a full re-seed, reset the baseline
 > (see [Runbook](RUNBOOK.md#-re-running-additive--incremental)).
+
+> ⚙️ **Toggles are baked in at install time — not a run-time knob.** `00_Install_Jobs` substitutes
+> each `create_*` / `apply_*` / `parallel_threads` / `log_level` / `retry_failed_only` value into the
+> installed job's task `base_parameters`. Only **`run_id`** is a true job parameter. So to *change* a
+> toggle you must either **re-run `00_Install_Jobs`** with the new values (re-deploys the job specs),
+> or **run the `03_Import` notebook directly** with its widgets set — Jobs UI "Run now with different
+> parameters" reliably overrides only `run_id`.
 
 ---
 
@@ -232,6 +249,7 @@ cluster by default; set `existing_cluster_id` to reuse one.
 | `create_catalogs` / `create_schemas` / `create_storage_credentials` / `create_external_locations` | import | **`false`** (BYO) |
 | `create_volumes` / `create_functions` / `create_tables` / `create_views` / `create_abac_policies` | import | `true` |
 | `dry_run` | import | `false` |
+| `exclude_regex` | inventory | `""` |
 | `existing_cluster_id` | install | `""` |
 | `external_locations_path` | 01, 02, 03 | `""` |
 | `filter_tables` | import | `""` |
@@ -239,13 +257,16 @@ cluster by default; set `existing_cluster_id` to reuse one.
 | `import_warehouse_id` | import | *(required for import)* |
 | `job_name_prefix` | install | `UC-Gov-Migration` |
 | `jobs_to_create` | install | `End-to-end Dry Run` |
+| `log_level` | all | `INFO` |
 | `migrate_materialized_views` | import | `false` |
 | `no_proxy` | install | *(Databricks + Azure storage hosts)* |
 | `node_type_id` / `spark_version` | install | env default |
 | `object_locations_path` | import | `""` |
 | `ops_catalog` / `ops_schema` | all | `""` (required live) |
 | `output_volume_path` | all | *(required)* |
+| `parallel_threads` | all | `4` |
 | `preflight_enforce` | all | `true` |
+| `retry_failed_only` | import | `false` |
 | `run_as_spn` | import, install | `""` |
 | `run_id` | 02, 03 | *(auto / chained)* |
 | `run_now` | install | `false` |

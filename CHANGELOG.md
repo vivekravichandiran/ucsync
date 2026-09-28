@@ -21,6 +21,54 @@ Bump rules:
 
 _Nothing yet._
 
+## [1.1.0] - 2026-09-25
+
+Optimization + observability release: within-stage parallelism, structured logging, per-facet
+state, a retry-failed-only import mode, and a table-exclusion filter — plus bug fixes. Backward
+compatible: every addition is opt-in or defaults to the prior behavior, and `uc_sync_state` is
+upgraded in place (new columns added + backfilled), so existing baselines keep working.
+
+### Added
+- **Structured logging across the notebooks** — one `uc_sync` app logger with per-module child
+  loggers; every line carries `run_id` + stage (INVENTORY/EXPORT/IMPORT), levelled INFO/WARNING/
+  ERROR (DEBUG opt-in). New **`log_level`** widget (default `INFO`). The full run log is captured
+  and written next to the report (`reports/<stage>.log`), so a handed-over artifact is enough to
+  diagnose a failure without a live repro. Registered secrets are redacted from every line.
+- **Within-stage parallelism** — new single **`parallel_threads`** widget (default `4`; `1` =
+  today's exact sequential behavior / kill-switch). Export parallelizes the `SHOW CREATE`
+  pre-capture; Inventory parallelizes the per-object grant fan-out; Import parallelizes object
+  creation **within each `_type_rank` level** with a barrier between levels (functions before
+  tables), deterministic `import_order`, and a single retry pass per object type for transient
+  same-rank dependency ordering (e.g. a FK to a sibling table). Keep `parallel_threads` ≤ the
+  warehouse's max concurrent queries.
+- **`exclude_regex`** table-exclusion widget (Inventory) — comma-separated Python regexes matched
+  with `.search()` on `catalog.schema.table`; excluded tables (and their DDL/grants/masks) are never
+  captured. Parent catalog/schema are never excluded.
+- **Retry-failed-only import mode** — new **`retry_failed_only`** widget (import). Replays only the
+  prior run's failed objects (read from `uc_sync_state`'s per-facet status) plus their required
+  parents, skipping everything else regardless of deltas. Same `run_id`/bundle — no re-export.
+- **Per-facet state tracking** — `uc_sync_state` gains **`ddl_status`**, **`governance_status`**,
+  **`grants_status`** (added in place + backfilled from `last_action`/hashes on existing tables). A
+  facet's fingerprint advances only when that facet actually applied; the delta planner re-applies a
+  facet whose prior status is `failed`. This closes two gaps: a green incremental run no longer masks
+  a still-unapplied governance step, and a grant that raised is replayed on the next run (e.g. an
+  external object created out-of-band later).
+- **Grouped, ordered widgets** — every widget now carries a numbered `label` (Databricks sorts by
+  label), clustered by group (Source / Scope / Create / Apply / Warehouse / Cluster / Proxy / Run).
+  Widget **names/keys and job params are unchanged**.
+
+### Changed
+- **Removed the inert `mapping_file_path` input.** External-storage mapping is `external_locations_path`;
+  a legacy location CSV is `location_mapping_csv_path`. No behavior change (the field was already a no-op).
+
+### Fixed
+- **"dropped fail-closed" messaging** — a governance failure now reports "dropped" only when a fresh
+  shell created this run was actually dropped; a pre-existing / create-disabled table (never dropped)
+  reports "marked FAILURE (not dropped — pre-existing)".
+- **Parallel same-rank dependency ordering (BUG-QA1)** — under parallel import, a table with a
+  FOREIGN KEY to a sibling in the same level could be created before the sibling committed. A single
+  sequential retry pass per object type resolves it; whatever still fails is reported honestly.
+
 ## [1.0.0] - 2026-09-15
 
 First production release. Migrates **Unity Catalog structure + governance** (no table data) from a
