@@ -203,7 +203,7 @@ manual actions** rather than failing or guessing.
 
 | Manual prerequisite | Why | What to do |
 |---------------------|-----|------------|
-| **Governed-tag definitions** *(conditional)* | The tool **recreates** them itself in Phase 0 (`CREATE GOVERNED TAG`, idempotent) from the source's captured definitions. But governed tags are **account-scoped**, so creating one may need a privilege beyond the catalog-scoped `APPLY TAG` — and reading the source's definitions needs the source SP to reach `/api/2.1/tag-policies`. | If either can't happen, define the tag on the target account first (workspace-migration utility / `POST /api/2.1/tag-policies`), else `SET TAGS` reports `GOVERNANCE_PREREQ_MISSING`. |
+| **Governed-tag definitions** *(conditional)* | The tool **recreates** them itself in Phase 0 (`CREATE GOVERNED TAG`, idempotent) from the source's captured definitions — the one prerequisite is that the source SP can read those definitions via `/api/2.1/tag-policies`. | If the source definitions can't be read, define the tag on the target account first (workspace-migration utility / `POST /api/2.1/tag-policies`), else `SET TAGS` reports `GOVERNANCE_PREREQ_MISSING`. |
 | **Target metastore + storage + access connector** | Azure + account-admin work | Create the target metastore, ADLS container, and a Databricks access connector with `Storage Blob Data Contributor`; hand over the connector id + path mapping. |
 | **Storage-credential secrets (non-MI)** | Secrets are never exported | Recreate the credential by hand; the utility emits `MANUAL_ACTION_REQUIRED` with the DDL retained for review. |
 | **Identities (users / groups / SPs)** | Owned by the workspace-migration utility | Ensure principals exist on the target before grants replay. |
@@ -215,7 +215,7 @@ manual actions** rather than failing or guessing.
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
-| **`GOVERNANCE_PREREQ_MISSING`** on tags/ABAC | The Phase-0 governed-tag recreate didn't cover it (couldn't read the source definition, or `CREATE GOVERNED TAG` lacked account-level privilege), or a referenced mask/filter **function** is missing | Define the tag on the target account (workspace-migration utility); ensure functions imported (`create_functions=true`). |
+| **`GOVERNANCE_PREREQ_MISSING`** on tags/ABAC | The Phase-0 governed-tag recreate didn't cover it (couldn't read the source definition), or a referenced mask/filter **function** is missing | Define the tag on the target account (workspace-migration utility); ensure functions imported (`create_functions=true`). |
 | **ABAC Policies / Policy-Matched-Columns sheets empty** (tags populate fine) | `source_warehouse_id` unset — classic job-cluster Spark can't read `abac_policy_definitions` | Set `source_warehouse_id` to a SQL warehouse (required in airgap too). |
 | **`CREATE MANAGED STORAGE` denied on catalog create**, then `NO_SUCH_CATALOG` cascade | An older build transferred ownership before creating the catalog, stripping the run principal's `CREATE MANAGED STORAGE` | **Fixed** — ownership is now deferred to a final phase. On an old build, grant it back and re-run. |
 | **`PERMISSION_DENIED: … CREATE SCHEMA on Catalog`** (existing-catalog mode) | The run SP doesn't own the pre-existing catalog and lacks `CREATE SCHEMA` | `GRANT USE CATALOG, CREATE SCHEMA ON CATALOG <cat> TO \`<spn>\`` as the owner (or run as the owner). |
