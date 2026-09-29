@@ -43,22 +43,22 @@ dbutils.widgets.text("source_client_id", "", "1c. Source · SP client id (plaint
 dbutils.widgets.text("source_client_secret", "", "1d. Source · SP secret (plaintext, option 1)")
 dbutils.widgets.text("source_secret_scope", "", "1e. Source · secret scope (option 2)")
 dbutils.widgets.text("source_secret_key", "", "1f. Source · secret key (option 2)")
-dbutils.widgets.text("output_volume_path", "", "2d. Scope · Output volume path")
-dbutils.widgets.text("ops_catalog", "", "2e. Scope · Ops catalog")
-dbutils.widgets.text("ops_schema", "", "2f. Scope · Ops schema")
+dbutils.widgets.text("output_volume_path", "", "3a. Output · Output volume path")
+dbutils.widgets.text("ops_catalog", "", "3b. Output · Ops catalog")
+dbutils.widgets.text("ops_schema", "", "3c. Output · Ops schema")
 # The single external-storage mapping file (task 2). Drives the export-time path
 # rewrite (source→target external LOCATIONs + external-location URLs). 2-col = BYO,
 # 3-col = create SC/EL on import. Blank = none.
-dbutils.widgets.text("external_locations_path", "", "2g. Scope · External locations file")
-dbutils.widgets.text("source_warehouse_id", "", "5a. Warehouse · Source (SHOW CREATE DDL)")
+dbutils.widgets.text("external_locations_path", "", "2d. Scope · External locations file")
+dbutils.widgets.text("source_warehouse_id", "", "6a. Warehouse · Source (SHOW CREATE DDL)")
 # Graded environment preflight (task 9): enforced by default.
-dbutils.widgets.dropdown("preflight_enforce", "true", ["true", "false"], "8a. Run · Preflight enforce")
+dbutils.widgets.dropdown("preflight_enforce", "true", ["true", "false"], "9a. Run · Preflight enforce")
 # Structured logging verbosity (backlog item 9). INFO by default; DEBUG opt-in.
-dbutils.widgets.dropdown("log_level", "INFO", ["INFO", "DEBUG", "WARNING", "ERROR"], "8b. Run · Log level")
+dbutils.widgets.dropdown("log_level", "INFO", ["INFO", "DEBUG", "WARNING", "ERROR"], "9b. Run · Log level")
 # Bounded parallelism for the SHOW CREATE capture burst (backlog item 3). 1 =
 # sequential. Keep ≤ the source warehouse's max concurrent queries.
-dbutils.widgets.text("parallel_threads", "4", "8g. Run · Parallel threads")
-dbutils.widgets.text("run_id", "", "8c. Run · Run id (from Inventory)")
+dbutils.widgets.text("parallel_threads", "4", "9g. Run · Parallel threads")
+dbutils.widgets.text("run_id", "", "9c. Run · Run id (from Inventory)")
 
 # COMMAND ----------
 

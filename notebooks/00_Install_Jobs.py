@@ -54,46 +54,46 @@ dbutils.widgets.text("source_secret_scope", "", "1e. Source · secret scope (opt
 dbutils.widgets.text("source_secret_key", "", "1f. Source · secret key (option 2)")
 
 # --- 2. Scope + ops locations (shared by every job) ---
-dbutils.widgets.text("catalogs", "", "2a. Scope · Catalogs (csv; blank = all)")
-dbutils.widgets.text("schemas", "", "2b. Scope · Schemas (csv catalog.schema)")
+dbutils.widgets.text("catalogs", "", "2a. Scope · Catalogs (comma separated; blank = all)")
+dbutils.widgets.text("schemas", "", "2b. Scope · Schemas (comma separated catalog.schema)")
 # Table EXCLUDE filter (backlog item 2): comma-separated Python regexes (.search on
 # catalog.schema.table). Blank = exclude nothing. Applied at inventory only.
-dbutils.widgets.text("exclude_regex", "", "2c. Scope · Exclude regex (csv)")
-dbutils.widgets.text("output_volume_path", "", "2d. Scope · Output volume path")
-dbutils.widgets.text("ops_catalog", "", "2e. Scope · Ops catalog")
-dbutils.widgets.text("ops_schema", "", "2f. Scope · Ops schema")
+dbutils.widgets.text("exclude_regex", "", "2c. Scope · Exclude regex (comma separated)")
+dbutils.widgets.text("output_volume_path", "", "3a. Output · Output volume path")
+dbutils.widgets.text("ops_catalog", "", "3b. Output · Ops catalog")
+dbutils.widgets.text("ops_schema", "", "3c. Output · Ops schema")
 # The single external-storage mapping file (task 2). 2 cols = BYO prefix-swap; 3 cols
 # (+access connector) = create SC/EL. Drives export path-rewrite AND import swap.
-dbutils.widgets.text("external_locations_path", "", "2g. Scope · External locations file")
+dbutils.widgets.text("external_locations_path", "", "2d. Scope · External locations file")
 # Import table filter (import/e2e; blank = every table). Accepts catalog.schema.table.
-dbutils.widgets.text("filter_tables", "", "2h. Scope · Import table filter (allowlist)")
+dbutils.widgets.text("filter_tables", "", "2e. Scope · Import table filter (allowlist)")
 # Catalog rename (import/e2e): JSON {"source_catalog":"target_catalog"}; blank = keep.
-dbutils.widgets.text("catalog_mapping_json", "", "2i. Scope · Catalog rename JSON")
+dbutils.widgets.text("catalog_mapping_json", "", "2f. Scope · Catalog rename JSON")
 # Per-object locations (import/e2e): CSV schema,volume,table,location; blank = root.
-dbutils.widgets.text("object_locations_path", "", "2j. Scope · Object locations file")
+dbutils.widgets.text("object_locations_path", "", "2g. Scope · Object locations file")
 
 # --- 4d/4e behavior toggles (materialized views + volume data copy) ---
 # Materialized views/streaming tables are DLT/SDP-managed report-only; set true to
 # migrate materialized views (streaming tables stay report-only).
-dbutils.widgets.dropdown("migrate_materialized_views", "false", ["true", "false"], "4d. Apply · Migrate materialized views")
+dbutils.widgets.dropdown("migrate_materialized_views", "false", ["true", "false"], "5d. Apply · Migrate materialized views")
 # Volume data copy (FEAT-4): copy volume files via the Files API; default off.
-dbutils.widgets.dropdown("copy_volume_data", "false", ["true", "false"], "4e. Apply · Copy volume data")
+dbutils.widgets.dropdown("copy_volume_data", "false", ["true", "false"], "5e. Apply · Copy volume data")
 # Retry-failed-only (backlog item 4; import/e2e jobs): replay only the prior run's failed
 # objects + parents from uc_sync_state; same run_id/bundle. Default off.
-dbutils.widgets.dropdown("retry_failed_only", "false", ["true", "false"], "4f. Apply · Retry failed only")
+dbutils.widgets.dropdown("retry_failed_only", "false", ["true", "false"], "5f. Apply · Retry failed only")
 
 # --- 5. Warehouses ---
 # Source SQL warehouse for governance reads (tags + ABAC). REQUIRED for a remote
 # source; STRONGLY RECOMMENDED for airgap-on-source (classic Spark returns EMPTY ABAC).
-dbutils.widgets.text("source_warehouse_id", "", "5a. Warehouse · Source (governance reads)")
+dbutils.widgets.text("source_warehouse_id", "", "6a. Warehouse · Source (governance reads)")
 # Target SQL warehouse for the ABAC phase. REQUIRED for import/e2e jobs whose bundle
 # carries ABAC policies (otherwise those fail closed and their tables are dropped).
-dbutils.widgets.text("import_warehouse_id", "", "5b. Warehouse · Import (ABAC + views)")
+dbutils.widgets.text("import_warehouse_id", "", "6b. Warehouse · Import (ABAC + views)")
 
 # --- 6. Cluster ---
-dbutils.widgets.text("existing_cluster_id", "", "6a. Cluster · Existing cluster id (blank = new)")
-dbutils.widgets.text("spark_version", "15.4.x-scala2.12", "6b. Cluster · Spark version")
-dbutils.widgets.text("node_type_id", "Standard_DS3_v2", "6c. Cluster · Node type id")
+dbutils.widgets.text("existing_cluster_id", "", "7a. Cluster · Existing cluster id (blank = new)")
+dbutils.widgets.text("spark_version", "15.4.x-scala2.12", "7b. Cluster · Spark version")
+dbutils.widgets.text("node_type_id", "Standard_DS3_v2", "7c. Cluster · Node type id")
 
 # --- 7. HTTP proxy for the job cluster (behind-proxy customer networks) ---
 # The job cluster does NOT inherit a corporate forward proxy by default. When the
@@ -101,31 +101,31 @@ dbutils.widgets.text("node_type_id", "Standard_DS3_v2", "6c. Cluster · Node typ
 # and (b) REST + cross-workspace calls route correctly (injected as spark_env_vars).
 # Blank both => nothing injected, cluster routes directly. NO_PROXY is the bypass list
 # (Databricks control plane + Azure storage data-plane + loopback/metadata).
-dbutils.widgets.text("http_proxy", "", "7a. Proxy · HTTP proxy URL (blank = none)")
-dbutils.widgets.text("https_proxy", "", "7b. Proxy · HTTPS proxy URL (blank = none)")
+dbutils.widgets.text("http_proxy", "", "8a. Proxy · HTTP proxy URL (blank = none)")
+dbutils.widgets.text("https_proxy", "", "8b. Proxy · HTTPS proxy URL (blank = none)")
 dbutils.widgets.text(
     "no_proxy",
     "localhost,127.0.0.1,169.254.169.254,*.databricks.com,*.azuredatabricks.net,"
     "*.databricks.azure.com,*.dfs.core.windows.net,*.blob.core.windows.net",
-    "7c. Proxy · NO_PROXY bypass list",
+    "8c. Proxy · NO_PROXY bypass list",
 )
 
 # --- 3. Create toggles + 4a-c apply toggles ---
 # BYO-by-default: catalog / schema / storage-credential / external-location creation
 # defaults OFF (customer prerequisites); contents + governance default ON.
 _TOGGLE_LABELS = {
-    "create_storage_credentials": "3a. Create · Storage credentials",
-    "create_external_locations": "3b. Create · External locations",
-    "create_catalogs": "3c. Create · Catalogs",
-    "create_schemas": "3d. Create · Schemas",
-    "create_volumes": "3e. Create · Volumes",
-    "create_functions": "3f. Create · Functions",
-    "create_tables": "3g. Create · Tables",
-    "create_views": "3h. Create · Views",
-    "create_abac_policies": "3i. Create · ABAC policies",
-    "apply_grants": "4a. Apply · Grants",
-    "apply_tags": "4b. Apply · Tags",
-    "apply_masks_row_filters": "4c. Apply · Masks & row filters",
+    "create_storage_credentials": "4a. Create · Storage credentials",
+    "create_external_locations": "4b. Create · External locations",
+    "create_catalogs": "4c. Create · Catalogs",
+    "create_schemas": "4d. Create · Schemas",
+    "create_volumes": "4e. Create · Volumes",
+    "create_functions": "4f. Create · Functions",
+    "create_tables": "4g. Create · Tables",
+    "create_views": "4h. Create · Views",
+    "create_abac_policies": "4i. Create · ABAC policies",
+    "apply_grants": "5a. Apply · Grants",
+    "apply_tags": "5b. Apply · Tags",
+    "apply_masks_row_filters": "5c. Apply · Masks & row filters",
 }
 for _t in (*CREATE_TOGGLES, *APPLY_TOGGLES):
     dbutils.widgets.dropdown(
@@ -135,16 +135,16 @@ for _t in (*CREATE_TOGGLES, *APPLY_TOGGLES):
 
 # --- 8. Run controls ---
 # Airgap Import: source bundle id (a job-param default set at run time).
-dbutils.widgets.text("run_id", "", "8e. Run · Run id (Airgap Import bundle id)")
+dbutils.widgets.text("run_id", "", "9e. Run · Run id (Airgap Import bundle id)")
 # Graded preflight (all jobs): NO-GO on a bad environment is enforced by default. Every
 # run also always produces its report (bug #4, no opt-out).
-dbutils.widgets.dropdown("preflight_enforce", "true", ["true", "false"], "8a. Run · Preflight enforce")
+dbutils.widgets.dropdown("preflight_enforce", "true", ["true", "false"], "9a. Run · Preflight enforce")
 # Structured logging verbosity (all jobs; backlog item 9). INFO default; DEBUG opt-in.
-dbutils.widgets.dropdown("log_level", "INFO", ["INFO", "DEBUG", "WARNING", "ERROR"], "8b. Run · Log level")
+dbutils.widgets.dropdown("log_level", "INFO", ["INFO", "DEBUG", "WARNING", "ERROR"], "9b. Run · Log level")
 # Bounded parallelism inside each stage (backlog item 3): Export SHOW CREATE capture +
 # Inventory grant fan-out. 1 = sequential. Keep ≤ the warehouse's max concurrent queries.
-dbutils.widgets.text("parallel_threads", "4", "8g. Run · Parallel threads")
-dbutils.widgets.dropdown("run_now", "false", ["true", "false"], "8f. Run · Run now")
+dbutils.widgets.text("parallel_threads", "4", "9g. Run · Parallel threads")
+dbutils.widgets.dropdown("run_now", "false", ["true", "false"], "9f. Run · Run now")
 
 # COMMAND ----------
 

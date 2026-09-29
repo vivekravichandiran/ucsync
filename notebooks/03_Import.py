@@ -53,62 +53,62 @@ dbutils.widgets.text("source_client_secret", "", "1d. Source · SP secret (plain
 dbutils.widgets.text("source_secret_scope", "", "1e. Source · secret scope (option 2)")
 dbutils.widgets.text("source_secret_key", "", "1f. Source · secret key (option 2)")
 # --- 2. Scope + bundle location ---
-dbutils.widgets.text("output_volume_path", "", "2d. Scope · Output volume path")
-dbutils.widgets.text("ops_catalog", "", "2e. Scope · Ops catalog")
-dbutils.widgets.text("ops_schema", "", "2f. Scope · Ops schema")
+dbutils.widgets.text("output_volume_path", "", "3a. Output · Output volume path")
+dbutils.widgets.text("ops_catalog", "", "3b. Output · Ops catalog")
+dbutils.widgets.text("ops_schema", "", "3c. Output · Ops schema")
 # The single external-storage mapping file (CSV). 2 cols = BYO prefix-swap; 3 cols
 # (+access connector) = create SC/EL. Blank = no base-path swap.
-dbutils.widgets.text("external_locations_path", "", "2g. Scope · External locations file")
+dbutils.widgets.text("external_locations_path", "", "2d. Scope · External locations file")
 # Optional import TABLE filter: import only a subset of tables from the bundle. Blank
 # = import every table. Accepts catalog.schema.table or the bare table name.
-dbutils.widgets.text("filter_tables", "", "2h. Scope · Import table filter (allowlist)")
+dbutils.widgets.text("filter_tables", "", "2e. Scope · Import table filter (allowlist)")
 # Optional catalog rename: JSON {"source_catalog":"target_catalog"} (blank = keep).
-dbutils.widgets.text("catalog_mapping_json", "", "2i. Scope · Catalog rename JSON")
+dbutils.widgets.text("catalog_mapping_json", "", "2f. Scope · Catalog rename JSON")
 # Optional per-object target locations (CSV: schema,volume,table,location) — an exact
 # override that BEATS the external_locations base-path swap for the rare object.
-dbutils.widgets.text("object_locations_path", "", "2j. Scope · Object locations file")
+dbutils.widgets.text("object_locations_path", "", "2g. Scope · Object locations file")
 # --- 4. Apply / behavior toggles (materialized views + volume data copy) ---
 # Streaming tables & materialized views are DLT/SDP-managed → report-only by default;
 # set true to migrate materialized views (streaming tables stay report-only).
-dbutils.widgets.dropdown("migrate_materialized_views", "false", ["true", "false"], "4d. Apply · Migrate materialized views")
+dbutils.widgets.dropdown("migrate_materialized_views", "false", ["true", "false"], "5d. Apply · Migrate materialized views")
 # Volume data copy (FEAT-4): copy managed + external volume FILES source→target via the
 # Files API. Default off; incremental via a control table; >5 GB reported.
-dbutils.widgets.dropdown("copy_volume_data", "false", ["true", "false"], "4e. Apply · Copy volume data")
+dbutils.widgets.dropdown("copy_volume_data", "false", ["true", "false"], "5e. Apply · Copy volume data")
 # Retry-failed-only (backlog item 4): replay ONLY the prior run's failed objects (read
 # from uc_sync_state) + their parents, skipping everything else. Same run_id/bundle as a
 # normal import; requires a prior run that seeded state. Default off.
-dbutils.widgets.dropdown("retry_failed_only", "false", ["true", "false"], "4f. Apply · Retry failed only")
+dbutils.widgets.dropdown("retry_failed_only", "false", ["true", "false"], "5f. Apply · Retry failed only")
 # --- 5. Warehouse ---
 # SQL warehouse (target) for the ABAC phase AND the view-creation phase. REQUIRED when
 # the bundle has ABAC policies; strongly recommended for views over masked tables.
-dbutils.widgets.text("import_warehouse_id", "", "5b. Warehouse · Import (ABAC + views)")
+dbutils.widgets.text("import_warehouse_id", "", "6b. Warehouse · Import (ABAC + views)")
 # --- 8. Run controls ---
-dbutils.widgets.text("run_id", "", "8c. Run · Run id (from Export)")
-dbutils.widgets.dropdown("dry_run", "false", ["true", "false"], "8d. Run · Dry run")
+dbutils.widgets.text("run_id", "", "9c. Run · Run id (from Export)")
+dbutils.widgets.dropdown("dry_run", "false", ["true", "false"], "9d. Run · Dry run")
 # Graded environment preflight (task 9): enforced by default. Every run also always
 # produces its report — a report-write failure fails the run (bug #4, no opt-out).
-dbutils.widgets.dropdown("preflight_enforce", "true", ["true", "false"], "8a. Run · Preflight enforce")
+dbutils.widgets.dropdown("preflight_enforce", "true", ["true", "false"], "9a. Run · Preflight enforce")
 # Structured logging verbosity (backlog item 9). INFO by default; DEBUG opt-in.
-dbutils.widgets.dropdown("log_level", "INFO", ["INFO", "DEBUG", "WARNING", "ERROR"], "8b. Run · Log level")
+dbutils.widgets.dropdown("log_level", "INFO", ["INFO", "DEBUG", "WARNING", "ERROR"], "9b. Run · Log level")
 # Within-level import parallelism (backlog item 3). 1 = sequential (safe fallback).
 # Keep ≤ the import warehouse's max concurrent queries.
-dbutils.widgets.text("parallel_threads", "4", "8g. Run · Parallel threads")
+dbutils.widgets.text("parallel_threads", "4", "9g. Run · Parallel threads")
 # --- 3. Create toggles + 4a-c apply toggles (BYO-by-default: catalog / schema / SC /
 #        EL creation defaults OFF; contents + governance default ON). A 3-column
 #        external_locations.csv turns SC/EL creation back on. ---
 _TOGGLE_LABELS = {
-    "create_storage_credentials": "3a. Create · Storage credentials",
-    "create_external_locations": "3b. Create · External locations",
-    "create_catalogs": "3c. Create · Catalogs",
-    "create_schemas": "3d. Create · Schemas",
-    "create_volumes": "3e. Create · Volumes",
-    "create_functions": "3f. Create · Functions",
-    "create_tables": "3g. Create · Tables",
-    "create_views": "3h. Create · Views",
-    "create_abac_policies": "3i. Create · ABAC policies",
-    "apply_grants": "4a. Apply · Grants",
-    "apply_tags": "4b. Apply · Tags",
-    "apply_masks_row_filters": "4c. Apply · Masks & row filters",
+    "create_storage_credentials": "4a. Create · Storage credentials",
+    "create_external_locations": "4b. Create · External locations",
+    "create_catalogs": "4c. Create · Catalogs",
+    "create_schemas": "4d. Create · Schemas",
+    "create_volumes": "4e. Create · Volumes",
+    "create_functions": "4f. Create · Functions",
+    "create_tables": "4g. Create · Tables",
+    "create_views": "4h. Create · Views",
+    "create_abac_policies": "4i. Create · ABAC policies",
+    "apply_grants": "5a. Apply · Grants",
+    "apply_tags": "5b. Apply · Tags",
+    "apply_masks_row_filters": "5c. Apply · Masks & row filters",
 }
 for _t in (*CREATE_TOGGLES, *APPLY_TOGGLES):
     dbutils.widgets.dropdown(

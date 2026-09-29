@@ -40,29 +40,29 @@ dbutils.widgets.text("source_client_id", "", "1c. Source · SP client id (plaint
 dbutils.widgets.text("source_client_secret", "", "1d. Source · SP secret (plaintext, option 1)")
 dbutils.widgets.text("source_secret_scope", "", "1e. Source · secret scope (option 2)")
 dbutils.widgets.text("source_secret_key", "", "1f. Source · secret key (option 2)")
-dbutils.widgets.text("catalogs", "", "2a. Scope · Catalogs (csv; blank = all)")
-dbutils.widgets.text("schemas", "", "2b. Scope · Schemas (csv catalog.schema)")
+dbutils.widgets.text("catalogs", "", "2a. Scope · Catalogs (comma separated; blank = all)")
+dbutils.widgets.text("schemas", "", "2b. Scope · Schemas (comma separated catalog.schema)")
 # Table EXCLUDE filter (backlog item 2): comma-separated Python regexes matched with
 # .search() on catalog.schema.table. Blank = exclude nothing. Escape dots (\.) and
 # anchor with $ — a bare `orders` substring-matches `orders_archive`. Parent
 # catalog/schema are never excluded. e.g. `.*_TEMP$, sales\.public\.orders_raw$`.
-dbutils.widgets.text("exclude_regex", "", "2c. Scope · Exclude regex (csv)")
-dbutils.widgets.text("output_volume_path", "", "2d. Scope · Output volume path")
-dbutils.widgets.text("ops_catalog", "", "2e. Scope · Ops catalog")
-dbutils.widgets.text("ops_schema", "", "2f. Scope · Ops schema")
-dbutils.widgets.text("external_locations_path", "", "2g. Scope · External locations file")
+dbutils.widgets.text("exclude_regex", "", "2c. Scope · Exclude regex (comma separated)")
+dbutils.widgets.text("output_volume_path", "", "3a. Output · Output volume path")
+dbutils.widgets.text("ops_catalog", "", "3b. Output · Ops catalog")
+dbutils.widgets.text("ops_schema", "", "3c. Output · Ops schema")
+dbutils.widgets.text("external_locations_path", "", "2d. Scope · External locations file")
 # SQL warehouse used for governance reads (tags + ABAC policies, which live in
 # information_schema). REQUIRED for a remote source; STRONGLY RECOMMENDED even for
 # airgap-on-source (classic Spark returns EMPTY ABAC).
-dbutils.widgets.text("source_warehouse_id", "", "5a. Warehouse · Source (governance reads)")
+dbutils.widgets.text("source_warehouse_id", "", "6a. Warehouse · Source (governance reads)")
 # Graded environment preflight (task 9): enforced by default — a missing report
 # library is a red run, never a silent degrade.
-dbutils.widgets.dropdown("preflight_enforce", "true", ["true", "false"], "8a. Run · Preflight enforce")
+dbutils.widgets.dropdown("preflight_enforce", "true", ["true", "false"], "9a. Run · Preflight enforce")
 # Structured logging verbosity (backlog item 9). INFO by default; DEBUG opt-in.
-dbutils.widgets.dropdown("log_level", "INFO", ["INFO", "DEBUG", "WARNING", "ERROR"], "8b. Run · Log level")
+dbutils.widgets.dropdown("log_level", "INFO", ["INFO", "DEBUG", "WARNING", "ERROR"], "9b. Run · Log level")
 # Bounded parallelism for the per-object grant fan-out (backlog item 3). 1 = sequential.
-dbutils.widgets.text("parallel_threads", "4", "8g. Run · Parallel threads")
-dbutils.widgets.text("run_id", "", "8c. Run · Run id")
+dbutils.widgets.text("parallel_threads", "4", "9g. Run · Parallel threads")
+dbutils.widgets.text("run_id", "", "9c. Run · Run id")
 
 # COMMAND ----------
 
