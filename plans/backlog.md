@@ -745,6 +745,35 @@ recreated empty → `ensure_table`'s CREATE-IF-NOT-EXISTS sees the metadata and 
 the rebuild recipe: DROP the orphaned `ai27_ucsync_ops.ops.uc_sync_{audit,state,volume_files}` tables
 so the run recreates them fresh. (Recorded in the env-blocker memory.)
 
+#### BUG-QA2: retry-failed-only silently skips failed ABAC policies + reports false-green (CONFIRMED 2026-09-29)
+**Repro:** testcat bed, target `catalog_ws_dh2616.uc_ops`. Seeded a table-scoped ABAC policy
+(`core_tables.departments#policy:ai27_ucsync_retry_pol`) referencing an un-migrated function
+(`ai_27.sec.mask_ext`). Run A (full e2e, run_id 594883309955699) failed it as expected
+(`governance_status=failed`; 2 outstanding incl. the pre-existing `abac_ext#policy:ai27_ucsync_neg_ext`).
+Then fixed the target so both would pass (created `ai_27.sec.mask_ext` + the `abac_ext` table) and ran
+**retry-failed-only** (`retry_failed_only=true`, `run_id=594883309955699`, `create_abac_policies=true`,
+run-as target SPN, job `1043388707761635` run `351657802161022`).
+**Result (bug):** the run reported `by_status={SUCCESS:3, UNCHANGED:11}`, `governance_failed:0` — a
+**green run** — but **neither policy was applied**: `information_schema.abac_policy_definitions` shows
+0 of the 2 on target, and both state rows are still `governance_status=failed`. The failed ABAC
+policies were **silently skipped** (no result row), so the run falsely reports success while the
+failures persist. **Evidence:** ground-truth policy count 0 on target post-run; state unchanged
+(`failed`); run params confirm retry mode + ABAC on.
+**Root cause (suspected, CONFIRMED behaviorally):** `_apply_governance_dir` (`package_import.py:2161`)
+filters each ABAC file through `_in_scope` → `_retry_scope_ok` (`:846`), which only passes an object
+whose **exact** name is in the failed set (`failed_object_names`, `sync_state.py:384`) or a
+CATALOG/SCHEMA parent / any FUNCTION. The failed set keys the policy as
+`…departments#policy:ai27_ucsync_retry_pol`, but the ABAC bundle file is
+`ABAC_POLICY_…__departments__policy__ai27_ucsync_retry_pol.sql`; the name `_parse_sql_filename`
+reconstructs from `__policy__` does not match the `#policy:` spelling in state → `_retry_scope_ok`
+returns False → the policy is skipped in retry mode. (A secondary suspect: the incremental
+delta-gate at `:2176` may also not honor a failed policy's status.) A normal incremental run
+(`retry_failed_only=false`) bypasses `_retry_scope_ok` and is the isolation test.
+**Fix direction:** make `_retry_scope_ok` recognize an ABAC_POLICY whose owning securable (or its
+`#policy:`-normalized name) is in the failed set — i.e. normalize both sides to the same policy-name
+spelling before membership testing (and ensure the failed set + the reconstructed bundle name agree).
+Add a retry-failed-only unit test with a failed ABAC policy in the set. **Status: OPEN.**
+
 ---
 
 ## Implementation sequencing (proposed 2026-09-24)

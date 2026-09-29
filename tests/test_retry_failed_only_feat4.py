@@ -139,3 +139,34 @@ def test_failed_object_names_from_facet_status():
     for facet in ("ddl_status = 'failed'", "governance_status = 'failed'",
                   "grants_status = 'failed'"):
         assert facet in where
+
+
+# --- BUG-QA2: retry-failed-only must replay a FAILED ABAC POLICY ------------
+from tests.test_failclosed_governance import _abac_bundle, WarehouseSql  # noqa: E402
+
+
+def test_retry_failed_only_replays_failed_abac_policy_bugqa2(tmp_path):
+    """BUG-QA2 (regression). A failed ABAC policy must be replayed by retry-failed-only.
+
+    The bundle file encodes '#policy:' as '__policy__' and `_parse_sql_filename`
+    decodes it back as '.policy.', so the name never matched the failed-set key
+    ('…#policy:name') and the policy was SILENTLY SKIPPED (run falsely reported green).
+    The scope check must use the policy's REAL full name (from abac_meta).
+    """
+    root = _abac_bundle(
+        tmp_path, on_type="TABLE", on_securable="c.hr.t",
+        policy_full="c.hr.t#policy:tmask",
+    )
+    wh = WarehouseSql()
+    results = PackageImportEngine(
+        str(root), wh, dry_run=False, abac_sql_executor=wh,
+        retry_failed_only=True,
+        retry_failed_set={"c.hr.t#policy:tmask"},  # exactly as uc_sync_state keys it
+    ).run()
+    # The failed ABAC policy is actually replayed (CREATE POLICY ran) — not skipped.
+    assert any("CREATE POLICY" in s for s in wh.statements), (
+        "failed ABAC policy was skipped by retry-failed-only (BUG-QA2)"
+    )
+    abac_row = next((r for r in results if r.object_type == "ABAC_POLICY"), None)
+    assert abac_row is not None
+    assert abac_row.target_full_name == "c.hr.t#policy:tmask"

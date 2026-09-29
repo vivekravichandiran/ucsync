@@ -2158,7 +2158,18 @@ class PackageImportEngine:
             if type_predicate is not None and not type_predicate(object_type):
                 continue
             target_full_name = self._map_name(parsed_name)
-            if not self._in_scope(object_type, target_full_name):
+            # BUG-QA2: an ABAC file encodes '#policy:' as '__policy__', and
+            # _parse_sql_filename decodes it back as '.policy.' — a name that never
+            # matches the retry-failed-only / filter_tables set or the uc_sync_state
+            # key ('…#policy:name'). Use the policy's REAL full name from abac_meta for
+            # the scope check so a failed ABAC policy is actually replayed (not silently
+            # skipped → false-green). Keep target_full_name for the rest of the loop.
+            scope_name = target_full_name
+            if is_abac and abac_meta is not None:
+                _meta = abac_meta.get(path.stem)
+                if _meta and _meta.get("full_name"):
+                    scope_name = self._map_name(_meta["full_name"])
+            if not self._in_scope(object_type, scope_name):
                 continue  # object excluded by the import scope filter
             # An object that was never created (create FAILURE / MANUAL skip) must
             # not have governance acted on it — its create row already carries the
