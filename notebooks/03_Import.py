@@ -15,6 +15,7 @@
 # COMMAND ----------
 
 import json, os, sys
+from datetime import datetime, timezone
 for _p in ("../src", "./src", os.path.abspath(os.path.join(os.getcwd(), "..", "src"))):
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
@@ -398,10 +399,18 @@ if cfg.copy_volume_data:
 # volume-data copy so the report includes the FEAT-4 copy results (bug #17). The import
 # report carries the export_status forward from stage 02 (export_results.json) alongside
 # this stage's import_status, so it is the cumulative base report.
+# A retry-failed-only run reuses the original run_id (that is how it locates the failed
+# set), so it would overwrite the original run's report. Keep the original report
+# immutable and give every retry its own timestamped file (matches the Workspace
+# Migration utility, which writes a fresh report per run).
+_report_suffix = (
+    f"_retry_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    if cfg.retry_failed_only else ""
+)
 try:
     from uc_sync.report import build_report_from_file
     inv = f"{migrated}/inventory/objects.json"
-    report_path = f"{_local(base)}/reports/import.xlsx"
+    report_path = f"{_local(base)}/reports/import{_report_suffix}.xlsx"
     export_results = []
     _er = f"{migrated}/export_results.json"
     if os.path.exists(_er):
@@ -443,7 +452,7 @@ for r in results:
 
 # Persist the full run log alongside the report so a handed-over artifact includes it.
 try:
-    with open(f"{_local(base)}/reports/import.log", "w") as fh:
+    with open(f"{_local(base)}/reports/import{_report_suffix}.log", "w") as fh:
         fh.write(get_captured_log())
 except Exception as _exc:  # noqa: BLE001 - log persistence is best-effort
     log.warning("run-log persistence skipped: %r", _exc)
