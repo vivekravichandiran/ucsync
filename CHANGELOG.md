@@ -29,11 +29,15 @@ compatible: every addition is opt-in or defaults to the prior behavior, and `uc_
 upgraded in place (new columns added + backfilled), so existing baselines keep working.
 
 ### Added
-- **Structured logging across the notebooks** — one `uc_sync` app logger with per-module child
-  loggers; every line carries `run_id` + stage (INVENTORY/EXPORT/IMPORT), levelled INFO/WARNING/
-  ERROR (DEBUG opt-in). New **`log_level`** widget (default `INFO`). The full run log is captured
-  and written next to the report (`reports/<stage>.log`), so a handed-over artifact is enough to
-  diagnose a failure without a live repro. Registered secrets are redacted from every line.
+- **Structured logging across all three stages** — one `uc_sync` app logger with per-module child
+  loggers; every line carries `run_id` + stage (INVENTORY/EXPORT/IMPORT), levelled INFO/WARNING/ERROR.
+  New **`log_level`** widget (**default `DEBUG`**). Logs stream **live to each stage's job-run cell
+  output** (downloadable from the run page — no separate `.log` file) and render on **success and
+  failure alike**. Coverage is **per phase** (header + completion tally) and **per object**
+  (`TABLE cat.sch.t -> created`; failures at ERROR with the reason), and the **exact SQL each step
+  runs is logged at `DEBUG`** — so a run, including one that hangs or fails mid-stage, is diagnosable
+  from the cell alone. Set `log_level=INFO` for the per-object summary without the SQL. Registered
+  secrets are redacted from every line.
 - **Within-stage parallelism** — new single **`parallel_threads`** widget (default `4`; `1` =
   today's exact sequential behavior / kill-switch). Export parallelizes the `SHOW CREATE`
   pre-capture; Inventory parallelizes the per-object grant fan-out; Import parallelizes object
@@ -46,7 +50,9 @@ upgraded in place (new columns added + backfilled), so existing baselines keep w
   captured. Parent catalog/schema are never excluded.
 - **Retry-failed-only import mode** — new **`retry_failed_only`** widget (import). Replays only the
   prior run's failed objects (read from `uc_sync_state`'s per-facet status) plus their required
-  parents, skipping everything else regardless of deltas. Same `run_id`/bundle — no re-export.
+  parents, skipping everything else regardless of deltas. Same `run_id`/bundle — no re-export. Writes
+  a timestamped **`reports/import_retry_<UTC>.xlsx`** (preserving the original `import.xlsx`), and marks
+  every object the retry didn't touch as **`— (not in retry scope)`** in the report (not a blank cell).
 - **Per-facet state tracking** — `uc_sync_state` gains **`ddl_status`**, **`governance_status`**,
   **`grants_status`** (added in place + backfilled from `last_action`/hashes on existing tables). A
   facet's fingerprint advances only when that facet actually applied; the delta planner re-applies a
@@ -68,6 +74,9 @@ upgraded in place (new columns added + backfilled), so existing baselines keep w
 - **Parallel same-rank dependency ordering (BUG-QA1)** — under parallel import, a table with a
   FOREIGN KEY to a sibling in the same level could be created before the sibling committed. A single
   sequential retry pass per object type resolves it; whatever still fails is reported honestly.
+- **Retry-failed-only replays failed ABAC policies (BUG-QA2)** — the failed-set membership check now
+  normalizes the policy name (`…#policy:name`) so a failed ABAC policy is matched to its bundle file
+  and re-applied, instead of being silently skipped while the run falsely reported green.
 
 ## [1.0.0] - 2026-09-15
 

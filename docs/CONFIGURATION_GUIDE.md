@@ -64,7 +64,7 @@ which `00_Install_Jobs` bakes in for you.
 | **`run_id`** | string | 02, 03 | Ties Export/Import to the Inventory run. Chains automatically inside a Job; set explicitly for the standalone Airgap Import job. |
 | **`source_warehouse_id`** | warehouse id | 01, 02 | **SQL warehouse — REQUIRED for export in every mode (airgap included).** All full-fidelity DDL capture runs on it (`SHOW CREATE`; functions from `information_schema`). A failed capture is a **hard failure** (`DDL_CAPTURE_FAILED`) — no synthesized fallback. Also what stage 01 uses to read tags + ABAC (classic job-cluster Spark cannot read `information_schema.abac_policy_definitions`). Point it at any warehouse on the workspace that owns the objects. |
 | **`preflight_enforce`** | bool (default `true`) | all | Graded environment preflight. Enforced → a **NO-GO** (missing report library, unreachable warehouse) is a red run, never a silent degrade. `false` downgrades a NO-GO to a loud warning. |
-| **`log_level`** | `INFO` (default) \| `DEBUG` \| `WARNING` \| `ERROR` | all | Structured-logging verbosity. Every line carries `run_id` + stage; the full run log is written next to the report (`reports/<stage>.log`). `DEBUG` adds verbose per-object detail. |
+| **`log_level`** | `DEBUG` (default) \| `INFO` \| `WARNING` \| `ERROR` | all | Structured-logging verbosity. Every line carries `run_id` + stage and streams **live to the job-run cell output** (downloadable from the Databricks run page) — there is no separate `.log` file. The default `DEBUG` shows per-object progress (each object → outcome) **and the exact SQL each step runs**; drop to `INFO` for the per-object summary without the SQL. |
 | **`parallel_threads`** | int (default `4`) | all | Bounded worker pool for the per-object work **inside** a stage (Export `SHOW CREATE`, Inventory grant fan-out, Import within-level creation). **`1` = fully sequential** (the safe fallback). Keep it **≤ the SQL warehouse's max concurrent queries** — every worker's DDL/governance runs through that warehouse. Final report/state/audit are identical regardless of thread count. |
 
 ---
@@ -75,7 +75,7 @@ which `00_Install_Jobs` bakes in for you.
 |--------|--------|-------------|
 | **`catalogs`** | csv or blank | Scope. Blank = whole metastore. This is the **source** scope — there is no separate "target catalog" input. |
 | **`schemas`** | csv `catalog.schema` or blank | Scope within the catalog(s). |
-| **`exclude_regex`** | csv of regexes or blank | **Table exclude filter.** Comma-separated Python regexes matched with `.search()` on `catalog.schema.table`; a matching table (and its DDL/grants/masks) is never captured. Escape dots (`\.`), anchor with `$`, and note a bare `orders` substring-matches `orders_archive`. Parent catalog/schema are never excluded. Blank = exclude nothing. e.g. `.*_TEMP$, sales\.public\.orders_raw$`. |
+| **`exclude_regex`** | csv of regexes or blank | **Table exclude filter.** Comma-separated Python regexes matched with `.search()` on `catalog.schema.table`; a matching table (and its DDL/grants/masks) is never captured. Escape dots (`\.`), anchor with `$`, and note a bare `orders` substring-matches `orders_archive`. An **exact fully-qualified name works too** (it's just a literal regex), so you can mix the two — e.g. `cat\.sch\.delete_me, .*_TEMP$`. Do **not** anchor with `^` (the match string starts with the catalog, not the table). Parent catalog/schema are never excluded. Blank = exclude nothing. |
 
 ---
 
@@ -257,7 +257,7 @@ cluster by default; set `existing_cluster_id` to reuse one.
 | `import_warehouse_id` | import | *(required for import)* |
 | `job_name_prefix` | install | `UC-Gov-Migration` |
 | `jobs_to_create` | install | `End-to-end Dry Run` |
-| `log_level` | all | `INFO` |
+| `log_level` | all | `DEBUG` |
 | `migrate_materialized_views` | import | `false` |
 | `no_proxy` | install | *(Databricks + Azure storage hosts)* |
 | `node_type_id` / `spark_version` | install | env default |

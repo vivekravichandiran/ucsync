@@ -32,6 +32,9 @@ are OFF.
    Summary, Outstanding, Catalogs, Schemas, External Volumes, Functions, Tables, Views, Metric Views,
    Tags Applied, Column Masks & Row Filters, ABAC Policies, Policy Matched Columns, Grants. Also spot-
    check `uc_sync_state` rows (per-facet `*_status` + `last_action`) and `uc_sync_audit`.
+   **Read the run log like a real human tester would** — open each task's cell output in the Jobs UI
+   (not just the exit value / API) on a **successful** run too, and confirm it streams per-object
+   progress with target names and that a hung/failed stage would be diagnosable from the cell alone.
 7. **If a test case needs re-seeding to exercise incremental behaviour, STOP.** Show the user a summary
    of findings so far, state **exactly what you plan to seed and for which use case**, and ask
    permission before doing the seed + next run.

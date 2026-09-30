@@ -191,6 +191,7 @@ Everything lands in the bundle at `<output_volume_path>/run_<run_id>/`:
 | File | What it tells you |
 |------|-------------------|
 | **`reports/import.xlsx`** | One sheet **per object type** — action, status, notes. Plus **Summary** (current-run failures / manual steps / deleted-in-source), **ABAC Policies**, **Column Masks & Row Filters**, **Governed Tags Applied**, and the **Outstanding** sheet. **Read this first.** |
+| **`reports/import_retry_<UTC>.xlsx`** | Written by a **retry-failed-only** run (the original `import.xlsx` is preserved). Only the retried failed set + its parents carry a status; every object the retry didn't touch reads **`— (not in retry scope)`**, not a blank. |
 | **`reports/inventory.xlsx` / `export.xlsx`** | What was found / captured upstream. |
 | **`manifest.json` + `checksums/`** | Completeness proof (verified at import). |
 | **`uc_sync_audit` / `uc_sync_state`** *(tables)* | Run/event log + per-object baseline (with `last_action`). |

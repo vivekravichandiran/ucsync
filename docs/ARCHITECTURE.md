@@ -148,7 +148,7 @@ run_<id>/
 │   ├── metadata/                  per-object metadata (types, locations, fingerprints)
 │   └── checksums/
 ├── migrated/                   ← path-rewritten copy replayed by Import
-├── reports/                    ← inventory.xlsx · export.xlsx · import.xlsx
+├── reports/                    ← inventory.xlsx · export.xlsx · import.xlsx (retry-failed-only adds import_retry_<UTC>.xlsx)
 ├── manifest.json               ← object list, counts, checksums, source ids, tool version
 └── checksums/
 ```
