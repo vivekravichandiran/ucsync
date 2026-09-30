@@ -145,3 +145,30 @@ def test_custom_stream_receives_output():
     lg.get_log("uc_sync.mod").warning("to custom stream")
     assert "to custom stream" in stream.getvalue()
     assert "WARNING" in stream.getvalue()
+
+
+def test_default_level_is_debug_shows_everything():
+    """Default level is DEBUG so a run shows info + SQL(debug) + errors with no opt-in."""
+    buf = lg.configure_logging(run_id="r", stage="IMPORT", capture=True)  # no level arg
+    log = lg.get_log("uc_sync.mod")
+    log.debug("sql: CREATE TABLE t")
+    log.info("object created")
+    out = buf.getvalue()
+    assert "sql: CREATE TABLE t" in out
+    assert "object created" in out
+
+
+def test_live_stdout_handler_resolves_current_stdout_per_emit(monkeypatch):
+    """The stdout handler must write to sys.stdout AT EMIT TIME, not the stdout bound
+    when configure_logging ran — that is the Databricks per-cell binding bug: a handler
+    bound to an earlier cell's stdout never surfaces in the running cell."""
+    import sys
+    # Configure with the default (live) handler while stdout is the ORIGINAL.
+    lg.configure_logging(run_id="r", stage="IMPORT", capture=False)
+    log = lg.get_log("uc_sync.mod")
+    # Now a NEW cell swaps sys.stdout — emulate Databricks re-binding per cell.
+    new_cell = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", new_cell)
+    log.info("line in the running cell")
+    # The line must land in the CURRENT stdout, not the one present at configure time.
+    assert "line in the running cell" in new_cell.getvalue()

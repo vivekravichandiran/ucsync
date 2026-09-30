@@ -26,7 +26,7 @@ from uc_sync.import_engine import SparkSqlExecutor, RestSqlExecutor
 from uc_sync.auth import local_workspace_auth, direct_workspace_auth
 from uc_sync.workspace_client import WorkspaceClient
 from uc_sync.logging_util import (
-    configure_logging, get_log, set_context, register_secret, get_captured_log,
+    configure_logging, get_log, set_context, register_secret,
 )
 
 # COMMAND ----------
@@ -59,7 +59,7 @@ dbutils.widgets.text("source_warehouse_id", "", "6a. Warehouse · Source (govern
 # library is a red run, never a silent degrade.
 dbutils.widgets.dropdown("preflight_enforce", "true", ["true", "false"], "9a. Run · Preflight enforce")
 # Structured logging verbosity (backlog item 9). INFO by default; DEBUG opt-in.
-dbutils.widgets.dropdown("log_level", "INFO", ["INFO", "DEBUG", "WARNING", "ERROR"], "9b. Run · Log level")
+dbutils.widgets.dropdown("log_level", "DEBUG", ["DEBUG", "INFO", "WARNING", "ERROR"], "9b. Run · Log level")
 # Bounded parallelism for the per-object grant fan-out (backlog item 3). 1 = sequential.
 dbutils.widgets.text("parallel_threads", "4", "9g. Run · Parallel threads")
 dbutils.widgets.text("run_id", "", "9c. Run · Run id")
@@ -79,7 +79,7 @@ cfg = from_sources(widgets)
 # Structured logging: configure once, up front, so preflight + every step below is
 # captured (INVENTORY stage; run_id is stamped in once resolved). The buffer captures
 # the whole run's log into a string written alongside the report on the volume.
-configure_logging(stage="INVENTORY", level=dbutils.widgets.get("log_level") or "INFO")
+configure_logging(stage="INVENTORY", level=dbutils.widgets.get("log_level") or "DEBUG")
 log = get_log(__name__)
 log.info("stage INVENTORY start (connectivity=%s)", cfg.connectivity_mode)
 
@@ -173,12 +173,7 @@ for o in objects:
 summary = {"run_id": run_id, "run_dir": run_dir, "objects": len(objects), "by_type": by_type}
 log.info("stage INVENTORY end: %s", json.dumps(by_type))
 
-# Persist the full run log alongside the report so a handed-over artifact includes it.
-try:
-    log_path = f"{_local(cfg.export_volume_path.rstrip('/'))}/run_{run_id}/reports/inventory.log"
-    with open(log_path, "w") as fh:
-        fh.write(get_captured_log())
-except Exception as _exc:  # noqa: BLE001 - log persistence is best-effort
-    log.warning("run-log persistence skipped: %r", _exc)
+# The full run log streams live to this job-run's cell output (downloadable from the
+# Databricks run page), so no separate .log file is written.
 
 dbutils.notebook.exit(json.dumps(summary))

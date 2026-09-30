@@ -189,17 +189,27 @@ class InventoryService:
     def run(self) -> List[UCObject]:
         objects: list[UCObject] = []
         catalogs = list(self._iter_catalogs())
+        log.info("> Scanning source metastore: %d catalogs visible", len(catalogs))
         for cat in catalogs:
             objects.append(cat)
             if not allowed(cat, self.cfg):
+                log.debug("    CATALOG %s -> out of scope (skipped)", cat.name)
                 continue
+            log.info("    scanning catalog %s", cat.name)
             for schema in self._iter_schemas(cat.name):
                 objects.append(schema)
                 if not allowed(schema, self.cfg):
+                    log.debug("    SCHEMA %s.%s -> out of scope (skipped)",
+                              cat.name, schema.name)
                     continue
-                objects.extend(self._iter_tables(cat.name, schema.name))
-                objects.extend(self._iter_volumes(cat.name, schema.name))
-                objects.extend(self._iter_functions(cat.name, schema.name))
+                _t = list(self._iter_tables(cat.name, schema.name))
+                _v = list(self._iter_volumes(cat.name, schema.name))
+                _f = list(self._iter_functions(cat.name, schema.name))
+                objects.extend(_t)
+                objects.extend(_v)
+                objects.extend(_f)
+                log.info("      %s.%s: %d tables/views, %d volumes, %d functions",
+                         cat.name, schema.name, len(_t), len(_v), len(_f))
         table_objects = [
             obj
             for obj in objects
@@ -258,6 +268,8 @@ class InventoryService:
                 table.storage_credential_name = (
                     covering.storage_credential_name
                 )
+        log.info("> Discovering external locations & storage credentials: "
+                 "%d external locations", len(locations))
         objects.extend(locations)
         credential_names = {
             str(location.storage_credential_name)
@@ -266,9 +278,13 @@ class InventoryService:
         }
         objects.extend(self._iter_storage_credentials(credential_names))
         filtered = [o for o in objects if allowed(o, self.cfg)]
+        log.info("> Attaching grants (ACLs) to %d in-scope objects", len(filtered))
         self._attach_grants_all(filtered)
         if self.sql is not None:
+            log.info("> Attaching governance (tags, column masks, row filters, ABAC)")
             self._attach_governance(filtered)
+        else:
+            log.info("> Governance capture skipped (no source SQL warehouse configured)")
         # Tier-A AI-asset discovery (task 4): report-only inventory of the UC object
         # types reachable with catalog-scoped privileges (registered models, online
         # tables, vector-search indexes, quality monitors, UC secrets). Appended
@@ -302,8 +318,17 @@ class InventoryService:
         # Governed-tag definitions (FEAT-2): the account-level tag policies actually
         # used by the in-scope objects, captured so the import can CREATE them on the
         # target before any SET TAGS (idempotent for a same-account target).
+        log.info("> Discovering AI/ML assets (report-only) & governed-tag definitions")
         governed = self._iter_governed_tags(filtered)
-        return filtered + governed + tier_a
+        result = filtered + governed + tier_a
+        # Per-type completion summary so the operator can eyeball what was captured.
+        by_type: dict[str, int] = {}
+        for o in result:
+            key = o.object_type.value if hasattr(o.object_type, "value") else str(o.object_type)
+            by_type[key] = by_type.get(key, 0) + 1
+        breakdown = ", ".join(f"{by_type[k]} {k.lower()}" for k in sorted(by_type))
+        log.info("[-] Inventory complete: %d objects (%s)", len(result), breakdown)
+        return result
 
     def _iter_governed_tags(self, objects: list[UCObject]) -> list[UCObject]:
         """Emit a GOVERNED_TAG object per governed tag actually assigned on an

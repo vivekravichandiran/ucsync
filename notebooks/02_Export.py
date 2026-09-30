@@ -30,7 +30,7 @@ from uc_sync.auth import local_workspace_auth, direct_workspace_auth
 from uc_sync.workspace_client import WorkspaceClient
 from uc_sync.models import UCObject, ObjectType, LastModifiedSource
 from uc_sync.logging_util import (
-    configure_logging, get_log, set_context, register_secret, get_captured_log,
+    configure_logging, get_log, set_context, register_secret,
 )
 
 # COMMAND ----------
@@ -54,7 +54,7 @@ dbutils.widgets.text("source_warehouse_id", "", "6a. Warehouse · Source (SHOW C
 # Graded environment preflight (task 9): enforced by default.
 dbutils.widgets.dropdown("preflight_enforce", "true", ["true", "false"], "9a. Run · Preflight enforce")
 # Structured logging verbosity (backlog item 9). INFO by default; DEBUG opt-in.
-dbutils.widgets.dropdown("log_level", "INFO", ["INFO", "DEBUG", "WARNING", "ERROR"], "9b. Run · Log level")
+dbutils.widgets.dropdown("log_level", "DEBUG", ["DEBUG", "INFO", "WARNING", "ERROR"], "9b. Run · Log level")
 # Bounded parallelism for the SHOW CREATE capture burst (backlog item 3). 1 =
 # sequential. Keep ≤ the source warehouse's max concurrent queries.
 dbutils.widgets.text("parallel_threads", "4", "9g. Run · Parallel threads")
@@ -80,7 +80,7 @@ cfg = from_sources({
 })
 
 # Structured logging: configure up front so preflight + every step is captured.
-configure_logging(stage="EXPORT", level=dbutils.widgets.get("log_level") or "INFO")
+configure_logging(stage="EXPORT", level=dbutils.widgets.get("log_level") or "DEBUG")
 log = get_log(__name__)
 log.info("stage EXPORT start (connectivity=%s)", cfg.connectivity_mode)
 
@@ -183,12 +183,8 @@ log.info("export summary: %s",
 # the stage then exits non-zero so the pipeline stops before importing an incomplete
 # set. Fix the source permission / prerequisite and re-run.
 read_failures = export_read_failures(result)
-# Persist the full run log alongside the report so a handed-over artifact includes it.
-try:
-    with open(f"{_local(base)}/reports/export.log", "w") as fh:
-        fh.write(get_captured_log())
-except Exception as _exc:  # noqa: BLE001 - log persistence is best-effort
-    log.warning("run-log persistence skipped: %r", _exc)
+# The full run log streams live to this job-run's cell output (downloadable from the
+# Databricks run page), so no separate .log file is written.
 if read_failures:
     log.error("%d object(s) could not be read — job will exit non-zero:", len(read_failures))
     for f in read_failures:

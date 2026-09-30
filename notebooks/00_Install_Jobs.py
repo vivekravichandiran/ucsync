@@ -140,7 +140,7 @@ dbutils.widgets.text("run_id", "", "9e. Run · Run id (Airgap Import bundle id)"
 # run also always produces its report (bug #4, no opt-out).
 dbutils.widgets.dropdown("preflight_enforce", "true", ["true", "false"], "9a. Run · Preflight enforce")
 # Structured logging verbosity (all jobs; backlog item 9). INFO default; DEBUG opt-in.
-dbutils.widgets.dropdown("log_level", "INFO", ["INFO", "DEBUG", "WARNING", "ERROR"], "9b. Run · Log level")
+dbutils.widgets.dropdown("log_level", "DEBUG", ["DEBUG", "INFO", "WARNING", "ERROR"], "9b. Run · Log level")
 # Bounded parallelism inside each stage (backlog item 3): Export SHOW CREATE capture +
 # Inventory grant fan-out. 1 = sequential. Keep ≤ the warehouse's max concurrent queries.
 dbutils.widgets.text("parallel_threads", "4", "9g. Run · Parallel threads")

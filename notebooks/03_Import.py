@@ -39,7 +39,7 @@ from uc_sync.volume_copy import (
 from uc_sync.audit import AuditService, stage_audit_row
 from uc_sync.sync_state import SyncStateService, state_row_from_import
 from uc_sync.logging_util import (
-    configure_logging, get_log, set_context, register_secret, get_captured_log,
+    configure_logging, get_log, set_context, register_secret,
 )
 
 # COMMAND ----------
@@ -90,7 +90,7 @@ dbutils.widgets.dropdown("dry_run", "false", ["true", "false"], "9d. Run · Dry 
 # produces its report — a report-write failure fails the run (bug #4, no opt-out).
 dbutils.widgets.dropdown("preflight_enforce", "true", ["true", "false"], "9a. Run · Preflight enforce")
 # Structured logging verbosity (backlog item 9). INFO by default; DEBUG opt-in.
-dbutils.widgets.dropdown("log_level", "INFO", ["INFO", "DEBUG", "WARNING", "ERROR"], "9b. Run · Log level")
+dbutils.widgets.dropdown("log_level", "DEBUG", ["DEBUG", "INFO", "WARNING", "ERROR"], "9b. Run · Log level")
 # Within-level import parallelism (backlog item 3). 1 = sequential (safe fallback).
 # Keep ≤ the import warehouse's max concurrent queries.
 dbutils.widgets.text("parallel_threads", "4", "9g. Run · Parallel threads")
@@ -142,7 +142,7 @@ cfg = from_sources({
 })
 
 # Structured logging: configure up front so preflight + every phase is captured.
-configure_logging(stage="IMPORT", level=dbutils.widgets.get("log_level") or "INFO")
+configure_logging(stage="IMPORT", level=dbutils.widgets.get("log_level") or "DEBUG")
 log = get_log(__name__)
 log.info("stage IMPORT start (dry_run=%s)", cfg.dry_run)
 
@@ -450,12 +450,8 @@ for r in results:
         log.warning("[%s] %s %s: %s", r.status, r.object_type,
                     r.target_full_name, str(r.message)[:200])
 
-# Persist the full run log alongside the report so a handed-over artifact includes it.
-try:
-    with open(f"{_local(base)}/reports/import{_report_suffix}.log", "w") as fh:
-        fh.write(get_captured_log())
-except Exception as _exc:  # noqa: BLE001 - log persistence is best-effort
-    log.warning("run-log persistence skipped: %r", _exc)
+# The full run log streams live to this job-run's cell output (downloadable from the
+# Databricks run page), so no separate .log file is written.
 
 # Task 10 — a governance failure is NEVER a silently green run. The report and the
 # audit/state tables were already written above (so the run is fully accounted for),

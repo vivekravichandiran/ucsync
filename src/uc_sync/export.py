@@ -257,7 +257,10 @@ class ExportService:
         # deterministic). parallel_threads=1 keeps this fully sequential.
         precaptured = self._precapture_ddl(objects_list)
 
+        log.info("> Exporting %d objects (DDL, grants, tags, masks, ABAC, governed tags)",
+                 len(objects_list))
         for obj in objects_list:
+            log.debug("    exporting %s %s", obj.object_type.value, obj.full_name)
             try:
                 digest = canonical_hash(obj)
                 checksums[obj.full_name] = digest
@@ -509,6 +512,15 @@ class ExportService:
             "manifest.json",
             json.dumps(manifest, indent=2) + "\n",
         )
+        _ok = sum(1 for item in results if item.status.startswith("SUCCESS"))
+        _warn = sum(1 for item in results if "WARNING" in item.status)
+        _err = sum(1 for item in results if item.status == "ERROR")
+        log.info("[%s] Export complete: %d ok%s%s (%d DDL, %d grant, %d tag, %d mask, "
+                 "%d ABAC files)",
+                 "x" if _err else "-", _ok,
+                 f", {_warn} with warnings" if _warn else "",
+                 f", {_err} failed" if _err else "",
+                 ddl_files, grant_files, tag_files, policy_files, abac_files)
         return {
             "manifest": manifest,
             "exported": sum(

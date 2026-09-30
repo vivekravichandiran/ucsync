@@ -2,11 +2,13 @@
 
 One named application logger (``uc_sync``) with per-module **child** loggers obtained
 via :func:`get_log` (``logging.getLogger("uc_sync").getChild(...)``), so every line
-carries the emitting module in ``%(name)s``. Handlers (a stdout ``StreamHandler`` and an
-optional in-memory ``StringIO`` buffer) attach to the app logger only; children
+carries the emitting module in ``%(name)s``. Handlers (a live-stdout handler that
+resolves ``sys.stdout`` per record so lines land in the currently-running notebook cell,
+and an optional in-memory ``StringIO`` buffer) attach to the app logger only; children
 propagate up to it, and the app logger has ``propagate = False`` so lines are not
 re-emitted by the notebook's root logger (which usually already has a handler → double
-prints).
+prints). The default level is ``DEBUG`` so a run shows everything — per-object INFO
+lines, the SQL each step runs (DEBUG), and errors — with no opt-in needed.
 
 Every record carries ``run_id`` and ``stage`` (INVENTORY / EXPORT / IMPORT) via a filter
 reading a mutable module-level context, so ``get_log(__name__)`` can be called at import
@@ -57,6 +59,27 @@ def _level(level: object) -> int:
         return level
     name = str(level or "INFO").strip().upper()
     return getattr(logging, name, logging.INFO)
+
+
+class _LiveStdoutHandler(logging.Handler):
+    """A handler that writes each record to the CURRENT ``sys.stdout`` at emit time.
+
+    Databricks swaps ``sys.stdout`` per command cell so cell output is captured per
+    cell. A normal ``StreamHandler(sys.stdout)`` binds the stdout object captured when
+    ``configure_logging`` runs — usually an *earlier* cell than the one doing the work —
+    so its lines never surface in the cell that is actually executing (the operator sees
+    a silent cell during the whole run). Resolving ``sys.stdout`` on every ``emit`` makes
+    each line land in the currently-running cell, so logs stream live as work happens.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:  # pragma: no cover - thin I/O
+        try:
+            msg = self.format(record)
+            stream = sys.stdout  # resolved live, per record (not bound at construction)
+            stream.write(msg + "\n")
+            stream.flush()
+        except Exception:  # noqa: BLE001 - never let logging crash the run
+            self.handleError(record)
 
 
 class _ContextFilter(logging.Filter):
@@ -129,7 +152,7 @@ def configure_logging(
     *,
     run_id: str = "",
     stage: str = "",
-    level: object = "INFO",
+    level: object = "DEBUG",
     capture: bool = True,
     stream=None,
 ) -> Optional[io.StringIO]:
@@ -150,7 +173,13 @@ def configure_logging(
 
     _remove_our_handlers(app)
 
-    app.addHandler(_make_handler(logging.StreamHandler(stream or sys.stdout), _STREAM_HANDLER_NAME))
+    # No explicit stream → the live-stdout handler (resolves sys.stdout per record, so
+    # lines land in the currently-running notebook cell). An explicit stream (tests) is
+    # a fixed target, so a plain StreamHandler is correct there.
+    stdout_handler: logging.Handler = (
+        logging.StreamHandler(stream) if stream is not None else _LiveStdoutHandler()
+    )
+    app.addHandler(_make_handler(stdout_handler, _STREAM_HANDLER_NAME))
 
     _BUFFER = None
     if capture:
