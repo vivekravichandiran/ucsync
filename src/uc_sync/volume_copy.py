@@ -20,6 +20,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Optional, Protocol
 
+from uc_sync.logging_util import get_log
+
+log = get_log(__name__)
+
 # The Files API per-file limit. A file at or under this is copied via the API; a
 # larger one is reported (accepted scope, not a bug).
 FILES_API_MAX_BYTES = 5 * 1024 * 1024 * 1024
@@ -48,8 +52,8 @@ def _upgrade_volume_control(exec_fn: Any, table: str) -> None:
     for name, sql_type in _VOLUME_CONTROL_UPGRADE_COLUMNS:
         try:
             exec_fn(f"ALTER TABLE {table} ADD COLUMNS ({name} {sql_type})")
-        except Exception:  # noqa: BLE001 - column already present (or unsupported) → skip
-            pass
+        except Exception as exc:  # noqa: BLE001 - column already present (or unsupported)
+            log.debug("volume-copy control column %s not added on %s: %r", name, table, exc)
 
 
 class VolumeCopyControl(Protocol):
@@ -111,8 +115,8 @@ class SparkVolumeCopyControl:
                 # row must not suppress a retry.
                 if str(r["status"] or COPIED) == COPIED:
                     self._seen[(r["volume"], r["path"])] = int(r["source_mtime"] or 0)
-        except Exception:  # noqa: BLE001 - empty/new table → no prior state
-            pass
+        except Exception as exc:  # noqa: BLE001 - empty/new table → no prior state
+            log.debug("volume-copy control load (spark) found no prior state: %r", exc)
 
     def needs_copy(self, volume: str, path: str, source_mtime: int) -> bool:
         return self._seen.get((volume, path)) != source_mtime
@@ -181,8 +185,8 @@ class WarehouseVolumeCopyControl:
             ) or []:
                 if str((row[3] if len(row) > 3 else COPIED) or COPIED) == COPIED:
                     self._seen[(str(row[0]), str(row[1]))] = int(row[2] or 0)
-        except Exception:  # noqa: BLE001 - empty/new table → no prior state
-            pass
+        except Exception as exc:  # noqa: BLE001 - empty/new table → no prior state
+            log.debug("volume-copy control load (warehouse) found no prior state: %r", exc)
 
     def needs_copy(self, volume: str, path: str, source_mtime: int) -> bool:
         return self._seen.get((volume, path)) != source_mtime

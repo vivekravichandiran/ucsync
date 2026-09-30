@@ -11,8 +11,11 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
+from uc_sync.logging_util import get_log
 from uc_sync.models import ObjectType, UCObject
 from uc_sync.sql_ddl import escape_literal, quote_full_name, quote_identifier
+
+log = get_log(__name__)
 
 
 # --- SQL reads --------------------------------------------------------------
@@ -53,7 +56,10 @@ def read_tags(sql: Any, catalog: str) -> dict[str, Any]:
         try:
             rows = _rows(sql, stmt)
         except Exception as exc:  # noqa: BLE001 - tag table may be empty/absent
-            print(f"[governance] {level} tag read failed for {catalog}: {exc!r}")
+            log.warning(
+                "governance read EMPTY for %s (%s tags) — check source SPN system "
+                "access to information_schema: %r", catalog, level, exc,
+            )
             continue
         for row in rows:
             *ident, tag_name, tag_value = row
@@ -88,7 +94,7 @@ def read_governed_tag_policies(client: Any) -> dict[str, list[str]]:
         else:
             rows = (client.get("/api/2.1/tag-policies") or {}).get("tag_policies") or []
     except Exception as exc:  # noqa: BLE001 - report-only, never fail inventory
-        print(f"[governance] tag-policies read skipped: {exc!r}")
+        log.warning("tag-policies read skipped: %r", exc)
         return {}
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, dict):
@@ -160,7 +166,11 @@ def read_abac_policies(sql: Any, catalog: str) -> list[UCObject]:
     try:
         rows = _rows(sql, stmt)
     except Exception as exc:  # noqa: BLE001
-        print(f"[governance] ABAC policy read failed for {catalog}: {exc!r}")
+        log.warning(
+            "ABAC policies EMPTY for %s — check source SPN system access + a SQL "
+            "warehouse (classic Spark cannot read abac_policy_definitions): %r",
+            catalog, exc,
+        )
         return []
     policies: list[UCObject] = []
     for row in rows:

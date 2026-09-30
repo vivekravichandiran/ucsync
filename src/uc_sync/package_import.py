@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
+from itertools import groupby
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from uc_sync import vocab
 from uc_sync.delta import CHANGED, DeltaPlan
 from uc_sync.dependency import _TYPE_RANK
+from uc_sync.logging_util import get_log
 from uc_sync.fingerprints import (
     ddl_fingerprint,
     governance_fingerprint,
@@ -25,6 +29,8 @@ from uc_sync.sql_ddl import (
     quote_identifier,
     row_filter_statements_for_object,
 )
+
+log = get_log(__name__)
 
 # View-like securables are created AFTER governance + the drop sweep, so a view
 # built on a table that governance failed (and dropped) simply fails to create —
@@ -62,6 +68,11 @@ class PackageImportResult:
     ddl_hash: str = ""
     governance_hash: str = ""
     grants_json: str = ""
+    # Per-facet grant outcome (backlog item 8): "applied" / "failed" / "" (not attempted).
+    # Set "failed" when a GRANT statement raised, so the grants facet is recorded failed
+    # in uc_sync_state and the next run re-applies grants even when ddl/governance are
+    # clean+unchanged (the external-object-created-later replay gap).
+    grants_status: str = ""
     delta_action: str = ""
     # A non-destructive change detected but deliberately NOT applied (e.g. a column
     # type change on an existing table) that rides ALONGSIDE an applied change. The
@@ -633,6 +644,42 @@ class _CatalogRewritingExecutor:
         return getattr(self._inner, name)
 
 
+def _sql_oneline(sql: str) -> str:
+    """Collapse a (possibly multi-line) statement to one greppable log line."""
+    return " ".join(str(sql).split())
+
+
+def _short_reason(message: str) -> str:
+    """A terse reason for a WARNING line: the UC ErrorClass if present, else a
+    trimmed first line. Full detail is logged separately at DEBUG."""
+    one = _sql_oneline(message)
+    m = re.search(r"ErrorClass=([A-Z0-9_.]+)", one)
+    if m:
+        return m.group(1)
+    return one[:120]
+
+
+class _LoggingExecutor:
+    """Wraps a SQL executor to log every statement at DEBUG before running it.
+
+    One place covers all phases (DDL, grants, tags, ABAC, ownership, drops, existence
+    probes), so ``log_level=DEBUG`` surfaces the exact SQL each step ran — the detail an
+    operator needs to see *why* an object failed. INFO stays a clean per-object summary.
+    Non-``execute`` attributes delegate to the inner executor.
+    """
+
+    def __init__(self, inner: Any, label: str = ""):
+        self._inner = inner
+        self._label = label
+
+    def execute(self, sql: str) -> Any:
+        log.debug("sql[%s]: %s", self._label, _sql_oneline(sql))
+        return self._inner.execute(sql)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 class PackageImportEngine:
     """Execute CREATE/GRANT SQL from export_migrated_staging as source of truth."""
 
@@ -653,6 +700,9 @@ class PackageImportEngine:
         migrate_materialized_views: bool = False,
         run_as_spn: str = "",
         abac_sql_executor: Any = None,
+        retry_failed_only: bool = False,
+        retry_failed_set: Optional[Iterable[str]] = None,
+        parallel_threads: int = 1,
     ):
         self.root = Path(package_root)
         self.workspace_client = workspace_client
@@ -684,11 +734,39 @@ class PackageImportEngine:
         # view-creation phase runs on the warehouse executor when one is supplied
         # (reuse the ABAC warehouse); otherwise it falls back to the main executor.
         self.warehouse_sql = self.abac_sql
+        # Log every executed statement at DEBUG (backlog item 9 — full SQL visibility).
+        # Wrap OUTSIDE the catalog-rewrite wrapper so the line logged is the exact SQL
+        # sent to the executor (post-rewrite). The warehouse executor may be the same
+        # object as the main one (no separate ABAC warehouse) — label it distinctly only
+        # when it is genuinely separate.
+        self.sql = _LoggingExecutor(self.sql, "main")
+        if self.abac_sql is not None:
+            self.abac_sql = _LoggingExecutor(self.abac_sql, "warehouse")
+        self.warehouse_sql = self.abac_sql
         # Optional import-time TABLE scope filter (catalog/schema scoping is done
         # upstream at inventory via the `catalogs`/`schemas` selection). Empty =
         # import every table. Only table-like securables are narrowed; the
         # catalogs/schemas/functions/volumes a selected table needs still flow.
         self._sel_tables = {s for s in (select_tables or []) if s}
+        # Retry-failed-only mode (backlog item 4): when on, only objects in
+        # `retry_failed_set` (source+target names of the prior run's failed set, from
+        # uc_sync_state) plus their required parents (catalog/schema ancestors +
+        # functions, so an inline mask resolves) are processed; everything else is
+        # skipped WITHOUT emitting a result, so untouched objects keep their prior state
+        # row. Off = today's behavior. The set members are matched against target names.
+        self._retry_failed_only = bool(retry_failed_only)
+        self._retry_set = {s for s in (retry_failed_set or []) if s}
+        # Within-level parallelism for the structure + view CREATE phases (backlog
+        # item 3). 1 = fully sequential (the default / kill-switch — reproduces today's
+        # behavior exactly). Same-rank objects (e.g. many tables) run across a bounded
+        # pool; a barrier between _type_rank levels preserves dependency order (functions
+        # before tables). Governance / drop-sweep phases stay sequential so the
+        # fail-closed drop-set is populated correctly (no concurrency hazard there).
+        self.parallel_threads = max(1, int(parallel_threads or 1))
+        # Guards the shared per-object bookkeeping maps mutated inside _import_ddl_file
+        # when workers run concurrently (each worker writes a distinct target name, so
+        # this is belt-and-suspenders over the GIL's per-op atomicity).
+        self._state_lock = threading.Lock()
         # create_*/apply_* gates (default all-on). create_* gate object creation;
         # apply_* gate governance. apply_grants kw is kept for back-compat.
         self.toggles = {**(toggles or {})}
@@ -800,6 +878,8 @@ class PackageImportEngine:
         (only other tables/views are excluded). Names accept the fully-qualified
         or the bare table name.
         """
+        if self._retry_failed_only and not self._retry_scope_ok(object_type, full_name):
+            return False
         if not self._sel_tables:
             return True
         if object_type not in self._TABLE_LIKE_TYPES:
@@ -807,6 +887,31 @@ class PackageImportEngine:
         parts = str(full_name or "").split(".")
         table = parts[-1] if parts else ""
         return full_name in self._sel_tables or table in self._sel_tables
+
+    def _retry_scope_ok(self, object_type: str, full_name: str) -> bool:
+        """Retry-failed-only scope (backlog item 4): True only for an object in the
+        failed set, or a required parent of one.
+
+        Required parents: a CATALOG / SCHEMA that is an ancestor of a failed object (so
+        the USE context + idempotent create-if-not-exists work), and any FUNCTION (a
+        failed table's inline mask / row filter may reference one; functions are
+        idempotent skip-existing, so always allowing them is safe and keeps the retry
+        self-contained). Everything else is out of scope.
+        """
+        if not self._retry_failed_only:
+            return True
+        name = str(full_name or "")
+        if name in self._retry_set:
+            return True
+        # Parent catalog/schema of a failed object (an ancestor prefix of a set member).
+        if object_type in ("CATALOG", "SCHEMA"):
+            prefix = name + "."
+            if any(n == name or n.startswith(prefix) for n in self._retry_set):
+                return True
+        # Functions may back an inline mask / row filter of a failed table.
+        if object_type == "FUNCTION":
+            return True
+        return False
 
     def _create_storage_credential_via_rest(
         self, statements: list[str]
@@ -840,6 +945,82 @@ class PackageImportEngine:
             if _is_already_exists_error(msg) or "already exists" in msg.lower():
                 return "SUCCESS", f"storage credential {name} already exists"
             return "MANUAL_ACTION_REQUIRED", f"REST create failed: {msg[:300]}"
+
+    # Human-readable outcome for a per-object log line, derived from action/status.
+    _OUTCOME_BY_ACTION = {
+        "CREATE_OR_SKIP": "created",
+        "SKIP_EXISTING": "already exists (skipped)",
+        "UNCHANGED": "unchanged (skipped)",
+        "SKIP_CREATE_DISABLED": "skipped (create disabled — assumed pre-existing)",
+        "REPORT_ONLY": "reported, not migrated (pipeline-managed)",
+        "SKIP_FILTERED": "skipped (excluded by scope filter)",
+        "DRY_RUN": "dry-run (no change)",
+        "MANUAL": "manual action required",
+    }
+
+    def _log_result(self, result: "PackageImportResult") -> None:
+        """Emit one per-object log line (INFO), or ERROR/WARNING on failure.
+
+        Called the moment a per-object result is finalized — inside the worker for the
+        parallel create/view phases — so lines stream live as each object completes (the
+        interleaving across threads is expected and fine). By just reading these lines an
+        operator can see exactly which object failed and why.
+        """
+        name = result.target_full_name or result.full_name or result.source_full_name
+        otype = result.object_type
+        if result.status == "FAILURE":
+            code = result.error_code or "FAILED"
+            log.error("    %-14s %s -> ERROR [%s]: %s",
+                      otype, name, code, _sql_oneline(result.message)[:300])
+        elif result.status == "MANUAL_ACTION_REQUIRED":
+            log.warning("    %-14s %s -> MANUAL [%s]: %s",
+                        otype, name, result.error_code or "MANUAL",
+                        _sql_oneline(result.message)[:300])
+        else:
+            outcome = self._OUTCOME_BY_ACTION.get(result.action, result.action.lower())
+            log.info("    %-14s %s -> %s", otype, name, outcome)
+
+    @staticmethod
+    def _tally(phase_results: list["PackageImportResult"]) -> tuple[int, int, int]:
+        """(ok, failed, manual) counts for a phase's results."""
+        ok = failed = manual = 0
+        for r in phase_results:
+            if r.status == "FAILURE":
+                failed += 1
+            elif r.status == "MANUAL_ACTION_REQUIRED":
+                manual += 1
+            else:
+                ok += 1
+        return ok, failed, manual
+
+    def _log_phase_done(self, name: str, phase_results: list["PackageImportResult"]) -> None:
+        ok, failed, manual = self._tally(phase_results)
+        mark = "x" if failed else "-"
+        extra = (f", {failed} failed" if failed else "") + (f", {manual} manual" if manual else "")
+        log.info("[%s] %s complete: %d ok%s", mark, name, ok, extra)
+
+    def _log_phase_objects(
+        self, name: str, phase_results: list["PackageImportResult"]
+    ) -> None:
+        """Per-object lines + the phase-done tally, for phases whose results are NOT
+        logged inside a worker (governed tags, ABAC, masks, schema evolution). The
+        create/view phases log each object inside :meth:`_import_ddl_file` instead."""
+        for r in phase_results:
+            self._log_result(r)
+        self._log_phase_done(name, phase_results)
+
+    @staticmethod
+    def _file_type_breakdown(paths: list[Path]) -> str:
+        """"3 catalogs, 8 schemas, 4 volumes, 12 functions, 41 tables" for a header."""
+        counts: dict[str, int] = {}
+        for p in paths:
+            ot = _parse_sql_filename(p.name)[0]
+            counts[ot] = counts.get(ot, 0) + 1
+        parts = []
+        for ot in sorted(counts, key=lambda t: (_type_rank(t), t)):
+            label = ot.lower().replace("_", " ")
+            parts.append(f"{counts[ot]} {label}{'s' if counts[ot] != 1 else ''}")
+        return ", ".join(parts) if parts else "none"
 
     def run(self) -> list[PackageImportResult]:
         if not self.root.exists():
@@ -894,21 +1075,45 @@ class PackageImportEngine:
             p for p in ddl_files
             if _parse_sql_filename(p.name)[0] in _VIEW_LIKE_TYPES
         ]
+        # Retry-failed-only (backlog item 4): drop out-of-scope files from the work list
+        # up front so a non-retried object produces NO result row and its prior state is
+        # preserved (never overwritten with a not_selected). The governance / policy
+        # phases skip out-of-scope objects via _in_scope (continue, no row).
+        if self._retry_failed_only:
+            def _retry_keep(path: Path) -> bool:
+                ot, parsed = _parse_sql_filename(path.name)
+                return self._retry_scope_ok(ot, self._map_name(parsed))
+            kept_structural = [p for p in structural if _retry_keep(p)]
+            kept_views = [p for p in view_files if _retry_keep(p)]
+            log.info(
+                "retry-failed-only: %d/%d structural + %d/%d view files in the failed "
+                "set (%d objects)", len(kept_structural), len(structural),
+                len(kept_views), len(view_files), len(self._retry_set),
+            )
+            structural, view_files = kept_structural, kept_views
 
         # Phase 0 — governed tags (FEAT-2): create each governed tag (+ allowed
         # values) before any SET TAGS. Idempotent — a same-account target already has
         # the tag (SKIP_EXISTING). Gated by apply_tags (governed-tag creation is a
         # prerequisite of tag assignment).
         if self.toggles.get("apply_tags", True):
+            log.info("> Creating governed tags")
+            _s = len(results)
             results.extend(self._create_governed_tags(len(results)))
+            self._log_phase_objects("Governed tags", results[_s:])
 
         # Phase 1 — structure + full table definitions. Inline classic masks / row
         # filters make protection atomic: a missing mask/filter function fails the
-        # CREATE TABLE itself, so no unprotected table survives.
-        for path in structural:
-            results.append(
-                self._import_ddl_file(path, len(results) + 1, inventory, by_target)
-            )
+        # CREATE TABLE itself, so no unprotected table survives. Within-level
+        # parallelism (item 3): same-rank objects run across a bounded pool, with a
+        # barrier between _type_rank levels (functions before tables).
+        log.info("> Creating catalogs, schemas, volumes, functions & tables: %s (parallel x%d)",
+                 self._file_type_breakdown(structural), max(1, self.parallel_threads))
+        _s = len(results)
+        results.extend(
+            self._process_ddl_level(structural, len(results), inventory, by_target)
+        )
+        self._log_phase_done("Object creation", results[_s:])
 
         # Phase 1b — governed schema evolution (FEAT-3): on an incremental run, add
         # columns present on the source but missing on the (pre-existing) target, with
@@ -916,7 +1121,10 @@ class PackageImportEngine:
         # Runs after structural (so the target table + any mask functions exist) and
         # before the tag phase (so a governed tag on a new column applies). A same-tag
         # new column is auto-covered by the existing ABAC policy (no new policy).
-        results.extend(self._replay_schema_evolution(by_target, len(results)))
+        log.info("> Schema evolution (new columns on pre-existing tables)")
+        _evo = self._replay_schema_evolution(by_target, len(results))
+        results.extend(_evo)
+        self._log_phase_objects("Schema evolution", _evo)
 
         # Phase 1c — classic mask / row filter re-apply (bug A1/A2): apply the exported
         # policies/ dir (standalone SET MASK / SET ROW FILTER) to PRE-EXISTING tables
@@ -925,22 +1133,31 @@ class PackageImportEngine:
         # closes is a mask/row filter added to an ALREADY-migrated column of an existing
         # table — it lands only in ddl_hash (CHANGED + SKIP_EXISTING), so the engine
         # never applied it and it falsely read "Updated". Fail-closed on failure.
-        results.extend(self._apply_policies(inventory, by_target, len(results)))
+        log.info("> Re-applying classic masks & row filters")
+        _pol = self._apply_policies(inventory, by_target, len(results))
+        results.extend(_pol)
+        self._log_phase_objects("Masks & row filters", _pol)
 
         # Phase 2 — governed tags on non-view objects. A tag failure on a TABLE
         # records that table for the drop sweep (fail-closed).
         if self.toggles.get("apply_tags", True):
-            results.extend(self._apply_governance_dir(
+            log.info("> Applying governed tags to tables & other objects")
+            _tg = self._apply_governance_dir(
                 "tags", "APPLY_TAGS", inventory, by_target, len(results),
-                type_predicate=lambda ot: ot not in _VIEW_LIKE_TYPES))
+                type_predicate=lambda ot: ot not in _VIEW_LIKE_TYPES)
+            results.extend(_tg)
+            self._log_phase_objects("Governed tags (objects)", _tg)
 
         # Phase 3 — ABAC policies, run on the SQL warehouse executor. A failure
         # (including "no warehouse configured" → ABAC_WAREHOUSE_REQUIRED) records
         # every created table the policy matches for the drop sweep.
         if self.toggles.get("create_abac_policies", True):
-            results.extend(self._apply_governance_dir(
+            log.info("> Creating ABAC policies (column masks / row filters via policy)")
+            _ab = self._apply_governance_dir(
                 "abac", "CREATE_POLICY", inventory, by_target, len(results),
-                executor=self.abac_sql, abac_meta=abac_meta))
+                executor=self.abac_sql, abac_meta=abac_meta)
+            results.extend(_ab)
+            self._log_phase_objects("ABAC policies", _ab)
 
         # Phase 4 — drop sweep: every table a governance step failed on is dropped
         # and its create result is mutated to FAILURE (PROTECTION_FAILED) in place,
@@ -954,19 +1171,27 @@ class PackageImportEngine:
         # CREATE VIEW over a masked/row-filtered base table); otherwise on the main
         # executor. Its DDL, session context, existence probe, and ordinary grants
         # all route to that executor.
-        for path in view_files:
-            results.append(
-                self._import_ddl_file(
-                    path, len(results) + 1, inventory, by_target,
-                    executor=self.warehouse_sql,
-                )
+        # Views are mutually independent once their base tables exist, so they too run
+        # with within-level parallelism (item 3) on the warehouse executor.
+        log.info("> Creating views & materialized views: %s (parallel x%d)",
+                 self._file_type_breakdown(view_files), max(1, self.parallel_threads))
+        _s = len(results)
+        results.extend(
+            self._process_ddl_level(
+                view_files, len(results), inventory, by_target,
+                executor=self.warehouse_sql,
             )
+        )
+        self._log_phase_done("View creation", results[_s:])
 
         # Phase 6 — governed tags on view-like objects (their securable now exists).
         if self.toggles.get("apply_tags", True):
-            results.extend(self._apply_governance_dir(
+            log.info("> Applying governed tags to views")
+            _vt = self._apply_governance_dir(
                 "tags", "APPLY_TAGS", inventory, by_target, len(results),
-                type_predicate=lambda ot: ot in _VIEW_LIKE_TYPES))
+                type_predicate=lambda ot: ot in _VIEW_LIKE_TYPES)
+            results.extend(_vt)
+            self._log_phase_objects("Governed tags (views)", _vt)
 
         # Phase 7 — fail (without dropping) every non-table securable a governance
         # step failed on, plus any pre-existing table whose governance failed. A
@@ -1051,7 +1276,129 @@ class PackageImportEngine:
             ))
         return out
 
+    def _process_ddl_level(
+        self,
+        paths: list[Path],
+        order_start: int,
+        inventory: dict[str, dict[str, Any]],
+        by_target: dict[str, dict[str, Any]],
+        *,
+        executor: Any = None,
+    ) -> list["PackageImportResult"]:
+        """Create a set of objects with within-`_type_rank`-level parallelism (item 3).
+
+        The files are grouped by ``_type_rank`` and each rank-group is processed in
+        order (a **barrier** between levels preserves dependency order — functions before
+        tables, so a table's inline mask/row-filter clause resolves). Within a group,
+        same-rank objects run across a bounded pool.
+
+        Intra-rank dependency retry (BUG-QA1): same-rank objects are USUALLY independent,
+        but not always — a table may carry a FOREIGN KEY to a sibling table, or a function
+        may call a sibling function. Under parallelism a dependent can be attempted before
+        its sibling commits and fail (``TABLE_OR_VIEW_NOT_FOUND`` / ``ROUTINE_NOT_FOUND``).
+        So after the parallel pass we re-run the still-FAILED objects **sequentially**, up
+        to a few passes; each pass resolves one dependency layer, and we stop as soon as a
+        pass fixes nothing (the remaining failures are real). Sequential runs (or single
+        objects) skip the retry — there is no ordering hazard.
+
+        Determinism: files are name-sorted within a rank and ``import_order`` is assigned
+        sequentially from ``order_start`` in that order, so the result order + ordinals
+        are IDENTICAL to the sequential path regardless of completion order. With
+        ``parallel_threads == 1`` (default) this IS the sequential path.
+        """
+        ordered = sorted(
+            paths,
+            key=lambda p: (_type_rank(_parse_sql_filename(p.name)[0]), p.name),
+        )
+        out: list[PackageImportResult] = []
+        order = order_start
+        for _rank, group in groupby(
+            ordered, key=lambda p: _type_rank(_parse_sql_filename(p.name)[0])
+        ):
+            group_paths = list(group)  # already name-sorted within the rank
+            results = self._run_ddl_group(group_paths, inventory, by_target, executor)
+            # ONE retry pass per object type (BUG-QA1). The parallel pass can attempt a
+            # same-rank object before a sibling it depends on commits (e.g. a table with
+            # a FK to another table in this level) → a transient TABLE_OR_VIEW_NOT_FOUND
+            # / ROUTINE_NOT_FOUND. A single sequential re-run of the failed set — where
+            # the siblings now exist — resolves that. Deliberately just ONE pass: whatever
+            # still fails is a real failure and is reported as-is (no loop). This keeps
+            # behaviour simple and matches the sequential path (which does no retry and is
+            # what customers run today — same-rank dependencies are rare). Skipped when
+            # sequential (threads=1) or dry-run: there is no ordering hazard to undo.
+            parallel = self.parallel_threads > 1 and not self.dry_run
+            if parallel:
+                failed = [p for p in group_paths if results[p].status == "FAILURE"]
+                if failed:
+                    # Clear the stale "absent" marks so a now-succeeding retry is not
+                    # skipped by the governance phases, then re-run the failed set once
+                    # sequentially.
+                    for p in failed:
+                        self._absent_objects.discard(results[p].target_full_name)
+                    results.update(self._run_ddl_group(
+                        failed, inventory, by_target, executor, force_sequential=True
+                    ))
+            for p in group_paths:  # deterministic (name-sorted) order + ordinals
+                order += 1
+                results[p].import_order = order
+                out.append(results[p])
+        return out
+
+    def _run_ddl_group(
+        self,
+        paths: list[Path],
+        inventory: dict[str, dict[str, Any]],
+        by_target: dict[str, dict[str, Any]],
+        executor: Any,
+        *,
+        force_sequential: bool = False,
+    ) -> dict[Path, "PackageImportResult"]:
+        """Create each file's object, returning ``{path: result}``. Runs in a bounded
+        pool when parallelism is on (unless ``force_sequential``, used for retry passes).
+        ``import_order`` is a placeholder (0) here — the caller assigns it deterministically."""
+        if (
+            not force_sequential
+            and self.parallel_threads > 1
+            and len(paths) > 1
+            and not self.dry_run
+        ):
+            workers = min(self.parallel_threads, len(paths))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                res = list(pool.map(
+                    lambda p: self._import_ddl_file(
+                        p, 0, inventory, by_target, executor=executor
+                    ),
+                    paths,
+                ))
+        else:
+            res = [
+                self._import_ddl_file(p, 0, inventory, by_target, executor=executor)
+                for p in paths
+            ]
+        return {p: r for p, r in zip(paths, res)}
+
     def _import_ddl_file(
+        self,
+        path: Path,
+        order: int,
+        inventory: dict[str, dict[str, Any]],
+        by_target: dict[str, dict[str, Any]],
+        *,
+        executor: Any = None,
+    ) -> "PackageImportResult":
+        """Create one object and log its outcome live (per-object visibility).
+
+        Thin wrapper around :meth:`_import_ddl_file_impl` so every return path (skip,
+        unchanged, manual, create, failure) produces exactly one per-object log line
+        from inside the worker thread.
+        """
+        result = self._import_ddl_file_impl(
+            path, order, inventory, by_target, executor=executor
+        )
+        self._log_result(result)
+        return result
+
+    def _import_ddl_file_impl(
         self,
         path: Path,
         order: int,
@@ -1144,7 +1491,8 @@ class PackageImportEngine:
                    else " (set migrate_materialized_views=true to override)")
             )
             if target_full_name:
-                self._created_objects[target_full_name] = result
+                with self._state_lock:
+                    self._created_objects[target_full_name] = result
             return result
         # Delta gating: on an incremental run an object whose DDL + governance +
         # grants are all unchanged is skipped ENTIRELY (zero writes) — no create, no
@@ -1171,7 +1519,8 @@ class PackageImportEngine:
                 result.action = "UNCHANGED"
                 result.message = "unchanged since last run (incremental: skipped)"
             if target_full_name:
-                self._created_objects[target_full_name] = result
+                with self._state_lock:
+                    self._created_objects[target_full_name] = result
             return result
         statements: list[str] = []  # defined before the try so the except can
         # report the attempted external LOCATION even on an early read failure.
@@ -1202,8 +1551,9 @@ class PackageImportEngine:
                 result.message = manual_reason
                 # Never created → the governance phases must not act on it (task 5).
                 if target_full_name:
-                    self._absent_objects.add(target_full_name)
-                    self._created_objects[target_full_name] = result
+                    with self._state_lock:
+                        self._absent_objects.add(target_full_name)
+                        self._created_objects[target_full_name] = result
                 return result
             if not self._create_enabled(object_type):
                 # create_*=false: the object is assumed to already exist on
@@ -1225,6 +1575,8 @@ class PackageImportEngine:
                         grants_path, object_type, target_full_name,
                         executor=executor,
                     )
+                    if self.apply_grants and grants_path.exists():
+                        result.grants_status = "failed" if grant_warning else "applied"
                     result.message = (
                         "create disabled by toggle; assumed pre-existing"
                         + (f"; grant warning: {grant_warning}" if grant_warning else "")
@@ -1306,6 +1658,10 @@ class PackageImportEngine:
                     raise RuntimeError(
                         f"object missing after create: {grant_warning}"
                     )
+                if self.apply_grants and grants_path.exists():
+                    # Per-facet grant status (backlog item 8): a raised GRANT → failed, so
+                    # grants replay next run even if the object is otherwise clean.
+                    result.grants_status = "failed" if grant_warning else "applied"
                 if grant_warning:
                     result.message = f"created; grant warning: {grant_warning}"
                 result.status = "SUCCESS"
@@ -1369,21 +1725,24 @@ class PackageImportEngine:
         # Record tables THIS run created (fresh, empty shells) so the fail-closed
         # drop sweep can undo them. A pre-existing (SKIP_EXISTING) table is left
         # untouched — never dropped.
-        if (
-            object_type in _DROPPABLE_TABLE_TYPES
-            and result.status == "SUCCESS"
-            and result.action == "CREATE_OR_SKIP"
-        ):
-            self._created_tables[target_full_name] = result
-        # Record every object's create result so a governed-tag failure on a
-        # non-table securable can mark it FAILURE in place (see _mark_failed_objects).
-        if target_full_name:
-            self._created_objects[target_full_name] = result
-        # A create FAILURE means the object is not present on target, so the
-        # governance phases must not act on it (task 5 — otherwise a governed tag /
-        # ABAC match would be counted a second time as a fail-closed drop).
-        if target_full_name and result.status == "FAILURE":
-            self._absent_objects.add(target_full_name)
+        # Shared bookkeeping — guarded so concurrent workers (item 3) update the maps
+        # safely. Each worker writes a distinct target_full_name key.
+        with self._state_lock:
+            if (
+                object_type in _DROPPABLE_TABLE_TYPES
+                and result.status == "SUCCESS"
+                and result.action == "CREATE_OR_SKIP"
+            ):
+                self._created_tables[target_full_name] = result
+            # Record every object's create result so a governed-tag failure on a
+            # non-table securable can mark it FAILURE in place (see _mark_failed_objects).
+            if target_full_name:
+                self._created_objects[target_full_name] = result
+            # A create FAILURE means the object is not present on target, so the
+            # governance phases must not act on it (task 5 — otherwise a governed tag /
+            # ABAC match would be counted a second time as a fail-closed drop).
+            if target_full_name and result.status == "FAILURE":
+                self._absent_objects.add(target_full_name)
         return result
 
     def _abac_meta_by_stem(
@@ -1433,38 +1792,47 @@ class PackageImportEngine:
         action_label: str,
         meta: Optional[dict[str, str]],
         feature: str,
-    ) -> bool:
+    ) -> tuple[bool, bool]:
         """Record the object(s) a failed governance op leaves unprotected.
 
         A governed-tag failure fails the object it targets, on **every** type:
-        * a **table** is recorded for the drop sweep (dropped → FAILURE — fail-closed,
-          it is an empty shell this run created, so no data is lost);
+        * a **table** is recorded for the drop sweep — but it is only actually DROPPED
+          if it is a fresh empty shell THIS run created (in ``_created_tables``); a
+          pre-existing / create-disabled table is recorded but marked FAILURE in place,
+          never dropped (dropping it would destroy data);
         * a **catalog / schema / volume / view** is recorded to be marked FAILURE in
-          place (never dropped — that would be destructive and it may hold succeeded
-          children).
+          place (never dropped — it may hold succeeded children).
 
         For an **ABAC** failure (``CREATE_POLICY``) the ABAC policy is itself an
         object whose own result already carries the FAILURE, so this only records the
-        matched table(s) to drop. Returns True if it recorded a table for the drop
-        sweep (kept for the caller's error-code choice).
+        matched table(s).
+
+        Returns ``(recorded_table, will_drop)`` (bug #6): ``recorded_table`` is True
+        when a table was recorded for the sweep; ``will_drop`` is True only when at
+        least one recorded table is a fresh shell this run created and so will actually
+        be dropped. The caller composes an honest message from this — "dropped" only
+        when a table really will be dropped, "marked FAILURE (not dropped —
+        pre-existing)" otherwise.
         """
         if action_label == "CREATE_POLICY":
             policy = (meta or {}).get("full_name", "policy")
-            recorded = False
+            recorded = will_drop = False
             for tbl in self._abac_matched_tables(meta):
                 self._failed_tables.setdefault(tbl, f"ABAC {policy} ({feature})")
                 recorded = True
-            return recorded
+                will_drop = will_drop or (tbl in self._created_tables)
+            return recorded, will_drop
         if object_type in _DROPPABLE_TABLE_TYPES:
             self._failed_tables.setdefault(
                 target_full_name, f"governed tag ({feature})"
             )
-            return True
+            # A table is only really dropped when it is a fresh shell this run created.
+            return True, target_full_name in self._created_tables
         # Non-table securable: mark FAILURE in place (no drop).
         self._failed_objects.setdefault(
             target_full_name, f"governed tag ({feature})"
         )
-        return False
+        return False, False
 
     def _drop_failed_tables(self) -> None:
         """Drop every table a governance step failed on and flip its create result.
@@ -1486,9 +1854,9 @@ class PackageImportEngine:
                     f"DROP TABLE IF EXISTS {quote_full_name(target_full_name)}"
                 )
             except Exception as exc:  # noqa: BLE001
-                print(
-                    f"[import] fail-closed drop of {target_full_name} raised: "
-                    f"{str(exc)[:200]}"
+                log.error(
+                    "fail-closed drop of %s raised: %s",
+                    target_full_name, str(exc)[:200],
                 )
             create_result.status = "FAILURE"
             create_result.action = "DROP_PROTECTION_FAILED"
@@ -1734,6 +2102,11 @@ class PackageImportEngine:
             object_type = str(row.get("object_type") or "")
             if object_type not in _DROPPABLE_TABLE_TYPES:  # TABLE / EXTERNAL_TABLE
                 continue
+            # Retry-failed-only: only evolve a table in the failed set (item 4).
+            if self._retry_failed_only and not self._retry_scope_ok(
+                object_type, target_full_name
+            ):
+                continue
             source_full = str(
                 row.get("source_full_name") or row.get("full_name") or ""
             )
@@ -1953,7 +2326,18 @@ class PackageImportEngine:
             if type_predicate is not None and not type_predicate(object_type):
                 continue
             target_full_name = self._map_name(parsed_name)
-            if not self._in_scope(object_type, target_full_name):
+            # BUG-QA2: an ABAC file encodes '#policy:' as '__policy__', and
+            # _parse_sql_filename decodes it back as '.policy.' — a name that never
+            # matches the retry-failed-only / filter_tables set or the uc_sync_state
+            # key ('…#policy:name'). Use the policy's REAL full name from abac_meta for
+            # the scope check so a failed ABAC policy is actually replayed (not silently
+            # skipped → false-green). Keep target_full_name for the rest of the loop.
+            scope_name = target_full_name
+            if is_abac and abac_meta is not None:
+                _meta = abac_meta.get(path.stem)
+                if _meta and _meta.get("full_name"):
+                    scope_name = self._map_name(_meta["full_name"])
+            if not self._in_scope(object_type, scope_name):
                 continue  # object excluded by the import scope filter
             # An object that was never created (create FAILURE / MANUAL skip) must
             # not have governance acted on it — its create row already carries the
@@ -2023,18 +2407,24 @@ class PackageImportEngine:
                     result.status = "PENDING"
                     result.message = f"dry_run statements={len(statements)}"
                 elif abac_no_warehouse:
+                    _recorded, _will_drop = self._record_governance_failure(
+                        object_type, target_full_name, action_label, meta,
+                        "ABAC_WAREHOUSE_REQUIRED",
+                    )
+                    # Bug #6: only say "dropped" when a fresh shell this run created is
+                    # actually swept; a pre-existing matched table is marked, not dropped.
+                    _disp = (
+                        "Matched fresh table(s) are dropped fail-closed."
+                        if _will_drop else
+                        "Matched pre-existing table(s) are marked FAILURE (not dropped)."
+                    )
                     result.status = "FAILURE"
                     result.action = "MANUAL"
                     result.error_code = "ABAC_WAREHOUSE_REQUIRED"
                     result.message = (
                         "ABAC CREATE POLICY requires a SQL warehouse "
                         "(import_warehouse_id); it is rejected on a classic Spark "
-                        "cluster. Matched table(s) are dropped fail-closed. Set "
-                        "import_warehouse_id and re-run."
-                    )
-                    self._record_governance_failure(
-                        object_type, target_full_name, action_label, meta,
-                        "ABAC_WAREHOUSE_REQUIRED",
+                        f"cluster. {_disp} Set import_warehouse_id and re-run."
                     )
                 else:
                     # Governed-tag ALTER statements and ABAC CREATE POLICY are both
@@ -2052,16 +2442,27 @@ class PackageImportEngine:
                             failed = message
                             break
                     if failed:
-                        dropped = self._record_governance_failure(
+                        recorded, will_drop = self._record_governance_failure(
                             object_type, target_full_name, action_label, meta, failed
                         )
-                        if dropped:
+                        if recorded and will_drop:
                             result.status = "FAILURE"
                             result.action = "MANUAL"
                             result.error_code = "PROTECTION_FAILED"
                             result.message = (
                                 "governance failed; protected table(s) dropped "
                                 f"fail-closed: {failed[:400]}"
+                            )
+                        elif recorded:
+                            # Bug #6: a pre-existing / create-disabled table is NOT
+                            # dropped (that would destroy data) — it is marked FAILURE
+                            # in place. The message must not claim it was dropped.
+                            result.status = "FAILURE"
+                            result.action = "MANUAL"
+                            result.error_code = "PROTECTION_FAILED"
+                            result.message = (
+                                "governance failed; table(s) marked FAILURE (not "
+                                f"dropped — pre-existing) fail-closed: {failed[:400]}"
                             )
                         elif _is_governance_prereq_error(failed):
                             result.status = "MANUAL_ACTION_REQUIRED"
@@ -2116,9 +2517,12 @@ class PackageImportEngine:
             grants_path.read_text(encoding="utf-8")
         ):
             if _is_owner_statement(statement):
-                self._deferred_owner.append(
-                    (object_type, target_full_name, statement)
-                )
+                # Queued for the final ownership phase (order-independent); guarded for
+                # concurrent workers (item 3 — grants run inside _import_ddl_file).
+                with self._state_lock:
+                    self._deferred_owner.append(
+                        (object_type, target_full_name, statement)
+                    )
                 continue
             # Never re-grant to the run-as SPN itself (task 8): it already holds its
             # catalog-scoped grant, and its source ACLs are irrelevant to the target.
@@ -2139,20 +2543,24 @@ class PackageImportEngine:
         """
         if self.dry_run or not self._deferred_owner:
             return
+        log.info("> Transferring ownership (%d objects)", len(self._deferred_owner))
         for _object_type, _target, statement in self._deferred_owner:
             try:
                 self.sql.execute(statement)
                 self._ownership_transferred += 1
+                log.info("    %-14s %s -> owner transferred", _object_type, _target)
             except Exception as exc:  # noqa: BLE001
                 self._ownership_skipped += 1
-                print(
-                    "[import] ownership not transferred (left with the run "
-                    f"principal): {str(exc)[:300]} :: {statement[:200]}"
-                )
-        print(
-            f"[import] ownership phase: {self._ownership_transferred} transferred, "
-            f"{self._ownership_skipped} left with the run principal "
-            "(owner missing on target or not permitted)."
+                # Object + short reason at WARNING (the full ALTER + full error go to
+                # DEBUG via the SQL logger and the line below) — a missing source owner
+                # is expected in a region move, so keep it terse.
+                log.warning("    %-14s %s -> owner kept as run principal (%s)",
+                            _object_type, _target, _short_reason(str(exc)))
+                log.debug("ownership transfer failed: %s :: %s", str(exc), statement)
+        log.info(
+            "[-] Ownership complete: %d transferred, %d kept with the run principal "
+            "(owner missing on target or not permitted).",
+            self._ownership_transferred, self._ownership_skipped,
         )
 
     def _maybe_enter_existing_catalog_mode(self) -> None:
@@ -2185,10 +2593,10 @@ class PackageImportEngine:
         ):
             self.toggles[toggle] = False
         self._existing_catalog_mode = True
-        print(
-            "[import] existing-catalog mode: target catalog(s) "
-            f"{targets} already present — skipping storage-credential / external-"
-            "location / catalog creation; replicating schemas + objects only."
+        log.info(
+            "existing-catalog mode: target catalog(s) %s already present — skipping "
+            "storage-credential / external-location / catalog creation; replicating "
+            "schemas + objects only.", targets,
         )
 
     def _apply_object_locations(

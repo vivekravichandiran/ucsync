@@ -15,3 +15,7 @@ CREATE SCHEMA IF NOT EXISTS ai27_ucsync_testcatalog.governed       MANAGED LOCAT
 CREATE SCHEMA IF NOT EXISTS ai27_ucsync_testcatalog.external_store MANAGED LOCATION 'abfss://data@{{TESTCAT_TGT_ACCOUNT}}.dfs.core.windows.net/external_store' COMMENT 'BYO shell';
 CREATE SCHEMA IF NOT EXISTS ai27_ucsync_testcatalog.advanced       MANAGED LOCATION 'abfss://data@{{TESTCAT_TGT_ACCOUNT}}.dfs.core.windows.net/advanced'       COMMENT 'BYO shell';
 CREATE SCHEMA IF NOT EXISTS ai27_ucsync_testcatalog.restricted     MANAGED LOCATION 'abfss://data@{{TESTCAT_TGT_ACCOUNT}}.dfs.core.windows.net/restricted'     COMMENT 'BYO shell';
+-- Parallelism stress bed (backlog item 3): 3 BYO schemas for the 120-table load.
+CREATE SCHEMA IF NOT EXISTS ai27_ucsync_testcatalog.parallel_a     MANAGED LOCATION 'abfss://data@{{TESTCAT_TGT_ACCOUNT}}.dfs.core.windows.net/parallel_a'     COMMENT 'BYO shell (parallelism stress)';
+CREATE SCHEMA IF NOT EXISTS ai27_ucsync_testcatalog.parallel_b     MANAGED LOCATION 'abfss://data@{{TESTCAT_TGT_ACCOUNT}}.dfs.core.windows.net/parallel_b'     COMMENT 'BYO shell (parallelism stress)';
+CREATE SCHEMA IF NOT EXISTS ai27_ucsync_testcatalog.parallel_c     MANAGED LOCATION 'abfss://data@{{TESTCAT_TGT_ACCOUNT}}.dfs.core.windows.net/parallel_c'     COMMENT 'BYO shell (parallelism stress)';

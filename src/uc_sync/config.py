@@ -59,7 +59,6 @@ class SyncConfig:
     # --- new governance-migration contract (canonical) ---
     stage: str = "INVENTORY"
     connectivity_mode: str = "direct"
-    mapping_file_path: str = ""
     # BYO-by-default: catalog / schema / storage-credential / external-location are
     # prerequisites the customer pre-creates, so their creation is OFF by default.
     create_storage_credentials: bool = False
@@ -138,6 +137,13 @@ class SyncConfig:
     # source→target via the Files API. Default OFF (securables are always created;
     # file bytes are optional). Incremental via a control table of copied mtimes.
     copy_volume_data: bool = False
+    # Retry-failed-only import mode (backlog item 4): an IMPORT-job-only toggle. When on,
+    # the import replays ONLY the objects whose prior run left a facet failed (read from
+    # uc_sync_state's per-facet *_status, item 8) plus their required parents
+    # (catalog/schema/functions), skipping everything else regardless of deltas. The
+    # operator passes the same `run_id` as a normal import (the bundle already exists at
+    # run_{run_id}); no re-export. Default off = today's incremental behavior.
+    retry_failed_only: bool = False
     # Graded preflight (task 9): gate 01/02/03 behind an environment preflight. When
     # enforced (default), a NO-GO (missing report lib, unreachable warehouse, …) is a
     # red run, never a silent degrade. Every run always produces its report — a
@@ -145,6 +151,12 @@ class SyncConfig:
     preflight_enforce: bool = True
     allow_destructive_operations: bool = False
     max_api_workers: int = 8
+    # Bounded thread-pool size for the per-object work inside a stage (backlog item 3):
+    # Export SHOW CREATE pre-capture, Inventory grant/governance fan-out (and, later,
+    # the Import within-level phase). One knob for all stages. 1 = fully sequential
+    # (safe fallback / kill-switch). Keep it ≤ the target warehouse's max concurrent
+    # queries (every worker's DDL/ABAC runs through that warehouse).
+    parallel_threads: int = 4
     mappings: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -380,22 +392,10 @@ def from_sources(
     ).lower()
     if connectivity_mode not in CONNECTIVITY_MODES:
         raise ValueError(f"connectivity_mode must be one of {CONNECTIVITY_MODES}")
-    # RETIRED WIDGET (kept as inert dead code — full removal backlogged in
-    # plans/remove-mapping-file-path.md). The `mapping_file_path` widget was removed
-    # from 00_Install_Jobs / 02_Export and the job specs, so this now always resolves
-    # to "" for widget/job-param runs and is a no-op. A legacy CSV can still be
-    # supplied via the YAML `location_mapping_csv_path` input (independent path above).
-    mapping_file_path = str(
-        pick("mapping_file_path", runtime.get("mapping_file_path"))
-    )
-    # A single mapping file supersedes the legacy location CSV; feed the existing
-    # loader until the Phase 2 mapping-file loader replaces it.
-    if mapping_file_path and not location_mapping_csv_path:
-        location_mapping_csv_path = mapping_file_path
-        location_mappings = [
-            item.to_dict()
-            for item in load_location_mapping_csv(mapping_file_path)
-        ]
+    # (backlog item 1) The retired `mapping_file_path` input has been fully removed.
+    # A legacy location CSV is supplied via the independent `location_mapping_csv_path`
+    # input (resolved above); the single external-storage mapping is
+    # `external_locations_path` (below). Nothing downstream reads a mapping_file_path.
     toggles = {
         name: _as_bool(pick(name, runtime.get(name)), _toggle_default(name))
         for name in (*CREATE_TOGGLES, *APPLY_TOGGLES)
@@ -414,7 +414,7 @@ def from_sources(
     if external_locations_path:
         ext_map = load_external_locations_csv(external_locations_path)
         external_locations_create_storage = ext_map.creates_storage
-        if not location_mapping_csv_path and not mapping_file_path:
+        if not location_mapping_csv_path:
             # Feed the legacy location_mappings machinery from this one file.
             location_mappings = ext_map.to_location_mappings()
         # The file's column shape is authoritative for SC/EL creation, overriding the
@@ -442,7 +442,6 @@ def from_sources(
     return SyncConfig(
         stage=stage,
         connectivity_mode=connectivity_mode,
-        mapping_file_path=mapping_file_path,
         **toggles,
         execution_mode=execution_mode,
         mode=str(pick("mode", stage)).upper(),
@@ -516,6 +515,9 @@ def from_sources(
         copy_volume_data=_as_bool(
             pick("copy_volume_data", runtime.get("copy_volume_data")), False
         ),
+        retry_failed_only=_as_bool(
+            pick("retry_failed_only", runtime.get("retry_failed_only")), False
+        ),
         preflight_enforce=_as_bool(
             pick("preflight_enforce", runtime.get("preflight_enforce")), True
         ),
@@ -523,6 +525,9 @@ def from_sources(
             runtime.get("allow_destructive_operations"), False
         ),
         max_api_workers=int(runtime.get("max_api_workers") or 8),
+        parallel_threads=int(
+            pick("parallel_threads", runtime.get("parallel_threads")) or 4
+        ),
         mappings={
             "storage_credentials": file_config.get("storage_credentials") or {},
             "external_locations": file_config.get("external_locations") or {},

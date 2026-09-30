@@ -204,7 +204,9 @@ def _render_export_status(entry: Optional[dict[str, str]]) -> str:
     return status or ""
 
 
-def _render_import_status(entry: Optional[dict[str, str]]) -> str:
+def _render_import_status(
+    entry: Optional[dict[str, str]], empty_label: str = ""
+) -> str:
     """Human-readable import outcome for an object row, using the ONE wsmig status
     vocabulary (bug #19) so the per-type sheets match the Summary roll-up exactly —
     Created / Created (warning) / Updated / Adopted (pre-existing) / Skipped (unchanged)
@@ -212,9 +214,14 @@ def _render_import_status(entry: Optional[dict[str, str]]) -> str:
     a reader never sees two different labels ("SUCCESS (UNCHANGED)" vs "ALREADY EXISTS
     (skipped)") for the same kind of outcome. Failures and manual steps keep their
     message tail; a dry run reads as a validation.
+
+    ``empty_label`` is what to render when the object has no import result. Blank for a
+    normal run (nothing to say), but on a retry-failed-only run the caller passes
+    "— (not in retry scope)" so the ~untouched objects read as deliberately skipped
+    rather than as missing data.
     """
     if not entry:
-        return ""  # no import in this stage (inventory/export reports)
+        return empty_label  # no import result for this object this run
     status, action, msg = entry["status"], entry["action"], entry["message"]
     tail = f": {msg[:200]}" if msg else ""
     # A CHANGED table skipped because its only diff is a column drop / type change
@@ -474,6 +481,7 @@ def build_report(
     outstanding: Optional[list[dict[str, Any]]] = None,
     run_id: str = "",
     workspace_url: str = "",
+    retry_failed_only: bool = False,
 ) -> str:
     """Write the migration workbook to ``out_path`` (.xlsx). Returns the path.
 
@@ -506,6 +514,11 @@ def build_report(
     export_idx = _export_index(export_results or [])
     idx = _import_index(import_results or [])
     tag_idx = _tag_op_index(import_results or [])
+    # On a retry-failed-only run only the failed set + parents are processed; every other
+    # object has no import result. Render those as an explicit "not in retry scope" rather
+    # than a blank cell that reads like missing data (matches the "— (no tag op this run)"
+    # convention on the Tags sheet).
+    _empty_import = "— (not in retry scope)" if retry_failed_only else ""
 
     def _status_headers() -> list[str]:
         headers: list[str] = []
@@ -533,7 +546,7 @@ def build_report(
         if stage == "IMPORT":
             cells.append(
                 _STATUS_STYLE["manual"][0] if report_only
-                else _render_import_status(idx.get(name) or idx.get(tname))
+                else _render_import_status(idx.get(name) or idx.get(tname), _empty_import)
             )
         return cells
 
@@ -861,7 +874,7 @@ def build_report(
         if _object_rolled_back(*names):
             return [_ROLLED_BACK]
         entry = next((idx.get(n) for n in names if n and idx.get(n)), None)
-        return [_render_import_status(entry)]
+        return [_render_import_status(entry, _empty_import)]
 
     def _tag_gov_status(*names: str) -> list[str]:
         """Tags sheet status ← the actual APPLY_TAGS op (never the create-skip).

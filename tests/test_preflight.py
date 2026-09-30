@@ -64,6 +64,9 @@ def test_ops_state_absent_is_degrading_only():
 
 
 def test_enforce_raises_on_nogo_and_downgrades_when_off(capsys):
+    # Route structured logging to stdout so the graded verdict + warning are captured.
+    from uc_sync import logging_util as lg
+    lg.configure_logging(run_id="t", stage="INVENTORY", capture=False)
     nogo = PreflightResult([Check("lib x", BLOCKING, False, "missing")])
     with pytest.raises(PreflightError):
         enforce_preflight(nogo, enforce=True)

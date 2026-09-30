@@ -32,8 +32,9 @@ and the manual-prerequisites table there.
 | ☐ | **Target metastore + storage + access connector** exist | Create the metastore, an ADLS container, and a Databricks access connector with `Storage Blob Data Contributor`; note the connector id |
 | ☐ | **Governed-tag definitions** — usually automatic | The tool **recreates** the source's captured definitions on the target in Phase 0 (`CREATE GOVERNED TAG`, idempotent). Ensure they exist on the target account (workspace-migration utility / Tag Policy API) **only** if the source can't be read or the target SP can't create them — else `SET TAGS` reports `GOVERNANCE_PREREQ_MISSING` |
 | ☐ | **Identities** (users / groups / SPs) present on target | The workspace-migration utility runs first |
-| ☐ | **Source read SP** is catalog-scoped incl. `MANAGE` + `CAN USE` on a **source SQL warehouse** | [Permissions › source SP](PERMISSIONS_GUIDE.md#1️⃣-source-read-sp-inventory--export) |
+| ☐ | **Source read SP** is catalog-scoped incl. `MANAGE` + **`system` access** (tags/ABAC) + `CAN USE` on a **source SQL warehouse** | [Permissions › source SP](PERMISSIONS_GUIDE.md#1️⃣-source-read-sp-inventory--export) |
 | ☐ | **Target run SP** has `ALL PRIVILEGES + MANAGE + APPLY TAG` on the (pre-created) catalog + ops-schema grants + `CAN USE` on a **target SQL warehouse** | [Permissions › target SP](PERMISSIONS_GUIDE.md#2️⃣-target-run-sp-import) |
+| ☐ | **SCIM entitlements**: both SPs have `workspace-access` + `databricks-sql-access`; the **target run SP** also has **`allow-cluster-create`** (job cluster). To run a Job *as* the SP, also `servicePrincipal.user` (account) or create the Job as the SP | [Permissions › Workspace entitlements](PERMISSIONS_GUIDE.md#-workspace-entitlements--running-a-job-as-a-service-principal) |
 | ☐ | **A source SQL warehouse** (`source_warehouse_id`) and a **target SQL warehouse** (`import_warehouse_id`) | Export requires the source warehouse in both modes; the **entire import** runs on the target warehouse — it's required, and the import fails fast without it |
 | ☐ | **Compute is Standard (USER_ISOLATION) or serverless** | Masks / row filters are rejected on single-user clusters |
 
@@ -190,6 +191,7 @@ Everything lands in the bundle at `<output_volume_path>/run_<run_id>/`:
 | File | What it tells you |
 |------|-------------------|
 | **`reports/import.xlsx`** | One sheet **per object type** — action, status, notes. Plus **Summary** (current-run failures / manual steps / deleted-in-source), **ABAC Policies**, **Column Masks & Row Filters**, **Governed Tags Applied**, and the **Outstanding** sheet. **Read this first.** |
+| **`reports/import_retry_<UTC>.xlsx`** | Written by a **retry-failed-only** run (the original `import.xlsx` is preserved). Only the retried failed set + its parents carry a status; every object the retry didn't touch reads **`— (not in retry scope)`**, not a blank. |
 | **`reports/inventory.xlsx` / `export.xlsx`** | What was found / captured upstream. |
 | **`manifest.json` + `checksums/`** | Completeness proof (verified at import). |
 | **`uc_sync_audit` / `uc_sync_state`** *(tables)* | Run/event log + per-object baseline (with `last_action`). |
@@ -230,6 +232,8 @@ cause, then re-run; the re-run is additive and idempotent, so only outstanding u
 |---------|-----|
 | **`GOVERNANCE_PREREQ_MISSING`** (tags/ABAC) | A governed-tag **definition** couldn't be recreated (Phase 0 needs `apply_tags=true` + the source definitions captured + the target SP able to `CREATE GOVERNED TAG`) or a referenced mask/filter **function** is missing. Define the tag on the target account (workspace-migration utility); ensure functions imported (`create_functions=true`). |
 | **ABAC / Policy-Matched sheets empty** | Set `source_warehouse_id` (classic Spark can't read `abac_policy_definitions`). |
+| **Tags *and* ABAC empty though a warehouse is set, grants fine** | Source SP is missing **`system`** access — governed tags/ABAC are read from `system.information_schema`. Grant it (see [Permissions › `system` access](PERMISSIONS_GUIDE.md#-system-access--required-to-read-tags--abac)); then re-apply governance only (below). |
+| **`PERMISSION_DENIED: … not authorized to create clusters`** at job start | The run-as SP lacks the `allow-cluster-create` entitlement — grant it (SCIM) or use `existing_cluster_id`. See [Permissions › Workspace entitlements](PERMISSIONS_GUIDE.md#-workspace-entitlements--running-a-job-as-a-service-principal). |
 | **`Metastore storage root URL does not exist`** on catalog create | Target metastore has no default storage → provide storage + mapping, or pre-create the catalog and set `create_catalogs=false`. |
 | **`EXTERNAL_LOCATION_MISSING`** | Add an `object_locations.csv` row whose path is covered by an existing EL; grant `CREATE EXTERNAL …` on that EL. |
 | **`COLUMN_MASKS_FEATURE_NOT_SUPPORTED.CHECK_CONSTRAINT`** at source read | UC rejects masks on CHECK-constraint tables — a source data-model issue; fix at source. |
@@ -239,6 +243,36 @@ cause, then re-run; the re-run is additive and idempotent, so only outstanding u
 | **Orphan copy of a now-report-only object on target** (e.g. a monitor's `*_profile_metrics` / `*_drift_metrics` migrated by an **older** tool version, since reclassified report-only) | The next run **self-heals** its `uc_sync_state` row to `manual (reclassified)` — no manual state edit needed. But the tool **never auto-drops** the leftover empty copy the older run created (additive-only, the same safety rule that never drops a data-bearing table). **Ops must delete the orphan table(s) on the target by hand — *before* recreating the owning object (e.g. the monitor), or the recreation collides with the leftover.** |
 
 Permission-specific symptoms → [Permissions › Troubleshooting](PERMISSIONS_GUIDE.md#-troubleshooting-symptom--cause--fix).
+
+---
+
+## 🏷️ Re-apply governance only (tags + ABAC), no table recreate
+
+Use this when a capture missed governance — e.g. the source SP lacked **`system`** access so **grants
+migrated but tags/ABAC came back empty**, or a governed-tag apply failed for a missing prerequisite.
+The goal is to (re)apply tags + ABAC to **already-migrated** tables **without** recreating them:
+
+1. **Fix the blocking privilege** — grant the source SP `system` access (tags/ABAC read), and/or the
+   target SP `ASSIGN` on the governed tag. See [Permissions](PERMISSIONS_GUIDE.md).
+2. **Re-capture** — re-run Inventory + Export → a fresh bundle (there is no governance-only export;
+   it's a full `SHOW CREATE` re-capture, now with governance populated).
+3. **Import that bundle with creation off, governance on:**
+   `create_tables=create_views=create_functions=create_volumes=false`,
+   `create_abac_policies=true` + `apply_tags=true`, `apply_grants` / `apply_masks_row_filters` as
+   needed, and `import_warehouse_id` set. Pre-existing tables are `SKIP_EXISTING` (never dropped —
+   the fail-closed drop only ever removes a *shell created in the same run*), so this is safe on live
+   tables.
+
+Per-facet state makes this precise: an object whose `governance_status` was `failed` re-applies its
+governance on the next run even when its structure is unchanged, and its `governance_hash` only
+advances once the tags/ABAC actually apply — so a green re-run can't mask a still-unapplied policy.
+
+### Retry only the previously-failed objects
+
+To replay **just** the prior run's failures (plus their parents) instead of a full incremental pass,
+run the import with **`retry_failed_only=true`** and the same `run_id`. It reads the failed set from
+`uc_sync_state`'s per-facet `*_status`, processes only those, and skips everything else — no
+re-export needed. (Requires a prior run that seeded `uc_sync_state`.)
 
 ---
 

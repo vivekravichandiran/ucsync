@@ -7,6 +7,9 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Optional
 
 from uc_sync import vocab
+from uc_sync.logging_util import get_log
+
+log = get_log(__name__)
 
 # Incremental-sync fingerprint columns (task 1): the three per-object fingerprints
 # the next run diffs against. Appended to older state tables in place by
@@ -21,8 +24,11 @@ CREATE TABLE IF NOT EXISTS {full_name} (
   source_object_id STRING,
   source_definition_hash STRING COMMENT 'Whole-object canonical hash (export-level integrity): the entire captured object. Any change to the object changes it.',
   ddl_hash STRING COMMENT 'Structural DDL hash only — columns/types/view text/function body/storage AND inline classic masks & row filters (they ride in CREATE); tags excluded. Drives CHANGED/REPLACED.',
+  ddl_status STRING COMMENT 'Per-facet outcome of the structure/DDL apply (backlog item 8): applied/skipped/failed/not_selected/not_attempted. Pairs with ddl_hash — the hash advances only when this is applied/skipped.',
   governance_hash STRING COMMENT 'TAGS ONLY — object-level + per-column governed tags. Drives GOVERNANCE_UPDATED even when the DDL is unchanged.',
+  governance_status STRING COMMENT 'Per-facet outcome of the tag/ABAC apply (backlog item 8). Pairs with governance_hash. A failed governance apply keeps this = failed so the next run re-applies (never masked by a clean last_action).',
   grants_json STRING,
+  grants_status STRING COMMENT 'Per-facet outcome of the grant apply (backlog item 8). Pairs with grants_json. A grant that raised is failed → grants replay next run even when ddl/governance are clean (external-object-created-later case).',
   source_last_modified_at TIMESTAMP,
   last_action STRING COMMENT 'Unified status vocabulary (uc_sync.vocab), shared verbatim with the report: created/created_with_warning/updated/adopted/skipped/skipped_create_disabled/not_selected/skipped_no_object/deleted_in_source/manual/failed.',
   last_sync_at TIMESTAMP,
@@ -50,8 +56,11 @@ STATE_COLUMNS = [
     "source_object_id",
     "source_definition_hash",
     "ddl_hash",
+    "ddl_status",
     "governance_hash",
+    "governance_status",
     "grants_json",
+    "grants_status",
     "source_last_modified_at",
     "last_action",
     "last_sync_at",
@@ -72,6 +81,28 @@ STATE_COLUMNS = [
 # Columns whose value must be PRESERVED on a MERGE update (set once, never overwritten).
 _PRESERVE_ON_UPDATE = {"first_seen"}
 
+# --- Per-facet status vocabulary (backlog item 8) ---------------------------
+# The three facets an object is tracked in: structure/DDL, governance (tags/ABAC),
+# grants. Each records its own apply outcome so a partial failure (structure OK, tags
+# failed) is never masked as fully clean.
+FACET_APPLIED = "applied"          # the facet was (re)applied this run
+FACET_SKIPPED = "skipped"          # idempotent no-op / unchanged / create-disabled
+FACET_FAILED = "failed"            # the apply raised — re-attempt next run
+FACET_NOT_SELECTED = "not_selected"    # the facet's toggle was off
+FACET_NOT_ATTEMPTED = "not_attempted"  # not reached (e.g. object absent / DDL failed first)
+
+# A facet's paired hash advances (to the source fingerprint) ONLY when the facet
+# applied or was a clean skip; otherwise the prior hash is preserved (rule #1). Which
+# state column each facet's hash-gate reads:
+_FACET_HASH_GATE = {
+    "ddl_hash": "ddl_status",
+    "governance_hash": "governance_status",
+    "grants_json": "grants_status",
+}
+_FACET_HASH_ADVANCE = {FACET_APPLIED, FACET_SKIPPED}
+# A facet that must be RE-APPLIED next run (drives delta rule #2's OR-failed clause).
+FACET_RETRY_STATUSES = {FACET_FAILED}
+
 # (column, SQL type) for columns that may be missing on an older state table. The
 # last_action rename lands here too: an older table has last_sync_status but not
 # last_action, so ADD it (ensure_table then backfills it from the legacy column). The
@@ -87,6 +118,11 @@ _STATE_UPGRADE_COLUMNS = [
     ("connectivity_mode", "STRING"),
     ("failure_category", "STRING"),
     ("last_error_raw", "STRING"),
+    # Per-facet status columns (backlog item 8) — added in place to older tables the
+    # same way; ensure_table backfills them from last_action + hash presence + category.
+    ("ddl_status", "STRING"),
+    ("governance_status", "STRING"),
+    ("grants_status", "STRING"),
 ]
 
 # error_code → coarse failure_category (Part D). A fallback keeps unknown codes as OTHER.
@@ -109,6 +145,56 @@ def _failure_category_for(error_code: str, last_action: str) -> str:
         return ""
     code = str(error_code or "").upper()
     return _FAILURE_CATEGORY.get(code, "API_ERROR" if code else "OTHER")
+
+
+def _facet_statuses(
+    result: Mapping[str, Any], last_action: str, failure_category: str
+) -> tuple[str, str, str]:
+    """Derive ``(ddl_status, governance_status, grants_status)`` for an object's state
+    row from its FINAL import result (backlog item 8, rule #4 + the matrix).
+
+    The engine folds a governance failure into the owning object's result
+    (``_drop_failed_tables`` / ``_mark_ungoverned_objects``), so the failed facet is
+    read from ``action`` / ``failure_category``. A grant failure is carried explicitly
+    on the result as ``grants_status`` (the engine sets it when a GRANT raised), so it
+    survives even when the object is otherwise clean (the external-object-created-later
+    grants-replay gap).
+    """
+    action = str(result.get("action") or "")
+    # An explicit grants_status from the engine wins for the grants facet.
+    explicit_grants = str(result.get("grants_status") or "")
+    has_gov = bool(str(result.get("governance_hash") or ""))
+
+    if last_action == vocab.FAILED:
+        cat = str(failure_category or "")
+        if cat == "GOVERNANCE":
+            # DDL is fine UNLESS the fail-closed sweep dropped a fresh shell this run
+            # created (DROP_PROTECTION_FAILED) — then the drop rolled back the DDL too.
+            ddl_status = (
+                FACET_FAILED if action == "DROP_PROTECTION_FAILED" else FACET_APPLIED
+            )
+            governance_status = FACET_FAILED
+            grants_status = explicit_grants or FACET_NOT_ATTEMPTED
+        elif cat in ("STORAGE", "SCHEMA_EVOLUTION", "DEPENDENCY_UNRESOLVED"):
+            # A structural/prereq failure — DDL failed, governance/grants not reached.
+            ddl_status = FACET_FAILED
+            governance_status = FACET_NOT_ATTEMPTED
+            grants_status = explicit_grants or FACET_NOT_ATTEMPTED
+        else:
+            # Unknown/other failure — be conservative so the object re-verifies.
+            ddl_status = FACET_FAILED
+            governance_status = FACET_NOT_ATTEMPTED
+            grants_status = explicit_grants or FACET_NOT_ATTEMPTED
+        return ddl_status, governance_status, grants_status
+
+    # Clean object: the DDL facet mirrors the clean last_action (created/updated/adopted
+    # → applied; the skip family → skipped). Governance applied when the object carries a
+    # governance fingerprint, else there was nothing to apply (skipped). Grants take the
+    # engine's explicit status when present, else skipped.
+    ddl_status = FACET_APPLIED if last_action in vocab.SUCCESS_STATUSES else FACET_SKIPPED
+    governance_status = FACET_APPLIED if has_gov else FACET_SKIPPED
+    grants_status = explicit_grants or FACET_SKIPPED
+    return ddl_status, governance_status, grants_status
 
 
 def _last_action_for(result: Mapping[str, Any]) -> str:
@@ -206,8 +292,50 @@ class SyncStateService:
                     f"CASE last_sync_status {cases} ELSE lower(last_sync_status) END "
                     "WHERE last_action IS NULL"
                 )
-            except Exception:  # noqa: BLE001 - backfill is best-effort; NULL reads clean
-                pass
+            except Exception as exc:  # noqa: BLE001 - best-effort; NULL reads clean
+                log.debug("last_action backfill skipped (best-effort): %r", exc)
+
+        # Per-facet status backfill (backlog item 8): legacy rows (written before the
+        # status columns existed) have NULL statuses. Derive them from the single
+        # last_action + hash presence + failure_category so the first post-upgrade run
+        # doesn't re-touch every clean object, and a prior failure stays non-clean.
+        # A clean row → each facet applied/skipped (by hash presence); a failed row →
+        # route the failed facet from failure_category, others not_attempted. Idempotent
+        # + self-healing (WHERE ddl_status IS NULL). NULL status reads as re-verify.
+        if "ddl_status" in existing or "ddl_status" in {
+            n for n, _ in _STATE_UPGRADE_COLUMNS
+        }:
+            gov = "GOVERNANCE"
+            ddl_cats = "('STORAGE','SCHEMA_EVOLUTION','DEPENDENCY_UNRESOLVED')"
+            try:
+                self.spark.sql(
+                    f"UPDATE {self.full_name} SET "
+                    # ddl_status
+                    "ddl_status = CASE "
+                    f"  WHEN last_action = 'failed' AND failure_category = '{gov}' "
+                    "       THEN 'applied' "
+                    f"  WHEN last_action = 'failed' THEN 'failed' "
+                    "  WHEN last_action IN ('created','created_with_warning','updated',"
+                    "       'adopted') THEN 'applied' "
+                    "  ELSE 'skipped' END, "
+                    # governance_status
+                    "governance_status = CASE "
+                    f"  WHEN last_action = 'failed' AND failure_category = '{gov}' "
+                    "       THEN 'failed' "
+                    f"  WHEN last_action = 'failed' AND failure_category IN {ddl_cats} "
+                    "       THEN 'not_attempted' "
+                    f"  WHEN last_action = 'failed' THEN 'not_attempted' "
+                    "  WHEN governance_hash IS NOT NULL AND governance_hash <> '' "
+                    "       THEN 'applied' ELSE 'skipped' END, "
+                    # grants_status
+                    "grants_status = CASE "
+                    f"  WHEN last_action = 'failed' THEN 'not_attempted' "
+                    "  WHEN grants_json IS NOT NULL AND grants_json NOT IN ('','{{}}') "
+                    "       THEN 'applied' ELSE 'skipped' END "
+                    "WHERE ddl_status IS NULL"
+                )
+            except Exception as exc:  # noqa: BLE001 - best-effort; NULL reads as re-verify
+                log.debug("facet-status backfill skipped (best-effort): %r", exc)
 
     def load_baseline(self) -> dict[str, dict[str, Any]]:
         """Read the current per-object baseline for an incremental run.
@@ -223,7 +351,8 @@ class SyncStateService:
             self.ensure_table()
             rows = self.spark.sql(
                 "SELECT source_full_name, object_type, ddl_hash, governance_hash, "
-                f"grants_json, last_action FROM {self.full_name}"
+                "grants_json, last_action, ddl_status, governance_status, grants_status "
+                f"FROM {self.full_name}"
             ).collect()
         except Exception:  # noqa: BLE001 - no baseline yet → full run
             return {}
@@ -244,8 +373,45 @@ class SyncStateService:
                 "governance_hash": str(data.get("governance_hash") or ""),
                 "grants": grants if isinstance(grants, dict) else {},
                 "last_action": str(data.get("last_action") or ""),
+                # Per-facet statuses (backlog item 8) — drive rule #2's OR-failed clause
+                # in the delta planner. Missing (legacy pre-backfill) reads as blank.
+                "ddl_status": str(data.get("ddl_status") or ""),
+                "governance_status": str(data.get("governance_status") or ""),
+                "grants_status": str(data.get("grants_status") or ""),
             }
         return baseline
+
+    def failed_object_names(self) -> set[str]:
+        """Names of every object whose prior run left a facet FAILED (backlog item 4).
+
+        Returns the union of ``source_full_name`` + ``target_full_name`` for each object
+        with any per-facet ``*_status = 'failed'`` (item 8), OR — for a legacy row written
+        before the status columns existed (all three NULL) — whose ``last_action`` is in
+        ``vocab.OUTSTANDING_ACTIONS`` (a failure). This is the exact set the
+        retry-failed-only import replays. Empty on any read error (→ nothing to retry).
+        """
+        outstanding = ", ".join(f"'{a}'" for a in sorted(vocab.OUTSTANDING_ACTIONS))
+        try:
+            self.ensure_table()
+            rows = self.spark.sql(
+                "SELECT source_full_name, target_full_name, ddl_status, "
+                "governance_status, grants_status, last_action "
+                f"FROM {self.full_name} WHERE "
+                "ddl_status = 'failed' OR governance_status = 'failed' "
+                "OR grants_status = 'failed' OR ("
+                "  ddl_status IS NULL AND governance_status IS NULL "
+                f"  AND grants_status IS NULL AND last_action IN ({outstanding}))"
+            ).collect()
+        except Exception:  # noqa: BLE001 - no state / unreadable → nothing to retry
+            return set()
+        names: set[str] = set()
+        for row in rows:
+            data = row.asDict() if hasattr(row, "asDict") else dict(row)
+            for key in ("source_full_name", "target_full_name"):
+                val = str(data.get(key) or "")
+                if val:
+                    names.add(val)
+        return names
 
     def outstanding_rows(self) -> list[dict[str, Any]]:
         """Cumulative still-broken objects across ALL runs — every state row whose
@@ -304,11 +470,23 @@ class SyncStateService:
         # set ONCE and preserved thereafter — but a row that predates the column (legacy
         # upgrade) has first_seen NULL, so use coalesce(existing, now) to fill it on the
         # next update while never overwriting an existing value. INSERT writes it fresh.
+        existing_cols = {f.name for f in schema.fields}
+        advance = ", ".join(f"'{s}'" for s in sorted(_FACET_HASH_ADVANCE))
         set_parts = []
         for f in schema.fields:
             if f.name in _PRESERVE_ON_UPDATE:
                 set_parts.append(
                     f"target.{f.name} = coalesce(target.{f.name}, source.{f.name})"
+                )
+            elif f.name in _FACET_HASH_GATE and _FACET_HASH_GATE[f.name] in existing_cols:
+                # Per-facet hash gating (backlog item 8, rule #4): advance a facet's hash
+                # to the source fingerprint ONLY when that facet applied / cleanly
+                # skipped; a failed / not-attempted facet keeps its prior hash so the
+                # next run still sees it as needing re-apply.
+                status_col = _FACET_HASH_GATE[f.name]
+                set_parts.append(
+                    f"target.{f.name} = CASE WHEN source.{status_col} IN ({advance}) "
+                    f"THEN source.{f.name} ELSE target.{f.name} END"
                 )
             else:
                 set_parts.append(f"target.{f.name} = source.{f.name}")
@@ -337,6 +515,12 @@ def state_row_from_import(
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     last_action = _last_action_for(result)
+    failure_category = _failure_category_for(
+        str(result.get("error_code") or ""), last_action
+    )
+    ddl_status, governance_status, grants_status = _facet_statuses(
+        result, last_action, failure_category
+    )
     # Split the two message channels (bug #19): error_message carries ONLY a real
     # failure; detail carries informational context (skip reason, applied note, DDL).
     err_text = str(result.get("error_message") or "")
@@ -364,12 +548,15 @@ def state_row_from_import(
             or ""
         ),
         "ddl_hash": str(result.get("ddl_hash") or ""),
+        "ddl_status": ddl_status,
         "governance_hash": str(result.get("governance_hash") or ""),
+        "governance_status": governance_status,
         "grants_json": (
             result.get("grants_json")
             if isinstance(result.get("grants_json"), str)
             else json.dumps(result.get("grants_json") or {}, sort_keys=True)
         ),
+        "grants_status": grants_status,
         "source_last_modified_at": _as_datetime(
             result.get("source_last_modified_at") or result.get("last_modified_at")
         ),

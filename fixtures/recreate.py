@@ -40,6 +40,9 @@ TC_SQL_STAGES = {
     "tc_acl":       ["65_testcat_acl.sql"],
     "tc_negative":  ["66_testcat_negative.sql"],
     "tc_metric":    ["67_testcat_metric_view.sql"],
+    # Parallelism stress bed (backlog item 3): 120 plain tables across 3 schemas,
+    # 5-10 rows each — exercises the export SHOW CREATE + import within-level pools.
+    "tc_parallel":  ["69_testcat_parallel.sql"],
     # NOT in TC_ORDER — apply only AFTER a baseline migration, then re-migrate
     "tc_incremental": ["68_testcat_incremental.sql"],
 }
@@ -51,7 +54,7 @@ TC_SQL_STAGES_TGT = {
 TC_ORDER = [
     "tc_azure", "tc_storage", "tc_catalog", "tc_target_byo",
     "tc_functions", "tc_core", "tc_governed", "tc_external", "tc_files",
-    "tc_metric", "tc_acl", "tc_negative", "tc_reportonly",
+    "tc_metric", "tc_acl", "tc_negative", "tc_reportonly", "tc_parallel",
 ]
 
 
