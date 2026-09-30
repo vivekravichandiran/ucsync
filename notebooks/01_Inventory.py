@@ -176,4 +176,11 @@ log.info("stage INVENTORY end: %s", json.dumps(by_type))
 # The full run log streams live to this job-run's cell output (downloadable from the
 # Databricks run page), so no separate .log file is written.
 
+# COMMAND ----------
+
+# The exit lives in its OWN cell on purpose: dbutils.notebook.exit() in the same cell as
+# the work suppresses that cell's streamed stdout in a job run (only the exit value
+# renders — a clean SUCCESS would otherwise hide every per-object log line, while a
+# failure that raises still shows them). Keeping the work in the cell above lets all its
+# logs render; this trailing cell only returns the summary.
 dbutils.notebook.exit(json.dumps(summary))

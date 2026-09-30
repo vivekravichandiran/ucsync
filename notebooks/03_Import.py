@@ -476,4 +476,12 @@ if gov_failed:
         f"dropped). Fix the governance prerequisites and re-run. run_id={run_id}, "
         f"by_status={summary}"
     )
+
+# COMMAND ----------
+
+# Exit in its OWN cell: dbutils.notebook.exit() in the same cell as the work suppresses
+# that cell's streamed stdout in a job run (only the exit value renders on a clean
+# success — a governance failure raises above and still shows its logs, but a clean run
+# would otherwise hide every per-object line). Keeping the work above lets all its logs
+# render; this trailing cell only returns the payload.
 dbutils.notebook.exit(json.dumps(exit_payload))

@@ -197,4 +197,10 @@ if read_failures:
         "rather than letting the import run on a partial set. Fix the source "
         f"permissions/prerequisites and re-run. run_id={run_id}"
     )
+
+# COMMAND ----------
+
+# Exit in its OWN cell: dbutils.notebook.exit() in the same cell as the work suppresses
+# that cell's streamed stdout in a job run (only the exit value renders on a clean
+# success). Keeping the work above lets all its per-object logs render.
 dbutils.notebook.exit(json.dumps({"run_id": run_id, "exported": result.get("exported")}))
