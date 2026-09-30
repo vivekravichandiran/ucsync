@@ -430,6 +430,7 @@ try:
         volume_copy_results=volume_copy_report_rows,
         outstanding=outstanding_rows,
         workspace_url=getattr(wc.auth, "host", ""),
+        retry_failed_only=cfg.retry_failed_only,
     )
     log.info("report: %s", report_path)
 except Exception as _exc:  # noqa: BLE001

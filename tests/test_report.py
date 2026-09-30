@@ -42,6 +42,43 @@ def test_volume_data_copy_sheet_present_only_when_results_given(tmp_path):
     assert "bytes copied" in text  # roll-up footer
 
 
+def test_retry_failed_only_labels_untouched_objects(tmp_path):
+    """Retry-failed-only run: objects the retry never processed (no import result) must
+    read '— (not in retry scope)' instead of a blank import_status cell that looks like
+    missing data. A normal run leaves them blank."""
+    from openpyxl import load_workbook
+
+    objects = [
+        {"object_type": "TABLE", "full_name": "c.s.retried", "target_full_name": "c.s.retried",
+         "owner": "me", "tags": {}, "grants": []},
+        {"object_type": "TABLE", "full_name": "c.s.untouched", "target_full_name": "c.s.untouched",
+         "owner": "me", "tags": {}, "grants": []},
+    ]
+    # Only the retried object has an import result.
+    import_results = [
+        {"target_full_name": "c.s.retried", "full_name": "c.s.retried",
+         "status": "SUCCESS", "action": "CREATE_OR_SKIP", "object_type": "TABLE", "message": ""},
+    ]
+
+    def _tables_text(path):
+        wb = load_workbook(path)
+        return "\n".join(str(r) for r in wb["Tables"].iter_rows(values_only=True))
+
+    # Retry run → untouched object reads "not in retry scope".
+    out = tmp_path / "retry.xlsx"
+    build_report(objects, str(out), stage="IMPORT", import_results=import_results,
+                 run_id="r1", retry_failed_only=True)
+    text = _tables_text(out)
+    assert "— (not in retry scope)" in text
+    assert "Created" in text  # the retried one still renders its real outcome
+
+    # Normal run → untouched object stays blank (no bogus label).
+    out2 = tmp_path / "normal.xlsx"
+    build_report(objects, str(out2), stage="IMPORT", import_results=import_results,
+                 run_id="r1", retry_failed_only=False)
+    assert "not in retry scope" not in _tables_text(out2)
+
+
 def test_unchanged_action_reads_as_skipped_not_created(tmp_path):
     """Bug #19: an incremental UNCHANGED skip must roll up as a Skipped variant, never
     'Created' — otherwise a skipped (or previously-failed) object reads as applied."""
