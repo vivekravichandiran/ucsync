@@ -21,6 +21,27 @@ Bump rules:
 
 _Nothing yet._
 
+## [1.1.2] - 2026-10-05
+
+Patch release: a follow-up fix for the `[1.1.1]` sanitizer tokenizer, caught by live testing
+against a real cross-metastore workspace pair. Backward compatible — no widget, schema, or
+behavior change outside the fix itself.
+
+### Fixed
+- **`strip_managed_storage_clauses` / `strip_inline_collate` / `strip_default_collation` could
+  still desynchronize and corrupt captured DDL when a `COMMENT` contained a backslash-escaped
+  quote.** The `[1.1.1]` tokenizer only recognized the SQL-standard doubled-quote escape
+  (`'it''s'`) inside string literals. Live testing against real `SHOW CREATE TABLE` output showed
+  Databricks actually serializes an embedded quote in a comment using a **backslash** escape
+  (`'it\'s a test'`), not doubling. The unescaped backslash form let the tokenizer treat the
+  escaped quote as the literal's real closing quote one character early, desynchronizing every
+  token after it — observed corrupting two unrelated columns' comments and dropping a whole column
+  definition. `_tokenize_sql` now also consumes a backslash plus its following character as a unit
+  inside single- and double-quoted strings (never treating it as a closing quote), fixing both
+  escape styles. Verified live end-to-end: a table with single-quote, double-quote, and
+  trailing-`location`-text comments, migrated across two independent Azure Databricks metastores,
+  now reproduces every comment byte-for-byte on the target with no `PARSE_SYNTAX_ERROR`.
+
 ## [1.1.1] - 2026-10-05
 
 Patch release: a captured-DDL sanitizer bug fix. Backward compatible — no widget, schema, or
@@ -164,7 +185,8 @@ source metastore to a target metastore, across Azure regions.
   credentials, workspace bindings, unreferenced storage credentials, Delta Sharing shares/recipients/
   providers, clean rooms) — neither inventoried nor migrated (out of a catalog-scoped principal's reach).
 
-[Unreleased]: https://example.com/compare/v1.1.1...HEAD
+[Unreleased]: https://example.com/compare/v1.1.2...HEAD
+[1.1.2]: https://example.com/compare/v1.1.1...v1.1.2
 [1.1.1]: https://example.com/compare/v1.1.0...v1.1.1
 [1.1.0]: https://example.com/compare/v1.0.0...v1.1.0
 [1.0.0]: https://example.com/releases/tag/v1.0.0

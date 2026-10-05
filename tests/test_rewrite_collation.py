@@ -360,6 +360,31 @@ def test_real_collate_clause_still_stripped_alongside_tricky_comment():
     assert "name STRING)" in out
 
 
+def test_backslash_escaped_quote_in_comment_does_not_desync_tokenizer():
+    """Regression for a real bug caught via live testing against actual
+    `SHOW CREATE TABLE` output: Databricks re-serializes an embedded single
+    quote in a COMMENT using a BACKSLASH escape (``it\\'s``), not SQL-standard
+    quote-doubling (``it''s``). An earlier version of the tokenizer only
+    understood doubling, so the backslash-escaped quote prematurely closed
+    the LIT token one character early, desynchronizing every token after it
+    and corrupting unrelated later columns (observed: two columns' comments
+    were merged and a whole column definition was dropped)."""
+    ddl = (
+        "CREATE TABLE c.s.t (\n"
+        "  note STRING COLLATE UTF8_BINARY COMMENT 'has a single quote: it\\'s a test',\n"
+        "  note2 STRING COLLATE UTF8_BINARY COMMENT 'has a \"double quote\" inside',\n"
+        "  loc STRING COLLATE UTF8_BINARY COMMENT 'approximate location ',\n"
+        "  collate_mention STRING COMMENT 'uses UTF8 collate/collation rules')\n"
+        "USING delta"
+    )
+    out = strip_managed_storage_clauses(ddl, "TABLE")
+    assert "it\\'s a test" in out  # comment survives, escape intact
+    assert 'has a "double quote" inside' in out  # untouched, not merged away
+    assert "approximate location '" in out  # untouched, not merged away
+    assert "collate_mention STRING COMMENT 'uses UTF8 collate/collation rules'" in out
+    assert "COLLATE UTF8_BINARY" not in out.upper()  # real qualifiers all stripped
+
+
 def test_double_quoted_comment_containing_location_is_not_corrupted():
     ddl = (
         'CREATE TABLE c.s.t (id INT COMMENT "home location")\n'

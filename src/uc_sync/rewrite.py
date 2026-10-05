@@ -90,11 +90,23 @@ def rewrite_access_connector_id(text: str, target_connector_id: str) -> str:
 def _tokenize_sql(text: str) -> list[tuple[str, str]]:
     """Partition DDL text into ordered ``('CODE' | 'LIT', chunk)`` segments.
 
-    ``LIT`` = a single/double-quoted string literal (``''``-escape aware via
-    the same toggle-pair logic as the import-side splitter), a backtick-quoted
+    ``LIT`` = a single/double-quoted string literal, a backtick-quoted
     identifier, a ``--`` line comment, a ``/* */`` block comment, or a
     ``$$ … $$`` block. Everything else is ``CODE``. Lossless: joining every
     chunk, in order, reproduces ``text`` exactly.
+
+    String literals accept BOTH escape styles Databricks SQL actually uses: the
+    SQL-standard doubled quote (``'it''s'``) AND a backslash escape
+    (``'it\\'s'``) — confirmed by live testing against real ``SHOW CREATE
+    TABLE`` output, which serializes comments using the backslash style, not
+    doubling. Missing the backslash form let a comment's own escaped quote
+    prematurely end its LIT token, desynchronizing all tokenization after it
+    and corrupting unrelated later columns — a backslash inside a string
+    literal always escapes exactly the next character (consumed verbatim,
+    never treated as a closing quote), checked before the plain-quote test.
+    Backtick-quoted identifiers use doubling only (``` ``` ``` for a literal
+    backtick), per Databricks identifier-quoting rules — no backslash form —
+    so backtick handling is unchanged.
     """
 
     s = str(text or "")
@@ -144,6 +156,10 @@ def _tokenize_sql(text: str) -> list[tuple[str, str]]:
                 i += 1
             continue
         if in_single:
+            if ch == "\\" and i + 1 < n:
+                buf.append(s[i : i + 2])
+                i += 2
+                continue
             buf.append(ch)
             i += 1
             if ch == "'":
@@ -152,6 +168,10 @@ def _tokenize_sql(text: str) -> list[tuple[str, str]]:
                 cur = "CODE"
             continue
         if in_double:
+            if ch == "\\" and i + 1 < n:
+                buf.append(s[i : i + 2])
+                i += 2
+                continue
             buf.append(ch)
             i += 1
             if ch == '"':
