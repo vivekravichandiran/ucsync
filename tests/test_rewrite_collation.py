@@ -287,6 +287,87 @@ def test_catalog_managed_location_is_kept_not_stripped():
     assert "LOCATION" not in stripped
 
 
+# ---- comment-collision regression (quote/keyword scanning must be token-aware) --
+
+
+def test_comment_containing_word_location_is_not_corrupted():
+    """A column comment that happens to contain the word "location" must never
+    be mistaken for a LOCATION clause — the old whole-text regex would latch
+    onto the comment's own closing quote and eat forward to some unrelated
+    later quote, corrupting the statement."""
+    ddl = (
+        "CREATE TABLE c.s.t (\n"
+        "  lat DOUBLE COMMENT 'approximate location ',\n"
+        "  lon DOUBLE COMMENT 'session location data')\n"
+        "USING delta"
+    )
+    assert strip_managed_storage_clauses(ddl, "TABLE") == ddl
+
+
+def test_comment_ending_in_location_with_trailing_space_is_not_corrupted():
+    """The specific trigger case: a comment ending in '...location ' (trailing
+    space right before the closing quote) is exactly what makes
+    `\\s+LOCATION\\s+'[^']*'` match starting at the comment's own quote."""
+    ddl = (
+        "CREATE TABLE c.s.t (\n"
+        "  id INT COMMENT 'user location ',\n"
+        "  name STRING COMMENT 'display name')\n"
+        "USING delta"
+    )
+    assert strip_managed_storage_clauses(ddl, "TABLE") == ddl
+
+
+def test_comment_containing_word_collate_or_collation_is_not_corrupted():
+    ddl = (
+        "CREATE TABLE c.s.t (\n"
+        "  note STRING COMMENT 'uses UTF8 collate/collation semantics',\n"
+        "  value STRING)\n"
+        "USING delta"
+    )
+    assert strip_managed_storage_clauses(ddl, "TABLE") == ddl
+    assert strip_inline_collate(ddl) == ddl
+    from uc_sync.rewrite import strip_default_collation
+
+    assert strip_default_collation(ddl) == ddl
+
+
+def test_real_location_clause_still_stripped_alongside_tricky_comment():
+    """The fix must not become overly conservative: a genuine LOCATION clause
+    is still stripped even when an earlier comment contains the trigger word."""
+    ddl = (
+        "CREATE TABLE c.s.t (\n"
+        "  id INT COMMENT 'session location ',\n"
+        "  val DOUBLE)\n"
+        "USING delta\n"
+        "LOCATION 'abfss://x@acct.dfs.core.windows.net/t'"
+    )
+    out = strip_managed_storage_clauses(ddl, "TABLE")
+    assert "COMMENT 'session location '" in out  # comment untouched
+    assert "abfss://x@acct.dfs.core.windows.net/t" not in out  # real clause stripped
+    assert "LOCATION" not in out
+
+
+def test_real_collate_clause_still_stripped_alongside_tricky_comment():
+    ddl = (
+        "CREATE TABLE c.s.t (\n"
+        "  note STRING COMMENT 'see collate rules',\n"
+        "  name STRING COLLATE UTF8_BINARY)\n"
+        "USING delta"
+    )
+    out = strip_managed_storage_clauses(ddl, "TABLE")
+    assert "COMMENT 'see collate rules'" in out  # comment untouched
+    assert "COLLATE UTF8_BINARY" not in out       # real inline qualifier stripped
+    assert "name STRING)" in out
+
+
+def test_double_quoted_comment_containing_location_is_not_corrupted():
+    ddl = (
+        'CREATE TABLE c.s.t (id INT COMMENT "home location")\n'
+        "USING delta"
+    )
+    assert strip_managed_storage_clauses(ddl, "TABLE") == ddl
+
+
 def test_rewrite_access_connector_id():
     from uc_sync.rewrite import rewrite_access_connector_id
     ddl = ("CREATE STORAGE CREDENTIAL IF NOT EXISTS `c` WITH AZURE_MANAGED_IDENTITY "

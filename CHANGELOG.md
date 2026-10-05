@@ -21,6 +21,25 @@ Bump rules:
 
 _Nothing yet._
 
+## [1.1.1] - 2026-10-05
+
+Patch release: a captured-DDL sanitizer bug fix. Backward compatible — no widget, schema, or
+behavior change outside the fix itself.
+
+### Fixed
+- **A column/table `COMMENT` containing the word "location" (or "collate"/"collation") could
+  corrupt captured table DDL, causing `PARSE_SYNTAX_ERROR` on import.** `strip_managed_storage_clauses`
+  / `strip_inline_collate` / `strip_default_collation` previously scanned the *entire* captured DDL
+  text with plain regexes (e.g. `\s+LOCATION\s+'[^']*'`) to strip the managed-storage/collation
+  clauses a target metastore rejects. Those regexes had no notion of "this quote belongs to an
+  unrelated string" — a `COMMENT` whose text happened to contain one of the keyword words, followed
+  eventually by any quote, could make the regex consume real DDL content between the comment's own
+  closing quote and some unrelated later string, corrupting the statement. The three sanitizers now
+  tokenize the DDL into code vs. string/comment/`` ` ``-identifier segments first (mirroring the
+  quote-aware splitter already used on import, `package_import._split_statements`) and only strip a
+  clause when its keyword is found in a code segment and immediately followed by its own value token
+  — so a comment's content, whatever it says, is never a candidate for removal.
+
 ## [1.1.0] - 2026-09-25
 
 Optimization + observability release: within-stage parallelism, structured logging, per-facet
@@ -145,5 +164,7 @@ source metastore to a target metastore, across Azure regions.
   credentials, workspace bindings, unreferenced storage credentials, Delta Sharing shares/recipients/
   providers, clean rooms) — neither inventoried nor migrated (out of a catalog-scoped principal's reach).
 
-[Unreleased]: https://example.com/compare/v1.0.0...HEAD
+[Unreleased]: https://example.com/compare/v1.1.1...HEAD
+[1.1.1]: https://example.com/compare/v1.1.0...v1.1.1
+[1.1.0]: https://example.com/compare/v1.0.0...v1.1.0
 [1.0.0]: https://example.com/releases/tag/v1.0.0

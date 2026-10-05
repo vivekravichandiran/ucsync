@@ -63,6 +63,215 @@ def rewrite_access_connector_id(text: str, target_connector_id: str) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Token-aware clause stripping.
+#
+# A plain `re.sub` over the whole DDL string cannot tell a real `LOCATION
+# '<path>'` / `COLLATE <name>` clause from the same words occurring, by pure
+# coincidence, inside a column/table COMMENT string (e.g. a geo/session table
+# whose comment says "...approximate location'"). `[^']*` has no notion of
+# "this quote belongs to a different, unrelated string" — it just eats
+# forward to the next quote character anywhere in the text, which can span
+# across (and delete) real DDL content between an accidental comment match
+# and some unrelated later string.
+#
+# `_tokenize_sql` first partitions the text into CODE vs LIT (quoted string /
+# backtick identifier / comment / $$ block) segments — mirroring the
+# quote-aware FSM already proven correct in
+# `package_import._split_statements` — so every clause-stripper below only
+# ever matches a keyword inside a CODE segment, and only ever removes the LIT
+# segment immediately following it (the clause's own value). A LIT segment
+# that is NOT immediately preceded by a matching keyword — e.g. any COMMENT
+# string, no matter what words it contains — is structurally never a
+# candidate at all, so it can never be touched.
+# ---------------------------------------------------------------------------
+
+
+def _tokenize_sql(text: str) -> list[tuple[str, str]]:
+    """Partition DDL text into ordered ``('CODE' | 'LIT', chunk)`` segments.
+
+    ``LIT`` = a single/double-quoted string literal (``''``-escape aware via
+    the same toggle-pair logic as the import-side splitter), a backtick-quoted
+    identifier, a ``--`` line comment, a ``/* */`` block comment, or a
+    ``$$ … $$`` block. Everything else is ``CODE``. Lossless: joining every
+    chunk, in order, reproduces ``text`` exactly.
+    """
+
+    s = str(text or "")
+    tokens: list[tuple[str, str]] = []
+    buf: list[str] = []
+    cur = "CODE"
+    i, n = 0, len(s)
+    in_single = in_double = in_backtick = False
+    in_line_comment = in_block_comment = in_dollar = False
+
+    def flush() -> None:
+        if buf:
+            tokens.append((cur, "".join(buf)))
+            buf.clear()
+
+    while i < n:
+        ch = s[i]
+        two = s[i : i + 2]
+        if in_line_comment:
+            buf.append(ch)
+            i += 1
+            if ch == "\n":
+                in_line_comment = False
+                flush()
+                cur = "CODE"
+            continue
+        if in_block_comment:
+            if two == "*/":
+                buf.append(two)
+                i += 2
+                in_block_comment = False
+                flush()
+                cur = "CODE"
+            else:
+                buf.append(ch)
+                i += 1
+            continue
+        if in_dollar:
+            if two == "$$":
+                buf.append(two)
+                i += 2
+                in_dollar = False
+                flush()
+                cur = "CODE"
+            else:
+                buf.append(ch)
+                i += 1
+            continue
+        if in_single:
+            buf.append(ch)
+            i += 1
+            if ch == "'":
+                in_single = False
+                flush()
+                cur = "CODE"
+            continue
+        if in_double:
+            buf.append(ch)
+            i += 1
+            if ch == '"':
+                in_double = False
+                flush()
+                cur = "CODE"
+            continue
+        if in_backtick:
+            buf.append(ch)
+            i += 1
+            if ch == "`":
+                in_backtick = False
+                flush()
+                cur = "CODE"
+            continue
+        if two == "--":
+            flush()
+            cur = "LIT"
+            in_line_comment = True
+            buf.append(two)
+            i += 2
+            continue
+        if two == "/*":
+            flush()
+            cur = "LIT"
+            in_block_comment = True
+            buf.append(two)
+            i += 2
+            continue
+        if two == "$$":
+            flush()
+            cur = "LIT"
+            in_dollar = True
+            buf.append(two)
+            i += 2
+            continue
+        if ch == "'":
+            flush()
+            cur = "LIT"
+            in_single = True
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == '"':
+            flush()
+            cur = "LIT"
+            in_double = True
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "`":
+            flush()
+            cur = "LIT"
+            in_backtick = True
+            buf.append(ch)
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+
+    flush()
+    return tokens
+
+
+def _detokenize(tokens: list[tuple[str, str]]) -> str:
+    return "".join(chunk for _, chunk in tokens)
+
+
+def _strip_keyword_quoted_value(
+    tokens: list[tuple[str, str]], keyword_re: "re.Pattern[str]"
+) -> list[tuple[str, str]]:
+    """Remove a ``<keyword> '<value>'`` / ``<keyword> "<value>"`` / `` <keyword>
+    `v` `` clause from a tokenized DDL. ``keyword_re`` must match at the END of
+    a CODE chunk (i.e. end the pattern with ``$``). The clause's value is
+    taken ONLY from the LIT token immediately following the matched keyword —
+    never by re-scanning raw text for "the next quote" — so a comment
+    elsewhere in the DDL can never be mistaken for the value: comments are
+    never a candidate in the first place, since keyword matching only ever
+    looks at CODE chunks.
+    """
+
+    out: list[tuple[str, str]] = []
+    i, n = 0, len(tokens)
+    while i < n:
+        kind, chunk = tokens[i]
+        if kind == "CODE":
+            m = keyword_re.search(chunk)
+            if (
+                m
+                and i + 1 < n
+                and tokens[i + 1][0] == "LIT"
+                and tokens[i + 1][1][:1] in ("'", '"', "`")
+            ):
+                out.append(("CODE", chunk[: m.start()]))
+                i += 2
+                continue
+        out.append((kind, chunk))
+        i += 1
+    return out
+
+
+def _sub_in_code(
+    tokens: list[tuple[str, str]], pattern: "re.Pattern[str]", repl: str = ""
+) -> list[tuple[str, str]]:
+    """Apply ``pattern.sub`` to CODE chunks only — never to LIT (string/comment)
+    chunks — so a bare-identifier clause (e.g. ``COLLATE UTF8_BINARY`` with no
+    quotes) can be matched directly without ever reaching into a comment: a
+    CODE chunk contains no quote/comment characters by construction.
+    """
+
+    return [
+        (kind, pattern.sub(repl, chunk) if kind == "CODE" else chunk)
+        for kind, chunk in tokens
+    ]
+
+
+_MANAGED_LOCATION_KW_RE = re.compile(r"\s+MANAGED\s+LOCATION\s*$", re.IGNORECASE)
+_LOCATION_KW_RE = re.compile(r"\s+LOCATION\s*$", re.IGNORECASE)
+
+
 def strip_managed_storage_clauses(text: str, object_type: str = "") -> str:
     """Drop source managed LOCATION clauses so the target metastore assigns storage.
 
@@ -91,31 +300,13 @@ def strip_managed_storage_clauses(text: str, object_type: str = "") -> str:
         rewritten = strip_inline_collate(rewritten)
         return strip_reserved_table_properties(rewritten)
     rewritten = str(text or "")
-    rewritten = re.sub(
-        r"\s+MANAGED\s+LOCATION\s+'[^']*'",
-        "",
-        rewritten,
-        flags=re.IGNORECASE,
-    )
-    rewritten = re.sub(
-        r'\s+MANAGED\s+LOCATION\s+"[^"]*"',
-        "",
-        rewritten,
-        flags=re.IGNORECASE,
+    rewritten = _detokenize(
+        _strip_keyword_quoted_value(_tokenize_sql(rewritten), _MANAGED_LOCATION_KW_RE)
     )
     # Managed CREATE TABLE / CREATE VOLUME clauses (not EXTERNAL ...).
     if "EXTERNAL" not in rewritten.upper().split("LOCATION", 1)[0]:
-        rewritten = re.sub(
-            r"\s+LOCATION\s+'[^']*'",
-            "",
-            rewritten,
-            flags=re.IGNORECASE,
-        )
-        rewritten = re.sub(
-            r'\s+LOCATION\s+"[^"]*"',
-            "",
-            rewritten,
-            flags=re.IGNORECASE,
+        rewritten = _detokenize(
+            _strip_keyword_quoted_value(_tokenize_sql(rewritten), _LOCATION_KW_RE)
         )
     # Table-level default collation clause — drop it (see strip_default_collation).
     rewritten = strip_default_collation(rewritten)
@@ -128,6 +319,12 @@ def strip_managed_storage_clauses(text: str, object_type: str = "") -> str:
     # for callers that still need it, but the migrate replay no longer applies it.)
     rewritten = strip_reserved_table_properties(rewritten)
     return rewritten
+
+
+_COLLATE_KW_RE = re.compile(r"\s+COLLATE\s*$", re.IGNORECASE)
+_COLLATE_BARE_RE = re.compile(
+    r"\s+COLLATE\s+[A-Za-z_][A-Za-z0-9_]*", re.IGNORECASE
+)
 
 
 def strip_inline_collate(text: str) -> str:
@@ -147,14 +344,17 @@ def strip_inline_collate(text: str) -> str:
     its default collation. The collation name is an unquoted identifier
     (``UTF8_BINARY``, ``UTF8_LCASE``, …) or a backtick-quoted one; ``COLLATION`` is
     left alone because it is never followed by whitespace here.
+
+    Token-aware (see the ``_tokenize_sql`` block above): the backtick-quoted
+    variant is only matched as the LIT token immediately after ``COLLATE``, and
+    the bare-identifier variant is only matched inside CODE chunks — so a
+    column/table COMMENT containing the word "collate" is never a candidate.
     """
 
-    return re.sub(
-        r"\s+COLLATE\s+(?:`[^`]+`|[A-Za-z_][A-Za-z0-9_]*)",
-        "",
-        str(text or ""),
-        flags=re.IGNORECASE,
-    )
+    tokens = _tokenize_sql(str(text or ""))
+    tokens = _strip_keyword_quoted_value(tokens, _COLLATE_KW_RE)
+    tokens = _sub_in_code(tokens, _COLLATE_BARE_RE)
+    return _detokenize(tokens)
 
 
 # Table/catalog/schema-level default collation clause. SHOW CREATE emits either the
@@ -162,10 +362,11 @@ def strip_inline_collate(text: str) -> str:
 # ``DEFAULT COLLATION UTF8_BINARY``; the value is quoted, backtick-quoted, or a bare
 # identifier. Anchored on ``COLLATION`` (optionally preceded by ``DEFAULT``) so a
 # column ``DEFAULT <expr>`` or ``GENERATED BY DEFAULT AS IDENTITY`` is never touched.
-_DEFAULT_COLLATION_RE = re.compile(
-    r"\s+(?:DEFAULT\s+)?COLLATION\s+"
-    r"(?:'[^']*'|\"[^\"]*\"|`[^`]+`|[A-Za-z_][A-Za-z0-9_]*)",
-    re.IGNORECASE,
+_COLLATION_KW_RE = re.compile(
+    r"\s+(?:DEFAULT\s+)?COLLATION\s*$", re.IGNORECASE
+)
+_COLLATION_BARE_RE = re.compile(
+    r"\s+(?:DEFAULT\s+)?COLLATION\s+[A-Za-z_][A-Za-z0-9_]*", re.IGNORECASE
 )
 
 
@@ -176,9 +377,18 @@ def strip_default_collation(text: str) -> str:
     ``PARSE_SYNTAX_ERROR`` at ``DEFAULT`` / ``COLLATION``. The clause only records the
     source's default collation, so strip it and let the target apply its own. Inline
     per-column ``COLLATE <name>`` qualifiers are handled by strip_inline_collate().
+
+    Token-aware (see the ``_tokenize_sql`` block above): the quoted/backtick
+    variant is only matched as the LIT token immediately after ``[DEFAULT]
+    COLLATION``, and the bare-identifier variant is only matched inside CODE
+    chunks — so a column/table COMMENT containing the word "collation" (or
+    "default") is never a candidate, unlike the previous whole-text regex.
     """
 
-    return _DEFAULT_COLLATION_RE.sub("", str(text or ""))
+    tokens = _tokenize_sql(str(text or ""))
+    tokens = _strip_keyword_quoted_value(tokens, _COLLATION_KW_RE)
+    tokens = _sub_in_code(tokens, _COLLATION_BARE_RE)
+    return _detokenize(tokens)
 
 
 # A fully-qualified name: backtick-quoted or bare identifiers joined by dots.
