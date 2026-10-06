@@ -21,6 +21,36 @@ Bump rules:
 
 _Nothing yet._
 
+## [1.1.3] - 2026-10-06
+
+Patch release: a function-DDL reconstruction bug fix, found via a real production
+migration failure. Backward compatible — no widget, schema, or behavior change
+outside the fix itself.
+
+### Fixed
+- **A table-valued function (TVF) whose `RETURNS TABLE(...)` column list contains a
+  digit-leading column name failed with `PARSE_SYNTAX_ERROR` on import.** Databricks
+  SQL functions carry no `SHOW CREATE FUNCTION` support, so their DDL is reassembled
+  from `information_schema.routines`/`parameters` (`function_ddl_from_information_schema`
+  / `_function_ddl_from_definition` in `rewrite`'s sibling module `sql_ddl.py`). The
+  function's own INPUT parameters were already backtick-quoted when not a plain
+  identifier, but the `RETURNS TABLE(...)` column list — read verbatim from
+  `full_data_type` — had **no quoting at all**. A column name starting with a digit
+  (a real pattern in telecom KPI feeds, e.g. `0025_vvm_total_traffic_mb`,
+  `0409_ul_interference_power`) is returned by Databricks completely unquoted —
+  confirmed live even when the function was originally *created* with the column
+  backtick-quoted — and a bare `0025_...` parses as a number literal followed by an
+  identifier, a hard syntax error. Added `_requote_table_return_columns()`, which
+  backtick-quotes any non-plain field name in the column list, splitting on commas
+  only at bracket depth 0 so a `DECIMAL(38,2)` type's own internal comma is never
+  mistaken for a field separator. Applied to both reconstruction call sites.
+  Verified live: a real TVF created on one Azure Databricks workspace with a
+  digit-leading return column, migrated across metastores, and successfully invoked
+  on the target with correct results. Audited every other DDL-construction path
+  (table synthesis, schema-evolution `ADD COLUMN`, masks, row filters, views) —
+  all already quote unconditionally or go through Databricks' own `SHOW CREATE`
+  serializer, so this class of bug was unique to the function `RETURNS` path.
+
 ## [1.1.2] - 2026-10-05
 
 Patch release: a follow-up fix for the `[1.1.1]` sanitizer tokenizer, caught by live testing
@@ -185,7 +215,8 @@ source metastore to a target metastore, across Azure regions.
   credentials, workspace bindings, unreferenced storage credentials, Delta Sharing shares/recipients/
   providers, clean rooms) — neither inventoried nor migrated (out of a catalog-scoped principal's reach).
 
-[Unreleased]: https://example.com/compare/v1.1.2...HEAD
+[Unreleased]: https://example.com/compare/v1.1.3...HEAD
+[1.1.3]: https://example.com/compare/v1.1.2...v1.1.3
 [1.1.2]: https://example.com/compare/v1.1.1...v1.1.2
 [1.1.1]: https://example.com/compare/v1.1.0...v1.1.1
 [1.1.0]: https://example.com/compare/v1.0.0...v1.1.0

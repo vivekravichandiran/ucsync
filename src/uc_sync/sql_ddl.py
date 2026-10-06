@@ -82,6 +82,69 @@ def comment_clause(value: Any) -> str:
     return f" COMMENT '{escape_literal(value)}'"
 
 
+_PLAIN_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _requote_table_return_columns(return_type: str) -> str:
+    """Backtick-quote any field name in a TABLE-return column list that is not a
+    plain identifier.
+
+    A table-valued function's return type comes back from Databricks (both
+    ``information_schema.routines.full_data_type`` and the REST
+    ``full_data_type``) as a bare, unquoted column list — e.g.
+    ``(sap_id STRING, 0025_vvm_total_traffic_mb DOUBLE)``. Column names starting
+    with a digit (a real pattern in telecom KPI feeds — metric codes like
+    ``0025_...``/``0055_...``/``0409_...``) are returned exactly as-is, with no
+    quoting, even though a bare ``0025_vvm_total_traffic_mb`` parses as a number
+    literal followed by an identifier and is a hard ``PARSE_SYNTAX_ERROR`` when
+    replayed in a fresh ``CREATE FUNCTION ... RETURNS TABLE(...)`` statement. The
+    function's own INPUT parameters are already quoted when non-plain (see the
+    ``pident`` logic just below in :func:`function_ddl_from_information_schema`);
+    this gives the RETURNS column list the same treatment.
+
+    Splits on commas only at bracket depth 0, so a type's own internal comma
+    (``DECIMAL(38,2)``) or a nested composite type (``STRUCT<...>``,
+    ``ARRAY<...>``, ``MAP<...,...>``) is never mistaken for a field separator.
+    A name that is already backtick-quoted is left untouched. Returns the input
+    unchanged if it is not a parenthesized column list (a scalar return type).
+    """
+
+    text = str(return_type or "").strip()
+    if not (text.startswith("(") and text.endswith(")")):
+        return return_type
+
+    inner = text[1:-1]
+    fields: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for ch in inner:
+        if ch in "(<":
+            depth += 1
+        elif ch in ")>":
+            depth -= 1
+        if ch == "," and depth == 0:
+            fields.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    if buf:
+        fields.append("".join(buf))
+
+    out_fields: list[str] = []
+    for field in fields:
+        stripped = field.strip()
+        if not stripped:
+            continue
+        head, _, rest = stripped.partition(" ")
+        if head.startswith("`") and head.endswith("`") and len(head) > 1:
+            out_fields.append(stripped)
+        elif _PLAIN_IDENT_RE.fullmatch(head):
+            out_fields.append(stripped)
+        else:
+            out_fields.append(f"{quote_identifier(head)} {rest}".rstrip())
+    return "(" + ", ".join(out_fields) + ")"
+
+
 def _as_object_type(object_type: ObjectType | str) -> Optional[ObjectType]:
     if isinstance(object_type, ObjectType):
         return object_type
@@ -401,6 +464,10 @@ def _function_ddl_from_definition(obj: UCObject) -> Optional[str]:
     body = str(definition.get("routine_definition") or "").strip()
     if not return_type or not body:
         return None
+    # A table-valued function's return type is an unquoted column list (see
+    # _requote_table_return_columns) — e.g. a digit-leading telecom metric code
+    # column (``0025_...``) would otherwise be a PARSE_SYNTAX_ERROR on replay.
+    return_type = _requote_table_return_columns(return_type)
     target = quote_full_name(obj.full_name)
     # CREATE OR REPLACE (not IF NOT EXISTS) — see function_ddl_from_information_schema:
     # IF NOT EXISTS silently no-ops on a re-run, leaving a CHANGED function stale.
@@ -465,7 +532,10 @@ def function_ddl_from_information_schema(
         str(data_type or "").strip().upper() in {"TABLE", "TABLE_TYPE"}
         or return_type.startswith("(")
     )
-    returns_clause = f"TABLE {return_type}" if is_table_return else return_type
+    if is_table_return:
+        returns_clause = f"TABLE {_requote_table_return_columns(return_type)}"
+    else:
+        returns_clause = return_type
     language = str(external_language or "").strip()
     if str(routine_body or "").strip().upper() == "EXTERNAL" and language:
         body_clause = f" LANGUAGE {language.upper()} AS $$\n{body}\n$$"
