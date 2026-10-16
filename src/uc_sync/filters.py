@@ -15,10 +15,13 @@ def _compile(patterns: Iterable[str]) -> list[re.Pattern[str]]:
 
 # Securables the ``filter_tables`` allowlist narrows. Everything else (catalogs,
 # schemas, functions, volumes, …) always flows through so a selected table keeps
-# its prerequisites.
+# its prerequisites. Includes the report-only table kinds the inventory reclassifies
+# from the tables list (Lakebase, vector index, pipeline event log, online table),
+# so an unselected one is not still reported as a manual step.
 TABLE_LIKE_TYPES = frozenset({
     "TABLE", "EXTERNAL_TABLE", "VIEW", "DYNAMIC_VIEW",
     "METRIC_VIEW", "MATERIALIZED_VIEW", "STREAMING_TABLE",
+    "LAKEBASE_TABLE", "VECTOR_INDEX", "PIPELINE_TABLE", "ONLINE_TABLE",
 })
 
 

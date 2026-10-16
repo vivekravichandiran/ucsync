@@ -47,7 +47,9 @@ state-schema change.
   tables are never read or exported (no DDL / grants / tags / mask capture). Same
   semantics as before (`catalog.schema.table` or bare name; table-like securables
   only — catalogs, schemas, functions, volumes always come along), shared through
-  one matcher (`filters.table_selected`).
+  one matcher (`filters.table_selected`). The report-only table kinds (Lakebase
+  tables, vector-search indexes, pipeline event-log tables, online tables) are
+  narrowed too, so an unselected one is not still listed as a manual step.
 
 ### Changed
 - **Import `filter_tables` matches the source *or* the target name.** Previously a
