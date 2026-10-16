@@ -23,8 +23,9 @@ _Nothing yet._
 
 ## [1.2.0] - 2026-10-16
 
-Minor release: a statement-splitter fix found via a real production migration
-failure, plus source-side table filtering. Backward compatible — no bundle or
+Minor release: two DDL-replay fixes found via real production migration
+failures (the statement splitter and view TBLPROPERTIES), plus source-side
+table filtering. Backward compatible — no bundle or
 state-schema change.
 
 ### Fixed
@@ -39,6 +40,19 @@ state-schema change.
   inside single- and double-quoted strings. Tables with only an apostrophe or only
   a `;` were never affected. The splitter also reads the grants/tags/policies/ABAC
   files, so those are covered too. Verified against the real failing DDL.
+- **A commented VIEW whose query contains a `)` failed on import with
+  `PARSE_SYNTAX_ERROR` (e.g. `… at or near 'THEN'`).** For a view, `SHOW CREATE
+  TABLE` emits `TBLPROPERTIES ('comment' = …)` *before* `WITH SCHEMA COMPENSATION
+  AS <query>`. `rewrite.strip_reserved_table_properties` assumed TBLPROPERTIES was
+  the last clause and matched greedily to the **last** `)` in the text, so it
+  replaced the `AS <query>` up to its final `)` with the rebuilt property list.
+  The view was then replayed without its query head. It now finds the block with
+  the quote-aware tokenizer and stops at the `)` that balances the opening one,
+  and leaves a block with nothing to drop untouched. Two related problems are
+  fixed by the same change: a property value with an escaped quote (`'it\'s'`)
+  was truncated, and `TBLPROPERTIES (` text inside a comment was treated as the
+  clause. Tables were not affected in practice (TBLPROPERTIES is their last
+  clause).
 
 ### Added
 - **`filter_tables` now applies at inventory (source side).** The table allowlist
@@ -56,6 +70,13 @@ state-schema change.
   fully-qualified entry was compared only against the catalog-mapped target name,
   so under `catalog_mapping_json` a source-named entry silently skipped the table.
   Both now select it (bare names are unchanged).
+- **An incremental run with `filter_tables` set reports "Deleted in source" only for
+  listed objects.** The delta planner compares this run's inventory with the full
+  `uc_sync_state` baseline. With the inventory now filtered, every unlisted
+  table/view was missing from the run and read as deleted in source. A
+  table-like object the filter leaves out is now skipped by that check. A listed
+  object that really is gone, and any missing function/volume/policy, are still
+  reported. With the filter blank, the check is unchanged.
 - Operators who already set `filter_tables` in `00_Install_Jobs` now also get a
   narrower inventory/export. What lands on the target is unchanged; the report just
   no longer lists the unselected tables as `Skipped (filtered)`.

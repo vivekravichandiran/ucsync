@@ -1043,6 +1043,7 @@ class PackageImportEngine:
         self.delta_plan = DeltaPlan(
             self._load_inventory_rows(), self.prior_state,
             migrate_materialized_views=self.migrate_materialized_views,
+            in_run_scope=self._in_table_filter,
         )
         self._maybe_enter_existing_catalog_mode()
         by_target = {
@@ -2751,6 +2752,15 @@ class PackageImportEngine:
             return True
         except Exception as exc:  # noqa: BLE001
             return not _is_not_found_error(str(exc))
+
+    def _in_table_filter(self, source_full_name: str, object_type: str) -> bool:
+        """True unless ``filter_tables`` is set and leaves this table-like object out
+        (matched on its source or catalog-mapped target name)."""
+        if not self._sel_tables or object_type not in self._TABLE_LIKE_TYPES:
+            return True
+        return table_selected(
+            self._sel_tables, self._map_name(source_full_name), source_full_name
+        )
 
     def _map_name(self, full_name: str) -> str:
         name = str(full_name or "")

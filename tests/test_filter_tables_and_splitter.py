@@ -265,3 +265,59 @@ def test_import_filter_accepts_source_name_under_catalog_rename(tmp_path: Path):
         assert by_name["tgt.s.keep"].action != "SKIP_FILTERED", selection
         assert by_name["tgt.s.keep"].status == "SUCCESS", selection
         assert by_name["tgt.s.drop"].action == "SKIP_FILTERED", selection
+
+
+# ---------------------------------------------------------------------------
+# filter_tables on an incremental run: out-of-scope objects are not "deleted"
+# ---------------------------------------------------------------------------
+
+
+def test_incremental_filtered_run_reports_only_in_scope_deletions(tmp_path: Path):
+    """The baseline holds the prior FULL run; this run's inventory holds only the
+    filtered table. Unlisted tables must not read as deleted in source — but a
+    listed table that really is gone, and a gone function, still do."""
+    root = tmp_path / "migrated"
+    (root / "ddl").mkdir(parents=True)
+    (root / "inventory").mkdir()
+    (root / "ddl" / "TABLE_src__s__keep.sql").write_text(
+        "CREATE TABLE IF NOT EXISTS `src`.`s`.`keep` (id INT);\n", encoding="utf-8"
+    )
+    (root / "inventory" / "objects.json").write_text(
+        '[{"object_type": "TABLE", "full_name": "src.s.keep", "name": "keep"}]',
+        encoding="utf-8",
+    )
+    prior = {
+        name: {"object_type": otype, "ddl_hash": "x", "governance_hash": "y",
+               "grants": {}, "last_action": "created"}
+        for name, otype in (
+            ("src.s.keep", "TABLE"),
+            ("src.s.other_table", "TABLE"),      # not listed → out of scope
+            ("src.s.other_view", "VIEW"),        # not listed → out of scope
+            ("src.s.listed_gone", "VIEW"),       # listed, really deleted
+            ("src.s.gone_fn", "FUNCTION"),       # functions are always in scope
+        )
+    }
+    selection = ["src.s.keep", "tgt.s.listed_gone"]
+    engine = PackageImportEngine(
+        str(root), _FakeSql(), dry_run=False, select_tables=selection,
+        catalog_mapping={"src": "tgt"}, prior_state=prior,
+    )
+    engine.run()
+    absent = {
+        r["object"] for r in engine.delta_plan.delta_rows()
+        if r["action"] == "SOURCE_ABSENT"
+    }
+    assert absent == {"src.s.listed_gone", "src.s.gone_fn"}
+
+    # Blank filter: unchanged behaviour — every missing object is reported.
+    engine = PackageImportEngine(
+        str(root), _FakeSql(), dry_run=False, prior_state=prior,
+    )
+    engine.run()
+    absent = {
+        r["object"] for r in engine.delta_plan.delta_rows()
+        if r["action"] == "SOURCE_ABSENT"
+    }
+    assert absent == {
+        "src.s.other_table", "src.s.other_view", "src.s.listed_gone", "src.s.gone_fn",
+    }

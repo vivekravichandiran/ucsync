@@ -68,13 +68,13 @@ def test_tvf_with_digit_leading_column_names_is_quoted():
         "0055_eutrancellavailability_ran_nom DECIMAL(38,2), "
         "0409_ul_interference_power DOUBLE, "
         "partition_date DATE)",
-        "SELECT * FROM jio_mobility_analytics.gold.genie_samsung_celldb_daily "
+        "SELECT * FROM mobility_analytics.gold.vendor_celldb_daily "
         "where partition_date=date LIMIT 10",
         "SQL", None, True, None,
     ]
     params = [["date", "string", "string", "IN", 1]]
     ddl = function_ddl_from_information_schema(
-        FakeSql(routine, params), "jio_mobility_analytics.bronze.specific_date_traffic"
+        FakeSql(routine, params), "mobility_analytics.bronze.specific_date_traffic"
     )
     assert "RETURNS TABLE" in ddl
     # Already-plain names are untouched.
