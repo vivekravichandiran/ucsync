@@ -13,6 +13,7 @@ from typing import Any, Iterable, Optional
 
 from uc_sync import vocab
 from uc_sync.delta import CHANGED, DeltaPlan
+from uc_sync.filters import TABLE_LIKE_TYPES, table_selected
 from uc_sync.dependency import _TYPE_RANK
 from uc_sync.logging_util import get_log
 from uc_sync.fingerprints import (
@@ -150,7 +151,8 @@ def _split_statements(sql_text: str) -> list[str]:
     """Split a SQL file into executable statements, comment- and quote-aware (bug #11).
 
     A ``;`` is a statement boundary only at the top level — one inside a string
-    literal (``'…'`` / ``"…"``), a quoted identifier (```…```), a ``--`` line comment,
+    literal (``'…'`` / ``"…"``, with either ``''`` or backslash ``\\'`` escapes),
+    a quoted identifier (```…```), a ``--`` line comment,
     a ``/* … */`` block comment, or a ``$$ … $$`` block is NOT a boundary. Comments
     are **preserved** in the emitted statement: the SQL engine understands ``--`` and
     ``/* */`` natively, so a captured view / function keeps its author's comments
@@ -196,6 +198,14 @@ def _split_statements(sql_text: str) -> list[str]:
             else:
                 buf.append(ch)
                 i += 1
+        elif (in_single or in_double) and ch == "\\" and i + 1 < n:
+            # A backslash escapes the next character inside a string literal —
+            # the form SHOW CREATE TABLE emits for an embedded quote ('Today\'s').
+            # Without this the escaped quote closed the literal early and a later
+            # ';' in the same comment split the CREATE in half (mirrors
+            # rewrite._tokenize_sql, fixed in 1.1.2).
+            buf.append(text[i : i + 2])
+            i += 2
         elif in_single:
             buf.append(ch)
             if ch == "'":
@@ -863,12 +873,11 @@ class PackageImportEngine:
 
     # Table-like securables the tables filter narrows (everything else in an
     # in-scope schema — functions, volumes — still comes along).
-    _TABLE_LIKE_TYPES = {
-        "TABLE", "EXTERNAL_TABLE", "VIEW", "DYNAMIC_VIEW",
-        "METRIC_VIEW", "MATERIALIZED_VIEW", "STREAMING_TABLE",
-    }
+    _TABLE_LIKE_TYPES = TABLE_LIKE_TYPES
 
-    def _in_scope(self, object_type: str, full_name: str) -> bool:
+    def _in_scope(
+        self, object_type: str, full_name: str, source_name: str = ""
+    ) -> bool:
         """Is this object within the optional import TABLE filter?
 
         Catalog/schema scoping is done upstream at inventory (the ``catalogs`` /
@@ -876,7 +885,9 @@ class PackageImportEngine:
         blank filter imports everything; when set, the catalogs, schemas,
         functions, and volumes a selected table depends on still flow through
         (only other tables/views are excluded). Names accept the fully-qualified
-        or the bare table name.
+        or the bare table name, matched against the target name OR the source name
+        (``source_name``) so the same list works at inventory (source names) and
+        here under a catalog rename.
         """
         if self._retry_failed_only and not self._retry_scope_ok(object_type, full_name):
             return False
@@ -884,9 +895,7 @@ class PackageImportEngine:
             return True
         if object_type not in self._TABLE_LIKE_TYPES:
             return True
-        parts = str(full_name or "").split(".")
-        table = parts[-1] if parts else ""
-        return full_name in self._sel_tables or table in self._sel_tables
+        return table_selected(self._sel_tables, full_name, source_name)
 
     def _retry_scope_ok(self, object_type: str, full_name: str) -> bool:
         """Retry-failed-only scope (backlog item 4): True only for an object in the
@@ -1421,7 +1430,7 @@ class PackageImportEngine:
         exec_sql = executor if executor is not None else self.sql
         object_type, parsed_name = _parse_sql_filename(path.name)
         target_full_name = self._map_name(parsed_name)
-        if not self._in_scope(object_type, target_full_name):
+        if not self._in_scope(object_type, target_full_name, parsed_name):
             return PackageImportResult(
                 object_type=object_type,
                 source_full_name=parsed_name,
@@ -2009,7 +2018,7 @@ class PackageImportEngine:
         for path in files:
             object_type, parsed_name = _parse_sql_filename(path.name)
             target_full_name = self._map_name(parsed_name)
-            if not self._in_scope(object_type, target_full_name):
+            if not self._in_scope(object_type, target_full_name, parsed_name):
                 continue
             # Never act on an object that was not created this run (create FAILURE /
             # MANUAL skip) — its own row already carries the accurate status (task 5).
@@ -2337,7 +2346,7 @@ class PackageImportEngine:
                 _meta = abac_meta.get(path.stem)
                 if _meta and _meta.get("full_name"):
                     scope_name = self._map_name(_meta["full_name"])
-            if not self._in_scope(object_type, scope_name):
+            if not self._in_scope(object_type, scope_name, parsed_name):
                 continue  # object excluded by the import scope filter
             # An object that was never created (create FAILURE / MANUAL skip) must
             # not have governance acted on it — its create row already carries the

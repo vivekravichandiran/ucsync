@@ -21,6 +21,43 @@ Bump rules:
 
 _Nothing yet._
 
+## [1.2.0] - 2026-10-16
+
+Minor release: a statement-splitter fix found via a real production migration
+failure, plus source-side table filtering. Backward compatible — no bundle or
+state-schema change.
+
+### Fixed
+- **A table whose column or table COMMENT contains an escaped apostrophe *and* a
+  `;` failed on import with `PARSE_SYNTAX_ERROR … at or near '''`.** `SHOW CREATE
+  TABLE` serializes an embedded quote with a backslash (`'Today\'s flag … -> Red;
+  NK: …'`). The `[1.1.2]` fix taught `rewrite._tokenize_sql` this escape, but the
+  import's statement splitter (`package_import._split_statements`) still only knew
+  the doubled-quote form: the `\'` closed the literal early, the comment's own `;`
+  became a statement boundary, and the CREATE TABLE was sent to the warehouse cut
+  in half. The splitter now consumes a backslash plus its next character as a unit
+  inside single- and double-quoted strings. Tables with only an apostrophe or only
+  a `;` were never affected. The splitter also reads the grants/tags/policies/ABAC
+  files, so those are covered too. Verified against the real failing DDL.
+
+### Added
+- **`filter_tables` now applies at inventory (source side).** The table allowlist
+  that previously only narrowed the import is now also a `01_Inventory` widget and
+  is passed to the inventory task of the e2e and airgap-source jobs, so unselected
+  tables are never read or exported (no DDL / grants / tags / mask capture). Same
+  semantics as before (`catalog.schema.table` or bare name; table-like securables
+  only — catalogs, schemas, functions, volumes always come along), shared through
+  one matcher (`filters.table_selected`).
+
+### Changed
+- **Import `filter_tables` matches the source *or* the target name.** Previously a
+  fully-qualified entry was compared only against the catalog-mapped target name,
+  so under `catalog_mapping_json` a source-named entry silently skipped the table.
+  Both now select it (bare names are unchanged).
+- Operators who already set `filter_tables` in `00_Install_Jobs` now also get a
+  narrower inventory/export. What lands on the target is unchanged; the report just
+  no longer lists the unselected tables as `Skipped (filtered)`.
+
 ## [1.1.3] - 2026-10-06
 
 Patch release: a function-DDL reconstruction bug fix, found via a real production

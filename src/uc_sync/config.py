@@ -124,6 +124,10 @@ class SyncConfig:
     include_parents: bool = True
     include_regex: list[str] = field(default_factory=list)
     exclude_regex: list[str] = field(default_factory=list)
+    # Table allowlist (``catalog.schema.table`` or bare name). Applied at inventory so
+    # unselected tables are never read/exported, and again at import; see
+    # filters.table_selected. Blank = all tables.
+    filter_tables: list[str] = field(default_factory=list)
     import_mode: str = "CREATE_OR_SKIP"
     # Incremental (delta) sync (task 1): run mode is auto-detected from uc_sync_state
     # (baseline present → incremental; none → full + seed). A plain re-run is already
@@ -343,6 +347,9 @@ def from_sources(
     exclude_regex = pick("exclude_regex", None)
     if isinstance(exclude_regex, str):
         exclude_regex = _split_csv(exclude_regex) or list(selection.get("exclude_regex") or [])
+    filter_tables = pick("filter_tables", None)
+    if isinstance(filter_tables, str):
+        filter_tables = _split_csv(filter_tables) or list(selection.get("filter_tables") or [])
     catalog_mapping = parse_catalog_mapping(
         str(pick("catalog_mapping_json", "")),
         str(pick("catalog_mapping_path", "")),
@@ -506,6 +513,7 @@ def from_sources(
         include_parents=include_parents,
         include_regex=list(include_regex or []),
         exclude_regex=list(exclude_regex or []),
+        filter_tables=list(filter_tables or []),
         import_mode=str(runtime.get("import_mode") or "CREATE_OR_SKIP"),
         migrate_materialized_views=_as_bool(
             pick("migrate_materialized_views",
