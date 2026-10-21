@@ -53,6 +53,17 @@ state-schema change.
   was truncated, and `TBLPROPERTIES (` text inside a comment was treated as the
   clause. Tables were not affected in practice (TBLPROPERTIES is their last
   clause).
+- **An object whose name contains `__` failed on import with
+  `REQUIRES_SINGLE_PART_NAMESPACE`.** Bundle file names encode `.` as `__`, and the
+  import decoded the file name back into the object name, so `c.s.orders__daily`
+  became `c.s.orders.daily` (a 4-part name). The same happened to a name part
+  ending in `_` (`c.stage_.t`). The wrong name was used for the CREATE, grants,
+  tags, policies, the report row and `uc_sync_state`. The import now takes each
+  object's real name from the bundle inventory (re-encoding inventory names, as
+  ABAC policies already did). It falls back to decoding the file name only when
+  the inventory has no row for it. The bundle file format is unchanged, so no
+  re-export is needed: re-run the import (e.g. with `filter_tables` set to the
+  affected tables).
 
 ### Added
 - **`filter_tables` now applies at inventory (source side).** The table allowlist

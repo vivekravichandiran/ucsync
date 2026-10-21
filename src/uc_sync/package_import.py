@@ -766,6 +766,8 @@ class PackageImportEngine:
         # row. Off = today's behavior. The set members are matched against target names.
         self._retry_failed_only = bool(retry_failed_only)
         self._retry_set = {s for s in (retry_failed_set or []) if s}
+        # File stem -> real full name, built from the bundle inventory in run().
+        self._name_by_stem: dict[str, str] = {}
         # Within-level parallelism for the structure + view CREATE phases (backlog
         # item 3). 1 = fully sequential (the default / kill-switch — reproduces today's
         # behavior exactly). Same-rank objects (e.g. many tables) run across a bounded
@@ -1037,6 +1039,7 @@ class PackageImportEngine:
                 f"Migrated export package not found: {self.root}"
             )
         inventory = self._load_inventory()
+        self._name_by_stem = self._names_by_stem(inventory)
         # Build the incremental delta plan from the CURRENT bundle inventory vs. the
         # prior-run baseline. Auto-detected: a baseline present → incremental; else
         # full + seed. Unchanged objects are then skipped entirely.
@@ -1091,7 +1094,7 @@ class PackageImportEngine:
         # phases skip out-of-scope objects via _in_scope (continue, no row).
         if self._retry_failed_only:
             def _retry_keep(path: Path) -> bool:
-                ot, parsed = _parse_sql_filename(path.name)
+                ot, parsed = self._object_from_filename(path)
                 return self._retry_scope_ok(ot, self._map_name(parsed))
             kept_structural = [p for p in structural if _retry_keep(p)]
             kept_views = [p for p in view_files if _retry_keep(p)]
@@ -1429,7 +1432,7 @@ class PackageImportEngine:
         ordinary grants all run on that executor.
         """
         exec_sql = executor if executor is not None else self.sql
-        object_type, parsed_name = _parse_sql_filename(path.name)
+        object_type, parsed_name = self._object_from_filename(path)
         target_full_name = self._map_name(parsed_name)
         if not self._in_scope(object_type, target_full_name, parsed_name):
             return PackageImportResult(
@@ -1755,6 +1758,32 @@ class PackageImportEngine:
                 self._absent_objects.add(target_full_name)
         return result
 
+    @staticmethod
+    def _names_by_stem(inventory: dict[str, dict[str, Any]]) -> dict[str, str]:
+        """Map each bundle file stem to the object's real full name.
+
+        The export encodes ``.`` as ``__`` in file names, so a name that itself
+        contains ``__`` (``sap_pcr__mrss_x``) cannot be decoded back from the file
+        name. Re-encoding each inventory row (the deterministic direction) gives the
+        exact name. ABAC policies keep their own mapping (``_abac_meta_by_stem``).
+        """
+        from uc_sync.export import _safe_filename
+
+        names: dict[str, str] = {}
+        for row in inventory.values():
+            object_type = str(row.get("object_type") or "")
+            full_name = str(row.get("full_name") or row.get("source_full_name") or "")
+            if not object_type or not full_name or object_type == "ABAC_POLICY":
+                continue
+            names.setdefault(_safe_filename(object_type, full_name), full_name)
+        return names
+
+    def _object_from_filename(self, path: Path) -> tuple[str, str]:
+        """(object_type, real full name) for a bundle file; falls back to decoding
+        the file name when the inventory has no row for it."""
+        object_type, decoded = _parse_sql_filename(path.name)
+        return object_type, self._name_by_stem.get(path.stem, decoded)
+
     def _abac_meta_by_stem(
         self, inventory: dict[str, dict[str, Any]]
     ) -> dict[str, dict[str, str]]:
@@ -2017,7 +2046,7 @@ class PackageImportEngine:
         results: list[PackageImportResult] = []
         offset = 0
         for path in files:
-            object_type, parsed_name = _parse_sql_filename(path.name)
+            object_type, parsed_name = self._object_from_filename(path)
             target_full_name = self._map_name(parsed_name)
             if not self._in_scope(object_type, target_full_name, parsed_name):
                 continue
@@ -2247,7 +2276,7 @@ class PackageImportEngine:
         )
         results: list[PackageImportResult] = []
         for path in files:
-            object_type, tag_key = _parse_sql_filename(path.name)
+            object_type, tag_key = self._object_from_filename(path)
             # Incremental gating: skip an unchanged governed tag.
             if (
                 not self.dry_run
@@ -2332,7 +2361,7 @@ class PackageImportEngine:
         results: list[PackageImportResult] = []
         offset = 0
         for path in files:
-            object_type, parsed_name = _parse_sql_filename(path.name)
+            object_type, parsed_name = self._object_from_filename(path)
             if type_predicate is not None and not type_predicate(object_type):
                 continue
             target_full_name = self._map_name(parsed_name)
