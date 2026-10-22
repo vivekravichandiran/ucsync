@@ -64,6 +64,20 @@ state-schema change.
   the inventory has no row for it. The bundle file format is unchanged, so no
   re-export is needed: re-run the import (e.g. with `filter_tables` set to the
   affected tables).
+- **A catalog with materialized views or streaming tables that carry tags, masks
+  or ABAC failed the import as a governance failure.** These objects are
+  report-only (never created on the target; MVs unless
+  `migrate_materialized_views=true`), but their column tags, classic masks and a
+  table-level ABAC policy on them were still applied. Each failed against the
+  missing object, counted as `GOVERNANCE_FAILED`, and hard-failed the run. They
+  are now skipped, and the object's report row notes that its tags, masks and
+  ABAC policies must be re-applied once its pipeline recreates it on the target.
+  Catalog/schema-level ABAC policies and the governance of migrated tables are
+  unchanged. In the report, the object's governance rows read **Skipped (object
+  not migrated)**: its rows on *Tags Applied* (was `— (no tag op this run)`, which
+  read as unchanged), a policy attached to it on *ABAC Policies* (was blank), and
+  its rows on *Policy Matched Columns* (was the catalog policy's `Created`, which
+  read as if the object were masked on the target).
 
 ### Added
 - **`filter_tables` now applies at inventory (source side).** The table allowlist
@@ -91,6 +105,14 @@ state-schema change.
 - Operators who already set `filter_tables` in `00_Install_Jobs` now also get a
   narrower inventory/export. What lands on the target is unchanged; the report just
   no longer lists the unselected tables as `Skipped (filtered)`.
+- **A materialized view created this run is dropped fail-closed when its governance
+  fails** (with `migrate_materialized_views=true`), like a fresh table. Before, it
+  was only marked `PROTECTION_FAILED` and kept, and an MV holds data. A failed
+  MV tag, or a failed ABAC policy whose scope covers the MV, now drops it with
+  `DROP MATERIALIZED VIEW`. MVs are created after the first drop sweep, so a
+  second sweep runs after the view phase. An MV that already existed on the
+  target (now probed before create, like tables) is never dropped, only marked.
+  The job still fails on any governance failure.
 
 ## [1.1.3] - 2026-10-06
 
