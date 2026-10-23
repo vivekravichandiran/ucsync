@@ -61,7 +61,8 @@ dbutils.widgets.text("ops_schema", "", "3c. Output · Ops schema")
 # (+access connector) = create SC/EL. Blank = no base-path swap.
 dbutils.widgets.text("external_locations_path", "", "2d. Scope · External locations file")
 # Optional import TABLE filter: import only a subset of tables from the bundle. Blank
-# = import every table. Accepts catalog.schema.table or the bare table name.
+# = import every table. Accepts catalog.schema.table (source or target catalog) or
+# the bare table name. Set the same list at inventory to skip reading the rest.
 dbutils.widgets.text("filter_tables", "", "2e. Scope · Import table filter (allowlist)")
 # Optional catalog rename: JSON {"source_catalog":"target_catalog"} (blank = keep).
 dbutils.widgets.text("catalog_mapping_json", "", "2f. Scope · Catalog rename JSON")

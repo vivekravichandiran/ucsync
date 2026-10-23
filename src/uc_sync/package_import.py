@@ -13,6 +13,7 @@ from typing import Any, Iterable, Optional
 
 from uc_sync import vocab
 from uc_sync.delta import CHANGED, DeltaPlan
+from uc_sync.filters import TABLE_LIKE_TYPES, table_selected
 from uc_sync.dependency import _TYPE_RANK
 from uc_sync.logging_util import get_log
 from uc_sync.fingerprints import (
@@ -42,6 +43,9 @@ _VIEW_LIKE_TYPES = {
 # failure loses no data (fail-closed). Pre-existing tables are SKIP_EXISTING and
 # never recorded, hence never dropped.
 _DROPPABLE_TABLE_TYPES = {"TABLE", "EXTERNAL_TABLE"}
+# Types a fresh create is dropped for on a governance failure (fail-closed). A
+# migrated MV holds data like a table, so it is dropped too; a plain view holds none.
+_FAIL_CLOSED_DROP_TYPES = _DROPPABLE_TABLE_TYPES | {"MATERIALIZED_VIEW"}
 
 
 @dataclass
@@ -150,7 +154,8 @@ def _split_statements(sql_text: str) -> list[str]:
     """Split a SQL file into executable statements, comment- and quote-aware (bug #11).
 
     A ``;`` is a statement boundary only at the top level — one inside a string
-    literal (``'…'`` / ``"…"``), a quoted identifier (```…```), a ``--`` line comment,
+    literal (``'…'`` / ``"…"``, with either ``''`` or backslash ``\\'`` escapes),
+    a quoted identifier (```…```), a ``--`` line comment,
     a ``/* … */`` block comment, or a ``$$ … $$`` block is NOT a boundary. Comments
     are **preserved** in the emitted statement: the SQL engine understands ``--`` and
     ``/* */`` natively, so a captured view / function keeps its author's comments
@@ -196,6 +201,14 @@ def _split_statements(sql_text: str) -> list[str]:
             else:
                 buf.append(ch)
                 i += 1
+        elif (in_single or in_double) and ch == "\\" and i + 1 < n:
+            # A backslash escapes the next character inside a string literal —
+            # the form SHOW CREATE TABLE emits for an embedded quote ('Today\'s').
+            # Without this the escaped quote closed the literal early and a later
+            # ';' in the same comment split the CREATE in half (mirrors
+            # rewrite._tokenize_sql, fixed in 1.1.2).
+            buf.append(text[i : i + 2])
+            i += 2
         elif in_single:
             buf.append(ch)
             if ch == "'":
@@ -756,6 +769,8 @@ class PackageImportEngine:
         # row. Off = today's behavior. The set members are matched against target names.
         self._retry_failed_only = bool(retry_failed_only)
         self._retry_set = {s for s in (retry_failed_set or []) if s}
+        # File stem -> real full name, built from the bundle inventory in run().
+        self._name_by_stem: dict[str, str] = {}
         # Within-level parallelism for the structure + view CREATE phases (backlog
         # item 3). 1 = fully sequential (the default / kill-switch — reproduces today's
         # behavior exactly). Same-rank objects (e.g. many tables) run across a bounded
@@ -801,6 +816,9 @@ class PackageImportEngine:
         #    mutates its create result to FAILURE (PROTECTION_FAILED) in place.
         self._created_tables: dict[str, PackageImportResult] = {}
         self._failed_tables: dict[str, str] = {}
+        #  _failed_abac: (policy meta, feature) per failed ABAC policy, re-matched
+        #    after the view phase so fresh MVs in its scope are dropped too.
+        self._failed_abac: list[tuple[dict[str, str], str]] = []
         #  _created_objects: target_full_name -> the create PackageImportResult for
         #    EVERY object this run touched (any type). A governed-tag failure on a
         #    non-table securable (catalog/schema/volume/view) marks that object's
@@ -863,12 +881,11 @@ class PackageImportEngine:
 
     # Table-like securables the tables filter narrows (everything else in an
     # in-scope schema — functions, volumes — still comes along).
-    _TABLE_LIKE_TYPES = {
-        "TABLE", "EXTERNAL_TABLE", "VIEW", "DYNAMIC_VIEW",
-        "METRIC_VIEW", "MATERIALIZED_VIEW", "STREAMING_TABLE",
-    }
+    _TABLE_LIKE_TYPES = TABLE_LIKE_TYPES
 
-    def _in_scope(self, object_type: str, full_name: str) -> bool:
+    def _in_scope(
+        self, object_type: str, full_name: str, source_name: str = ""
+    ) -> bool:
         """Is this object within the optional import TABLE filter?
 
         Catalog/schema scoping is done upstream at inventory (the ``catalogs`` /
@@ -876,7 +893,9 @@ class PackageImportEngine:
         blank filter imports everything; when set, the catalogs, schemas,
         functions, and volumes a selected table depends on still flow through
         (only other tables/views are excluded). Names accept the fully-qualified
-        or the bare table name.
+        or the bare table name, matched against the target name OR the source name
+        (``source_name``) so the same list works at inventory (source names) and
+        here under a catalog rename.
         """
         if self._retry_failed_only and not self._retry_scope_ok(object_type, full_name):
             return False
@@ -884,9 +903,7 @@ class PackageImportEngine:
             return True
         if object_type not in self._TABLE_LIKE_TYPES:
             return True
-        parts = str(full_name or "").split(".")
-        table = parts[-1] if parts else ""
-        return full_name in self._sel_tables or table in self._sel_tables
+        return table_selected(self._sel_tables, full_name, source_name)
 
     def _retry_scope_ok(self, object_type: str, full_name: str) -> bool:
         """Retry-failed-only scope (backlog item 4): True only for an object in the
@@ -1028,12 +1045,14 @@ class PackageImportEngine:
                 f"Migrated export package not found: {self.root}"
             )
         inventory = self._load_inventory()
+        self._name_by_stem = self._names_by_stem(inventory)
         # Build the incremental delta plan from the CURRENT bundle inventory vs. the
         # prior-run baseline. Auto-detected: a baseline present → incremental; else
         # full + seed. Unchanged objects are then skipped entirely.
         self.delta_plan = DeltaPlan(
             self._load_inventory_rows(), self.prior_state,
             migrate_materialized_views=self.migrate_materialized_views,
+            in_run_scope=self._in_table_filter,
         )
         self._maybe_enter_existing_catalog_mode()
         by_target = {
@@ -1055,9 +1074,18 @@ class PackageImportEngine:
         results: list[PackageImportResult] = []
         self._created_tables = {}
         self._failed_tables = {}
+        self._failed_abac: list[tuple[dict[str, str], str]] = []
         self._created_objects = {}
         self._failed_objects = {}
         self._absent_objects = set()
+        # Report-only MVs / streaming tables are never created on the target, so the
+        # governance phases (which run BEFORE the view phase reaches them) must skip
+        # their tags, masks and table-level ABAC policies — otherwise each one fails
+        # against a missing object and hard-fails the run as a governance failure.
+        for path in ddl_files:
+            ot, name = self._object_from_filename(path)
+            if self._is_report_only_type(ot):
+                self._absent_objects.add(self._map_name(name))
         # ABAC scope metadata (file stem -> policy full name + on-securable), so an
         # ABAC failure can be mapped to the table(s) the policy protects for the
         # fail-closed drop sweep.
@@ -1081,7 +1109,7 @@ class PackageImportEngine:
         # phases skip out-of-scope objects via _in_scope (continue, no row).
         if self._retry_failed_only:
             def _retry_keep(path: Path) -> bool:
-                ot, parsed = _parse_sql_filename(path.name)
+                ot, parsed = self._object_from_filename(path)
                 return self._retry_scope_ok(ot, self._map_name(parsed))
             kept_structural = [p for p in structural if _retry_keep(p)]
             kept_views = [p for p in view_files if _retry_keep(p)]
@@ -1192,6 +1220,14 @@ class PackageImportEngine:
                 type_predicate=lambda ot: ot in _VIEW_LIKE_TYPES)
             results.extend(_vt)
             self._log_phase_objects("Governed tags (views)", _vt)
+
+        # Phase 6b — drop sweep for fresh MVs: they are created after the first sweep,
+        # so a failed MV tag, or a failed ABAC policy whose scope covers the MV,
+        # drops it here the same way a fresh table is dropped.
+        for meta, feature in self._failed_abac:
+            for tbl in self._abac_matched_tables(meta):
+                self._failed_tables.setdefault(tbl, feature)
+        self._drop_failed_tables()
 
         # Phase 7 — fail (without dropping) every non-table securable a governance
         # step failed on, plus any pre-existing table whose governance failed. A
@@ -1419,9 +1455,9 @@ class PackageImportEngine:
         ordinary grants all run on that executor.
         """
         exec_sql = executor if executor is not None else self.sql
-        object_type, parsed_name = _parse_sql_filename(path.name)
+        object_type, parsed_name = self._object_from_filename(path)
         target_full_name = self._map_name(parsed_name)
-        if not self._in_scope(object_type, target_full_name):
+        if not self._in_scope(object_type, target_full_name, parsed_name):
             return PackageImportResult(
                 object_type=object_type,
                 source_full_name=parsed_name,
@@ -1478,9 +1514,7 @@ class PackageImportEngine:
         # views (unless migrate_materialized_views) are DLT/SDP-pipeline-managed —
         # re-issuing their DDL would spin a new pipeline and re-derive data, so the
         # utility never creates them. They are inventoried and reported, not migrated.
-        if object_type == "STREAMING_TABLE" or (
-            object_type == "MATERIALIZED_VIEW" and not self.migrate_materialized_views
-        ):
+        if self._is_report_only_type(object_type):
             result.status = "SUCCESS"
             result.action = "REPORT_ONLY"
             result.delta_action = "REPORT_ONLY"
@@ -1489,6 +1523,8 @@ class PackageImportEngine:
                 "migrated"
                 + ("" if object_type == "STREAMING_TABLE"
                    else " (set migrate_materialized_views=true to override)")
+                + "; its tags, masks and ABAC policies are not applied — re-apply "
+                "them once the pipeline recreates it on the target"
             )
             if target_full_name:
                 with self._state_lock:
@@ -1629,7 +1665,7 @@ class PackageImportEngine:
                 # table is recorded SKIP_EXISTING and never added to _created_tables →
                 # the fail-closed drop sweep can never drop it (it is FLAGGED instead).
                 pre_exists = (
-                    object_type in _DROPPABLE_TABLE_TYPES
+                    object_type in _FAIL_CLOSED_DROP_TYPES
                     and self._object_exists(
                         object_type, target_full_name, executor=executor
                     )
@@ -1729,7 +1765,7 @@ class PackageImportEngine:
         # safely. Each worker writes a distinct target_full_name key.
         with self._state_lock:
             if (
-                object_type in _DROPPABLE_TABLE_TYPES
+                object_type in _FAIL_CLOSED_DROP_TYPES
                 and result.status == "SUCCESS"
                 and result.action == "CREATE_OR_SKIP"
             ):
@@ -1744,6 +1780,38 @@ class PackageImportEngine:
             if target_full_name and result.status == "FAILURE":
                 self._absent_objects.add(target_full_name)
         return result
+
+    def _is_report_only_type(self, object_type: str) -> bool:
+        """Streaming tables always; MVs unless ``migrate_materialized_views``."""
+        return object_type == "STREAMING_TABLE" or (
+            object_type == "MATERIALIZED_VIEW" and not self.migrate_materialized_views
+        )
+
+    @staticmethod
+    def _names_by_stem(inventory: dict[str, dict[str, Any]]) -> dict[str, str]:
+        """Map each bundle file stem to the object's real full name.
+
+        The export encodes ``.`` as ``__`` in file names, so a name that itself
+        contains ``__`` (``sap_pcr__mrss_x``) cannot be decoded back from the file
+        name. Re-encoding each inventory row (the deterministic direction) gives the
+        exact name. ABAC policies keep their own mapping (``_abac_meta_by_stem``).
+        """
+        from uc_sync.export import _safe_filename
+
+        names: dict[str, str] = {}
+        for row in inventory.values():
+            object_type = str(row.get("object_type") or "")
+            full_name = str(row.get("full_name") or row.get("source_full_name") or "")
+            if not object_type or not full_name or object_type == "ABAC_POLICY":
+                continue
+            names.setdefault(_safe_filename(object_type, full_name), full_name)
+        return names
+
+    def _object_from_filename(self, path: Path) -> tuple[str, str]:
+        """(object_type, real full name) for a bundle file; falls back to decoding
+        the file name when the inventory has no row for it."""
+        object_type, decoded = _parse_sql_filename(path.name)
+        return object_type, self._name_by_stem.get(path.stem, decoded)
 
     def _abac_meta_by_stem(
         self, inventory: dict[str, dict[str, Any]]
@@ -1816,13 +1884,15 @@ class PackageImportEngine:
         """
         if action_label == "CREATE_POLICY":
             policy = (meta or {}).get("full_name", "policy")
+            # Kept so MVs (created after the ABAC phase) in its scope are swept too.
+            self._failed_abac.append((meta or {}, f"ABAC {policy} ({feature})"))
             recorded = will_drop = False
             for tbl in self._abac_matched_tables(meta):
                 self._failed_tables.setdefault(tbl, f"ABAC {policy} ({feature})")
                 recorded = True
                 will_drop = will_drop or (tbl in self._created_tables)
             return recorded, will_drop
-        if object_type in _DROPPABLE_TABLE_TYPES:
+        if object_type in _FAIL_CLOSED_DROP_TYPES:
             self._failed_tables.setdefault(
                 target_full_name, f"governed tag ({feature})"
             )
@@ -1845,13 +1915,16 @@ class PackageImportEngine:
             return
         for target_full_name, feature in self._failed_tables.items():
             create_result = self._created_tables.get(target_full_name)
-            if create_result is None:
+            if create_result is None or create_result.action == "DROP_PROTECTION_FAILED":
                 # Not a shell this run created (pre-existing, or its own CREATE
-                # already failed) — nothing to drop.
+                # already failed), or already dropped by the first sweep.
                 continue
+            is_mv = create_result.object_type == "MATERIALIZED_VIEW"
+            kind = "MATERIALIZED VIEW" if is_mv else "TABLE"
+            executor = (self.warehouse_sql or self.sql) if is_mv else self.sql
             try:
-                self.sql.execute(
-                    f"DROP TABLE IF EXISTS {quote_full_name(target_full_name)}"
+                executor.execute(
+                    f"DROP {kind} IF EXISTS {quote_full_name(target_full_name)}"
                 )
             except Exception as exc:  # noqa: BLE001
                 log.error(
@@ -1862,7 +1935,7 @@ class PackageImportEngine:
             create_result.action = "DROP_PROTECTION_FAILED"
             create_result.error_code = "PROTECTION_FAILED"
             create_result.message = (
-                "table dropped (fail-closed): a governance step failed — "
+                f"{kind.lower()} dropped (fail-closed): a governance step failed — "
                 f"{feature}"
             )
 
@@ -2007,9 +2080,9 @@ class PackageImportEngine:
         results: list[PackageImportResult] = []
         offset = 0
         for path in files:
-            object_type, parsed_name = _parse_sql_filename(path.name)
+            object_type, parsed_name = self._object_from_filename(path)
             target_full_name = self._map_name(parsed_name)
-            if not self._in_scope(object_type, target_full_name):
+            if not self._in_scope(object_type, target_full_name, parsed_name):
                 continue
             # Never act on an object that was not created this run (create FAILURE /
             # MANUAL skip) — its own row already carries the accurate status (task 5).
@@ -2237,7 +2310,7 @@ class PackageImportEngine:
         )
         results: list[PackageImportResult] = []
         for path in files:
-            object_type, tag_key = _parse_sql_filename(path.name)
+            object_type, tag_key = self._object_from_filename(path)
             # Incremental gating: skip an unchanged governed tag.
             if (
                 not self.dry_run
@@ -2322,7 +2395,7 @@ class PackageImportEngine:
         results: list[PackageImportResult] = []
         offset = 0
         for path in files:
-            object_type, parsed_name = _parse_sql_filename(path.name)
+            object_type, parsed_name = self._object_from_filename(path)
             if type_predicate is not None and not type_predicate(object_type):
                 continue
             target_full_name = self._map_name(parsed_name)
@@ -2337,7 +2410,7 @@ class PackageImportEngine:
                 _meta = abac_meta.get(path.stem)
                 if _meta and _meta.get("full_name"):
                     scope_name = self._map_name(_meta["full_name"])
-            if not self._in_scope(object_type, scope_name):
+            if not self._in_scope(object_type, scope_name, parsed_name):
                 continue  # object excluded by the import scope filter
             # An object that was never created (create FAILURE / MANUAL skip) must
             # not have governance acted on it — its create row already carries the
@@ -2347,6 +2420,15 @@ class PackageImportEngine:
             # are keyed by policy name (never in _absent_objects) and unaffected.
             if not is_abac and target_full_name in self._absent_objects:
                 continue
+            # A table-level ABAC policy ON an object that is not on the target (a
+            # report-only MV / streaming table, or a failed create) cannot be created.
+            if is_abac:
+                _on = (abac_meta or {}).get(path.stem) or {}
+                if (
+                    _on.get("on_type") not in ("CATALOG", "SCHEMA")
+                    and self._map_name(_on.get("on_securable", "")) in self._absent_objects
+                ):
+                    continue
             # Incremental delta gating: on an incremental run, skip governance whose
             # fingerprint is unchanged. Tags — skip when the object's governance
             # fingerprint is unchanged. ABAC — skip when the policy object (an object
@@ -2742,6 +2824,15 @@ class PackageImportEngine:
             return True
         except Exception as exc:  # noqa: BLE001
             return not _is_not_found_error(str(exc))
+
+    def _in_table_filter(self, source_full_name: str, object_type: str) -> bool:
+        """True unless ``filter_tables`` is set and leaves this table-like object out
+        (matched on its source or catalog-mapped target name)."""
+        if not self._sel_tables or object_type not in self._TABLE_LIKE_TYPES:
+            return True
+        return table_selected(
+            self._sel_tables, self._map_name(source_full_name), source_full_name
+        )
 
     def _map_name(self, full_name: str) -> str:
         name = str(full_name or "")

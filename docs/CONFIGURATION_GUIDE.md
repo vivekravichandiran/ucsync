@@ -76,6 +76,7 @@ which `00_Install_Jobs` bakes in for you.
 | **`catalogs`** | csv or blank | Scope. Blank = whole metastore. This is the **source** scope — there is no separate "target catalog" input. |
 | **`schemas`** | csv `catalog.schema` or blank | Scope within the catalog(s). |
 | **`exclude_regex`** | csv of regexes or blank | **Table exclude filter.** Comma-separated Python regexes matched with `.search()` on `catalog.schema.table`; a matching table (and its DDL/grants/masks) is never captured. Escape dots (`\.`), anchor with `$`, and note a bare `orders` substring-matches `orders_archive`. An **exact fully-qualified name works too** (it's just a literal regex), so you can mix the two — e.g. `cat\.sch\.delete_me, .*_TEMP$`. Do **not** anchor with `^` (the match string starts with the catalog, not the table). Parent catalog/schema are never excluded. Blank = exclude nothing. |
+| **`filter_tables`** | csv or blank | **Table allowlist.** Inventory/export **only** these tables/views (`catalog.schema.table` or bare table name, exact match). Unselected tables are never read on the source — no DDL, grants, tags, or masks captured. Report-only table kinds (streaming tables, MVs, Lakebase tables, vector indexes, pipeline event-log tables) follow the list too. The catalogs/schemas/functions/volumes a selected table needs still come along. A view over an unselected table will fail at import — list both. The **same widget** is honoured again at import (set once in `00_Install_Jobs`). Blank = all tables. |
 
 ---
 
@@ -122,7 +123,7 @@ base-path swap → catalog root / skip.**
 | **`import_warehouse_id`** | warehouse id | **SQL warehouse (target) — REQUIRED for import.** The **entire import replay runs on this one serverless warehouse** — tables, functions, masks / row filters, views, materialized views, ABAC policies, tags, and grants — so there is no classic-Spark DDL path (which is why masked-table `CREATE VIEW` and `CREATE POLICY`, both rejected on classic Spark, work). The import **fails fast** if it's unset. Use a Standard/serverless warehouse (masks/row filters need USER_ISOLATION or serverless). |
 | **`dry_run`** | bool (default `false`) | Plan only, no mutations. **Run this first.** When `true`, `ops_catalog`/`ops_schema` are not required. |
 | **`catalog_mapping_json`** | JSON or blank | Land a source catalog under a **different target name**, e.g. `{"src":"tgt"}` (identity `{"x":"x"}` is fine). Rewrites the catalog name in every replayed statement (DDL, grants, tags, ABAC, masks); hyphenated names + prefix look-alikes are safe. Does **not** affect storage paths. **If the mapped target catalog already exists, import auto-switches to existing-catalog mode** (skips SC/EL/catalog creation, replicates schemas + objects). |
-| **`filter_tables`** | csv or blank | Import only a subset of **tables** (`catalog.schema.table` or bare table). Blank = all. The catalogs/schemas/functions/volumes a selected table needs still come along. |
+| **`filter_tables`** | csv or blank | Import only a subset of **tables** (`catalog.schema.table` — source **or** target catalog name — or bare table). Blank = all. The catalogs/schemas/functions/volumes a selected table needs still come along. Set the same list at `01_Inventory` (or once in `00_Install_Jobs`, which feeds both) so the rest is never read on the source either. |
 | **`run_as_spn`** | SP appId or blank | Run the import as a target **service principal** so migrated securables are owned by it. Blank = run as the installing user. |
 | **`copy_volume_data`** | bool (default `false`) | Copy volume **file bytes** (not in the bundle) from source to target. Needs the source-connection widgets to read the source. Off = volume *definitions* migrate, contents don't. Recorded in `uc_sync_volume_files`. |
 | **`migrate_materialized_views`** | bool (default `false`) | Streaming tables & materialized views are DLT/SDP-managed and **report-only** by default. `true` migrates materialized views; streaming tables are always report-only. |
@@ -252,7 +253,7 @@ cluster by default; set `existing_cluster_id` to reuse one.
 | `exclude_regex` | inventory | `""` |
 | `existing_cluster_id` | install | `""` |
 | `external_locations_path` | 01, 02, 03 | `""` |
-| `filter_tables` | import | `""` |
+| `filter_tables` | inventory, import | `""` |
 | `http_proxy` / `https_proxy` | install | `""` (blank = no proxy) |
 | `import_warehouse_id` | import | *(required for import)* |
 | `job_name_prefix` | install | `UC-Gov-Migration` |

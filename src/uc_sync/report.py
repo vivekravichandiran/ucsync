@@ -868,6 +868,17 @@ def build_report(
             and entry.get("action") == "DROP_PROTECTION_FAILED"
         )
 
+    # A report-only object (MV without migrate_materialized_views, streaming table)
+    # is never created on the target, so no governance is applied to it. Its tag /
+    # matched-column / attached-policy rows say so instead of borrowing another
+    # status ("no tag op this run" reads as unchanged; the policy's own "Created"
+    # reads as if the object were masked on target).
+    _NOT_MIGRATED = "Skipped (object not migrated)"
+
+    def _not_migrated(*names: str) -> bool:
+        entry = next((idx.get(n) for n in names if n and idx.get(n)), None)
+        return bool(entry and entry.get("action") == "REPORT_ONLY")
+
     def _gov_status(*names: str) -> list[str]:
         if stage != "IMPORT":
             return []
@@ -885,6 +896,8 @@ def build_report(
         actual cause, not a casualty of another failure)."""
         if stage != "IMPORT":
             return []
+        if _not_migrated(*names):
+            return [_NOT_MIGRATED]
         entry = next((tag_idx.get(n) for n in names if n and tag_idx.get(n)), None)
         op_failed = bool(entry and str(entry.get("status")) == "FAILURE")
         if _object_rolled_back(*names) and not op_failed:
@@ -961,6 +974,18 @@ def build_report(
                 ", ".join(rf.get("input_column_names") or []),
             ] + st)
 
+    def _policy_status(o: dict[str, Any]) -> list[str]:
+        """A policy attached ON a report-only object (not catalog/schema level) was
+        never created; otherwise the policy's own import outcome."""
+        d = o.get("definition") or {}
+        if (
+            stage == "IMPORT"
+            and str(d.get("on_securable_type") or "").upper() not in ("CATALOG", "SCHEMA")
+            and _not_migrated(str(d.get("on_securable") or ""))
+        ):
+            return [_NOT_MIGRATED]
+        return _gov_status(o["full_name"], str(o.get("target_full_name") or ""))
+
     # ABAC policies
     abac = _sheet(
         "ABAC Policies",
@@ -976,7 +1001,7 @@ def build_report(
             d.get("function_name"), "; ".join(d.get("match_columns") or []),
             ", ".join(d.get("to_principals") or []),
             ", ".join(d.get("except_principals") or []),
-        ] + _gov_status(o["full_name"], str(o.get("target_full_name") or "")))
+        ] + _policy_status(o))
 
     # Policy → matched columns (DERIVED): resolve each ABAC policy's tag rule
     # against the captured column tags, within the securable it is attached ON.
@@ -1006,7 +1031,7 @@ def build_report(
         rule = "; ".join(d.get("match_columns") or [])
         base = [d.get("policy_name"), d.get("policy_type"), on_securable,
                 d.get("function_name"), rule]
-        pol_st = _gov_status(o["full_name"], str(o.get("target_full_name") or ""))
+        pol_st = _policy_status(o)
         hits = 0
         for table_fn, ctags in col_tag_index.items():
             if not _table_in_policy_scope(table_fn, on_type, on_securable):
@@ -1015,7 +1040,10 @@ def build_report(
                 hit = _column_condition_match(tags, conditions)
                 if hit:
                     key, value = hit
-                    matched.append(base + [table_fn, col, key, value] + pol_st)
+                    row_st = (
+                        [_NOT_MIGRATED] if pol_st and _not_migrated(table_fn) else pol_st
+                    )
+                    matched.append(base + [table_fn, col, key, value] + row_st)
                     hits += 1
         if hits == 0:
             note = (

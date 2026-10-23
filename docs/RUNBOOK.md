@@ -179,7 +179,7 @@ Combine these with the mode paths above.
 | **Single catalog / schema scope** | `catalogs=<one>` (± `schemas=<one>`) at Inventory |
 | **Rename the catalog on target** | `catalog_mapping_json = {"<source>":"<target>"}` (storage paths still from the CSV) |
 | **Replicate into an existing catalog** | `catalog_mapping_json` to the existing name (auto existing-catalog mode); pre-grant `USE CATALOG`+`CREATE SCHEMA`; list external objects in `object_locations_path` |
-| **Subset of tables** | `filter_tables = cat.sch.tbl,…` (prerequisite catalogs/schemas/functions come along) |
+| **Subset of tables** | `filter_tables = cat.sch.tbl,…` (applied at inventory **and** import — unselected tables are never read on the source; prerequisite catalogs/schemas/functions come along) |
 | **Copy volume file bytes too** | `copy_volume_data=true` + source-connection widgets |
 
 ---

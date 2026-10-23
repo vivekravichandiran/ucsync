@@ -47,6 +47,7 @@
           "catalogs": "${catalogs}",
           "schemas": "${schemas}",
           "exclude_regex": "${exclude_regex}",
+          "filter_tables": "${filter_tables}",
           "output_volume_path": "${output_volume_path}",
           "ops_catalog": "${ops_catalog}",
           "ops_schema": "${ops_schema}",

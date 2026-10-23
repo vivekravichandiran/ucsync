@@ -477,6 +477,19 @@ def is_replayable_table_property(key: str) -> bool:
     return str(key or "").lower() not in _UNREPLAYABLE_TABLE_PROPERTY_KEYS
 
 
+_TBLPROPERTIES_OPEN_RE = re.compile(r"\bTBLPROPERTIES\s*\(", re.IGNORECASE)
+
+
+def _unquote_property_key(entry: list[tuple[str, str]]) -> str:
+    """The unquoted key of one ``'key' = 'value'`` entry ('' if none)."""
+    for kind, chunk in entry:
+        if kind == "LIT" and chunk[:1] in ("'", '"', "`"):
+            return chunk[1:-1]
+        if kind == "CODE" and chunk.strip():
+            return chunk.split("=", 1)[0].strip()
+    return ""
+
+
 def strip_reserved_table_properties(text: str) -> str:
     """Remove ONLY the un-replayable table properties from a TBLPROPERTIES block.
 
@@ -490,40 +503,78 @@ def strip_reserved_table_properties(text: str) -> str:
     late-column clustering + column DEFAULTs and silently dropping deletion vectors,
     row tracking, auto-optimize, compression, …). If no properties remain the whole
     ``TBLPROPERTIES (...)`` clause is removed.
+
+    The block is located with the quote-aware tokenizer: its end is the ``)`` that
+    balances the opening ``(`` in CODE, never the last ``)`` in the text. A VIEW's
+    TBLPROPERTIES is followed by ``WITH SCHEMA … AS <query>``, so the old greedy
+    regex swallowed the query up to its final ``)`` and the replayed view failed
+    with ``PARSE_SYNTAX_ERROR``. Entries are matched on whole literal tokens, so a
+    value with ``)`` or an escaped quote (``'it\\'s'``) is kept byte-for-byte. A
+    block with nothing to drop is left untouched.
     """
 
-    rewritten = str(text or "")
-
-    def _filter_block(match: re.Match[str]) -> str:
-        body = match.group(1)
-        kept: list[str] = []
-        # Entries look like: 'key' = 'value'  (comma-separated, possibly multiline).
-        # The quoted-pair regex tolerates ``)`` inside a value
-        # (e.g. 'upper(region),lower(region)') because it anchors on quotes.
-        for key, value in re.findall(
-            r"'([^']*)'\s*=\s*'([^']*)'", body
-        ):
-            if key.lower() in _UNREPLAYABLE_TABLE_PROPERTY_KEYS:
+    tokens = _tokenize_sql(text)
+    out: list[tuple[str, str]] = []
+    i, n = 0, len(tokens)
+    while i < n:
+        kind, chunk = tokens[i]
+        m = _TBLPROPERTIES_OPEN_RE.search(chunk) if kind == "CODE" else None
+        if not m:
+            out.append((kind, chunk))
+            i += 1
+            continue
+        # Walk forward to the ``)`` that balances the opening ``(``.
+        depth = 1
+        body: list[tuple[str, str]] = [("CODE", chunk[m.end():])]
+        j, close_at = i, None
+        while close_at is None:
+            seg_kind, seg = body[-1]
+            if seg_kind == "CODE":
+                for pos, ch in enumerate(seg):
+                    depth += {"(": 1, ")": -1}.get(ch, 0)
+                    if depth == 0:
+                        close_at = pos
+                        break
+            if close_at is not None:
+                break
+            j += 1
+            if j >= n:
+                break
+            body.append(tokens[j])
+        if close_at is None:  # unbalanced — leave the text exactly as captured
+            out.extend(tokens[i:])
+            break
+        tail = body[-1][1][close_at + 1 :]
+        body[-1] = ("CODE", body[-1][1][:close_at])
+        # Split entries on top-level commas (commas inside literals are LIT).
+        entries: list[list[tuple[str, str]]] = [[]]
+        for seg_kind, seg in body:
+            if seg_kind != "CODE":
+                entries[-1].append((seg_kind, seg))
                 continue
-            kept.append(f"'{key}' = '{value}'")
-        if not kept:
-            return ""
-        return "TBLPROPERTIES (\n  " + ",\n  ".join(kept) + ")"
-
-    # Greedy capture to the final ``)`` so a property VALUE containing ``)``
-    # (e.g. 'upper(region),lower(region)') does not truncate the block. Any
-    # trailing ``;`` stays outside the match. TBLPROPERTIES is the last clause in
-    # captured table DDL, so nothing legitimate follows it.
-    rewritten = re.sub(
-        r"TBLPROPERTIES\s*\((.*)\)",
-        _filter_block,
-        rewritten,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    # Tidy any dangling whitespace left where the clause was removed.
-    rewritten = re.sub(r"[ \t]+\n", "\n", rewritten)
-    rewritten = re.sub(r"\n{3,}", "\n\n", rewritten)
-    return rewritten
+            parts = seg.split(",")
+            for idx, part in enumerate(parts):
+                if idx:
+                    entries.append([])
+                entries[-1].append(("CODE", part))
+        kept = [
+            _detokenize(entry).strip()
+            for entry in entries
+            if _detokenize(entry).strip()
+            and _unquote_property_key(entry).lower()
+            not in _UNREPLAYABLE_TABLE_PROPERTY_KEYS
+        ]
+        total = sum(1 for entry in entries if _detokenize(entry).strip())
+        if len(kept) == total:
+            out.extend(tokens[i : j + 1])
+        elif kept:
+            out.append(("CODE", chunk[: m.start()] + "TBLPROPERTIES (\n  "))
+            out.append(("LIT", ",\n  ".join(kept)))
+            out.append(("CODE", ")" + tail))
+        else:
+            out.append(("CODE", chunk[: m.start()].rstrip() + tail))
+        i = j + 1
+    return _detokenize(out)
 
 
 def rewrite_json_value(

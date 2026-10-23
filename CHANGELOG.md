@@ -21,6 +21,99 @@ Bump rules:
 
 _Nothing yet._
 
+## [1.2.0] - 2026-10-16
+
+Minor release: two DDL-replay fixes found via real production migration
+failures (the statement splitter and view TBLPROPERTIES), plus source-side
+table filtering. Backward compatible — no bundle or
+state-schema change.
+
+### Fixed
+- **A table whose column or table COMMENT contains an escaped apostrophe *and* a
+  `;` failed on import with `PARSE_SYNTAX_ERROR … at or near '''`.** `SHOW CREATE
+  TABLE` serializes an embedded quote with a backslash (`'Today\'s flag … -> Red;
+  NK: …'`). The `[1.1.2]` fix taught `rewrite._tokenize_sql` this escape, but the
+  import's statement splitter (`package_import._split_statements`) still only knew
+  the doubled-quote form: the `\'` closed the literal early, the comment's own `;`
+  became a statement boundary, and the CREATE TABLE was sent to the warehouse cut
+  in half. The splitter now consumes a backslash plus its next character as a unit
+  inside single- and double-quoted strings. Tables with only an apostrophe or only
+  a `;` were never affected. The splitter also reads the grants/tags/policies/ABAC
+  files, so those are covered too. Verified against the real failing DDL.
+- **A commented VIEW whose query contains a `)` failed on import with
+  `PARSE_SYNTAX_ERROR` (e.g. `… at or near 'THEN'`).** For a view, `SHOW CREATE
+  TABLE` emits `TBLPROPERTIES ('comment' = …)` *before* `WITH SCHEMA COMPENSATION
+  AS <query>`. `rewrite.strip_reserved_table_properties` assumed TBLPROPERTIES was
+  the last clause and matched greedily to the **last** `)` in the text, so it
+  replaced the `AS <query>` up to its final `)` with the rebuilt property list.
+  The view was then replayed without its query head. It now finds the block with
+  the quote-aware tokenizer and stops at the `)` that balances the opening one,
+  and leaves a block with nothing to drop untouched. Two related problems are
+  fixed by the same change: a property value with an escaped quote (`'it\'s'`)
+  was truncated, and `TBLPROPERTIES (` text inside a comment was treated as the
+  clause. Tables were not affected in practice (TBLPROPERTIES is their last
+  clause).
+- **An object whose name contains `__` failed on import with
+  `REQUIRES_SINGLE_PART_NAMESPACE`.** Bundle file names encode `.` as `__`, and the
+  import decoded the file name back into the object name, so `c.s.orders__daily`
+  became `c.s.orders.daily` (a 4-part name). The same happened to a name part
+  ending in `_` (`c.stage_.t`). The wrong name was used for the CREATE, grants,
+  tags, policies, the report row and `uc_sync_state`. The import now takes each
+  object's real name from the bundle inventory (re-encoding inventory names, as
+  ABAC policies already did). It falls back to decoding the file name only when
+  the inventory has no row for it. The bundle file format is unchanged, so no
+  re-export is needed: re-run the import (e.g. with `filter_tables` set to the
+  affected tables).
+- **A catalog with materialized views or streaming tables that carry tags, masks
+  or ABAC failed the import as a governance failure.** These objects are
+  report-only (never created on the target; MVs unless
+  `migrate_materialized_views=true`), but their column tags, classic masks and a
+  table-level ABAC policy on them were still applied. Each failed against the
+  missing object, counted as `GOVERNANCE_FAILED`, and hard-failed the run. They
+  are now skipped, and the object's report row notes that its tags, masks and
+  ABAC policies must be re-applied once its pipeline recreates it on the target.
+  Catalog/schema-level ABAC policies and the governance of migrated tables are
+  unchanged. In the report, the object's governance rows read **Skipped (object
+  not migrated)**: its rows on *Tags Applied* (was `— (no tag op this run)`, which
+  read as unchanged), a policy attached to it on *ABAC Policies* (was blank), and
+  its rows on *Policy Matched Columns* (was the catalog policy's `Created`, which
+  read as if the object were masked on the target).
+
+### Added
+- **`filter_tables` now applies at inventory (source side).** The table allowlist
+  that previously only narrowed the import is now also a `01_Inventory` widget and
+  is passed to the inventory task of the e2e and airgap-source jobs, so unselected
+  tables are never read or exported (no DDL / grants / tags / mask capture). Same
+  semantics as before (`catalog.schema.table` or bare name; table-like securables
+  only — catalogs, schemas, functions, volumes always come along), shared through
+  one matcher (`filters.table_selected`). The report-only table kinds (Lakebase
+  tables, vector-search indexes, pipeline event-log tables, online tables) are
+  narrowed too, so an unselected one is not still listed as a manual step.
+
+### Changed
+- **Import `filter_tables` matches the source *or* the target name.** Previously a
+  fully-qualified entry was compared only against the catalog-mapped target name,
+  so under `catalog_mapping_json` a source-named entry silently skipped the table.
+  Both now select it (bare names are unchanged).
+- **An incremental run with `filter_tables` set reports "Deleted in source" only for
+  listed objects.** The delta planner compares this run's inventory with the full
+  `uc_sync_state` baseline. With the inventory now filtered, every unlisted
+  table/view was missing from the run and read as deleted in source. A
+  table-like object the filter leaves out is now skipped by that check. A listed
+  object that really is gone, and any missing function/volume/policy, are still
+  reported. With the filter blank, the check is unchanged.
+- Operators who already set `filter_tables` in `00_Install_Jobs` now also get a
+  narrower inventory/export. What lands on the target is unchanged; the report just
+  no longer lists the unselected tables as `Skipped (filtered)`.
+- **A materialized view created this run is dropped fail-closed when its governance
+  fails** (with `migrate_materialized_views=true`), like a fresh table. Before, it
+  was only marked `PROTECTION_FAILED` and kept, and an MV holds data. A failed
+  MV tag, or a failed ABAC policy whose scope covers the MV, now drops it with
+  `DROP MATERIALIZED VIEW`. MVs are created after the first drop sweep, so a
+  second sweep runs after the view phase. An MV that already existed on the
+  target (now probed before create, like tables) is never dropped, only marked.
+  The job still fails on any governance failure.
+
 ## [1.1.3] - 2026-10-06
 
 Patch release: a function-DDL reconstruction bug fix, found via a real production

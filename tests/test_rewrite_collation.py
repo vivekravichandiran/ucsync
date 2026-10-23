@@ -402,3 +402,65 @@ def test_rewrite_access_connector_id():
     assert "src-ac" not in out
     # No target id -> unchanged.
     assert rewrite_access_connector_id(ddl, "") == ddl
+
+
+# ---- 1.2.0: view TBLPROPERTIES is followed by the query ---------------------
+
+# Shape of SHOW CREATE TABLE output for a commented view: TBLPROPERTIES is NOT
+# the last clause — WITH SCHEMA COMPENSATION AS <query> follows it.
+_VIEW_WITH_PROPS = (
+    "CREATE OR REPLACE VIEW `c`.`s`.`plan-ranking-view` (\n"
+    "  id COMMENT 'Row id',\n"
+    "  period COMMENT 'Month and year`s last two digits')\n"
+    "COMMENT 'Ranked plan rows'\n"
+    "TBLPROPERTIES (\n"
+    "  'comment' = 'Ranked plan rows')\n"
+    "WITH SCHEMA COMPENSATION\n"
+    "AS WITH\n"
+    "/*\nObjective  : \nVersion No  : 1.0\n*/\n"
+    "base AS (\n"
+    "   SELECT id, period FROM c.s.src -- (unit conversion)\n"
+    "   )\n"
+    "SELECT id,\n"
+    "  CASE WHEN period IN ('Jan-25', 'JAN 25') THEN 'Jan-25' ELSE period END AS period\n"
+    "FROM base\n"
+)
+
+
+def test_view_query_after_tblproperties_survives_unchanged():
+    """The greedy TBLPROPERTIES regex used to run to the query's last ``)``,
+    deleting the body (``PARSE_SYNTAX_ERROR … near 'THEN'``)."""
+    assert strip_reserved_table_properties(_VIEW_WITH_PROPS) == _VIEW_WITH_PROPS
+    assert strip_managed_storage_clauses(_VIEW_WITH_PROPS, "VIEW") == _VIEW_WITH_PROPS
+
+
+def test_view_drops_unreplayable_key_but_keeps_query():
+    view = (
+        "CREATE VIEW c.s.v TBLPROPERTIES (\n"
+        "  'delta.minReaderVersion' = '1',\n  'comment' = 'k')\n"
+        "AS SELECT count(*) AS n FROM (SELECT 1) x WHERE a IN ('p', 'q')\n"
+    )
+    out = strip_reserved_table_properties(view)
+    assert "minReaderVersion" not in out
+    assert "'comment' = 'k')\nAS SELECT count(*) AS n FROM (SELECT 1) x" in out
+    assert out.endswith("WHERE a IN ('p', 'q')\n")
+
+
+def test_property_value_with_escaped_quote_kept_verbatim():
+    ddl = (
+        "CREATE TABLE c.s.t (id INT)\nUSING delta\nTBLPROPERTIES (\n"
+        "  'comment' = 'it\\'s = done, (really)',\n"
+        "  'delta.minWriterVersion' = '7');\n"
+    )
+    out = strip_reserved_table_properties(ddl)
+    assert "'comment' = 'it\\'s = done, (really)'" in out
+    assert "minWriterVersion" not in out
+    assert out.rstrip().endswith(");")
+
+
+def test_tblproperties_text_inside_literals_is_not_a_clause():
+    ddl = (
+        "CREATE TABLE c.s.t (`tblproperties (` INT) USING delta "
+        "COMMENT 'see TBLPROPERTIES (delta.minReaderVersion = 3)'"
+    )
+    assert strip_reserved_table_properties(ddl) == ddl

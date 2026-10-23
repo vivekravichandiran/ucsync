@@ -21,7 +21,7 @@ therefore reads as drop + add — the new name is ``CREATED_NEW`` and the old is
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from uc_sync import vocab
 from uc_sync.fingerprints import (
@@ -113,6 +113,7 @@ class DeltaPlan:
         baseline: Optional[Mapping[str, Mapping[str, Any]]] = None,
         *,
         migrate_materialized_views: bool = False,
+        in_run_scope: Optional[Callable[[str, str], bool]] = None,
     ):
         self.baseline = dict(baseline or {})
         self.incremental = bool(self.baseline)
@@ -137,6 +138,12 @@ class DeltaPlan:
                 # "deleted in source". Structural column changes ride the owning table's
                 # ddl_hash; the state upsert no longer persists COLUMN rows.
                 if str(prior.get("object_type") or "") == "COLUMN":
+                    continue
+                # An object the run's table filter left out was never inventoried, so
+                # its absence says nothing about the source — never "deleted".
+                if in_run_scope is not None and not in_run_scope(
+                    name, str(prior.get("object_type") or "")
+                ):
                     continue
                 self.source_absent.append(
                     ObjectDelta(

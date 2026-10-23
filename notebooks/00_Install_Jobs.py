@@ -65,8 +65,9 @@ dbutils.widgets.text("ops_schema", "", "3c. Output · Ops schema")
 # The single external-storage mapping file (task 2). 2 cols = BYO prefix-swap; 3 cols
 # (+access connector) = create SC/EL. Drives export path-rewrite AND import swap.
 dbutils.widgets.text("external_locations_path", "", "2d. Scope · External locations file")
-# Import table filter (import/e2e; blank = every table). Accepts catalog.schema.table.
-dbutils.widgets.text("filter_tables", "", "2e. Scope · Import table filter (allowlist)")
+# Table allowlist (blank = every table). Accepts catalog.schema.table or bare name.
+# Applied at inventory (unselected tables are never read/exported) AND at import.
+dbutils.widgets.text("filter_tables", "", "2e. Scope · Table filter (allowlist)")
 # Catalog rename (import/e2e): JSON {"source_catalog":"target_catalog"}; blank = keep.
 dbutils.widgets.text("catalog_mapping_json", "", "2f. Scope · Catalog rename JSON")
 # Per-object locations (import/e2e): CSV schema,volume,table,location; blank = root.

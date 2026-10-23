@@ -47,6 +47,10 @@ dbutils.widgets.text("schemas", "", "2b. Scope · Schemas (comma separated catal
 # anchor with $ — a bare `orders` substring-matches `orders_archive`. Parent
 # catalog/schema are never excluded. e.g. `.*_TEMP$, sales\.public\.orders_raw$`.
 dbutils.widgets.text("exclude_regex", "", "2c. Scope · Exclude regex (comma separated)")
+# Table ALLOWLIST: inventory/export only these tables (catalog.schema.table or bare
+# name, comma separated). Blank = every table. The catalogs, schemas, functions and
+# volumes a selected table needs still come along. Same list the import honours.
+dbutils.widgets.text("filter_tables", "", "2e. Scope · Table filter (allowlist)")
 dbutils.widgets.text("output_volume_path", "", "3a. Output · Output volume path")
 dbutils.widgets.text("ops_catalog", "", "3b. Output · Ops catalog")
 dbutils.widgets.text("ops_schema", "", "3c. Output · Ops schema")
@@ -67,8 +71,8 @@ dbutils.widgets.text("run_id", "", "9c. Run · Run id")
 # COMMAND ----------
 
 widgets = {k: dbutils.widgets.get(k) for k in (
-    "connectivity_mode", "catalogs", "schemas", "exclude_regex", "output_volume_path",
-    "ops_catalog", "ops_schema", "source_workspace_url",
+    "connectivity_mode", "catalogs", "schemas", "exclude_regex", "filter_tables",
+    "output_volume_path", "ops_catalog", "ops_schema", "source_workspace_url",
     "source_client_id", "source_client_secret", "source_secret_scope",
     "source_secret_key", "source_warehouse_id", "external_locations_path",
     "preflight_enforce", "parallel_threads",
