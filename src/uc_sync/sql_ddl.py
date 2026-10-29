@@ -483,6 +483,66 @@ def _rows(sql: Any, statement: str) -> list[list[Any]]:
     return [list(r) if not isinstance(r, str) else [r] for r in (out or [])]
 
 
+def _param_ident(name: Any) -> str:
+    raw = str(name)
+    return (
+        raw if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", raw) else quote_identifier(raw)
+    )
+
+
+def _procedure_ddl(
+    sql: Any,
+    cat_q: str,
+    schema: str,
+    full_name: str,
+    specific_name: Any,
+    body: str,
+    security_type: Any,
+    comment: Any,
+) -> str:
+    """``CREATE OR REPLACE PROCEDURE`` from information_schema (routine_type PROCEDURE).
+
+    Unlike a function, every IN / OUT / INOUT parameter is declared with its mode,
+    an IN parameter keeps its ``DEFAULT``, and the body is a scripting block
+    (``AS BEGIN … END``). ``LANGUAGE SQL`` and ``SQL SECURITY`` are mandatory.
+    """
+
+    declarations: list[str] = []
+    if specific_name:
+        param_sql = (
+            "SELECT parameter_name, full_data_type, data_type, parameter_mode, "
+            "parameter_default, ordinal_position "
+            f"FROM {cat_q}.information_schema.parameters "
+            f"WHERE specific_schema = '{escape_literal(schema)}' "
+            f"AND specific_name = '{escape_literal(str(specific_name))}' "
+            "ORDER BY ordinal_position"
+        )
+        try:
+            param_rows = _rows(sql, param_sql)
+        except Exception:  # noqa: BLE001 - parameters read is best-effort
+            param_rows = []
+        for prow in param_rows:
+            prow = (list(prow) + [None] * 6)[:6]
+            pname, pfull, pdata, pmode, pdefault, _ord = prow
+            ptype = str(pfull or pdata or "").strip()
+            if pname is None or str(pname) == "" or not ptype:
+                continue
+            mode = str(pmode or "IN").strip().upper()
+            decl = f"{mode} {_param_ident(pname)} {ptype}"
+            # OUT / INOUT parameters cannot carry a DEFAULT (the engine rejects it).
+            if pdefault is not None and str(pdefault) != "" and mode == "IN":
+                decl += f" DEFAULT {pdefault}"
+            declarations.append(decl)
+    security = str(security_type or "").strip().upper() or "INVOKER"
+    # CREATE OR REPLACE for the same reason as functions: no data, and an
+    # incremental REPLACED body must not be skipped by IF NOT EXISTS.
+    return (
+        f"CREATE OR REPLACE PROCEDURE {quote_full_name(full_name)}"
+        f"({', '.join(declarations)})\nLANGUAGE SQL\nSQL SECURITY {security}"
+        f"{comment_clause(comment)}\nAS {body};"
+    )
+
+
 def function_ddl_from_information_schema(
     sql: Any, full_name: str
 ) -> Optional[str]:
@@ -507,7 +567,8 @@ def function_ddl_from_information_schema(
     cat_q = quote_identifier(catalog)
     routine_sql = (
         "SELECT specific_name, data_type, full_data_type, routine_definition, "
-        "routine_body, external_language, is_deterministic, comment "
+        "routine_body, external_language, is_deterministic, comment, "
+        "routine_type, security_type "
         f"FROM {cat_q}.information_schema.routines "
         f"WHERE routine_schema = '{escape_literal(schema)}' "
         f"AND routine_name = '{escape_literal(name)}' "
@@ -516,11 +577,22 @@ def function_ddl_from_information_schema(
     rows = _rows(sql, routine_sql)
     if not rows:
         return None
-    row = (list(rows[0]) + [None] * 8)[:8]
+    row = (list(rows[0]) + [None] * 10)[:10]
     (specific_name, data_type, full_data_type, routine_definition,
-     routine_body, external_language, _det, comment) = row
+     routine_body, external_language, _det, comment, routine_type,
+     security_type) = row
     return_type = str(full_data_type or data_type or "").strip()
     body = str(routine_definition or "").strip()
+    # A SQL stored procedure is listed in information_schema.routines too, with
+    # data_type 'NULL' and a BEGIN … END scripting body; rebuilding it as
+    # `CREATE FUNCTION … RETURNS NULL RETURN BEGIN …` is a PARSE_SYNTAX_ERROR.
+    if str(routine_type or "").strip().upper() == "PROCEDURE":
+        if not body:
+            return None
+        return _procedure_ddl(
+            sql, cat_q, schema, full_name, specific_name, body, security_type,
+            comment,
+        )
     if not return_type or not body:
         return None
     # A table-valued function's return type is a column list; information_schema reports
@@ -567,13 +639,7 @@ def function_ddl_from_information_schema(
             ptype = str(pfull or pdata or "").strip()
             if not ptype:
                 continue
-            raw = str(pname)
-            pident = (
-                raw
-                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", raw)
-                else quote_identifier(raw)
-            )
-            declarations.append(f"{pident} {ptype}")
+            declarations.append(f"{_param_ident(pname)} {ptype}")
 
     target = quote_full_name(full_name)
     # CREATE OR REPLACE (not IF NOT EXISTS): functions carry no data, so replace is

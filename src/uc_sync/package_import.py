@@ -150,13 +150,31 @@ def _type_rank(object_type: str) -> int:
         return 999
 
 
+_WORD_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_NEXT_WORD_RE = re.compile(r"\s+([A-Za-z_]+)")
+# `END <kw>` closes a scripting construct that never opened a tracked block.
+_END_NON_BLOCK = frozenset({"IF", "LOOP", "WHILE", "FOR", "REPEAT"})
+
+
+def _is_routine_head(head: list[str]) -> bool:
+    """True when a statement's leading words are CREATE [OR REPLACE] PROCEDURE /
+    FUNCTION, or a bare BEGIN script."""
+    if head[:1] == ["BEGIN"]:
+        return True
+    words = head[1:]
+    if words[:2] == ["OR", "REPLACE"]:
+        words = words[2:]
+    return head[:1] == ["CREATE"] and words[:1] in (["PROCEDURE"], ["FUNCTION"])
+
+
 def _split_statements(sql_text: str) -> list[str]:
     """Split a SQL file into executable statements, comment- and quote-aware (bug #11).
 
     A ``;`` is a statement boundary only at the top level — one inside a string
     literal (``'…'`` / ``"…"``, with either ``''`` or backslash ``\\'`` escapes),
     a quoted identifier (```…```), a ``--`` line comment,
-    a ``/* … */`` block comment, or a ``$$ … $$`` block is NOT a boundary. Comments
+    a ``/* … */`` block comment, a ``$$ … $$`` block, or the ``BEGIN … END`` body of a
+    ``CREATE PROCEDURE`` / ``FUNCTION`` (SQL scripting) is NOT a boundary. Comments
     are **preserved** in the emitted statement: the SQL engine understands ``--`` and
     ``/* */`` natively, so a captured view / function keeps its author's comments
     intact. The splitter's only job is to separate multiple statements — it never
@@ -170,6 +188,11 @@ def _split_statements(sql_text: str) -> list[str]:
     i, n = 0, len(text)
     in_single = in_double = in_backtick = False
     in_line_comment = in_block_comment = in_dollar = False
+    # Leading words of the current statement, whether it is a routine (whose body
+    # may be a BEGIN … END block), and the open BEGIN / CASE blocks inside it.
+    head: list[str] = []
+    routine = False
+    blocks: list[str] = []
 
     def _flush(end: str = "") -> None:
         stmt = "".join(buf).strip()
@@ -248,9 +271,38 @@ def _split_statements(sql_text: str) -> list[str]:
             in_backtick = True
             buf.append(ch)
             i += 1
-        elif ch == ";":
+        elif ch == ";" and not (routine and "BEGIN" in blocks):
             _flush(";")
+            head.clear()
+            blocks.clear()
+            routine = False
             i += 1
+        elif (ch.isalpha() or ch == "_") and not (
+            i and (text[i - 1].isalnum() or text[i - 1] == "_")
+        ):
+            word = _WORD_RE.match(text, i).group(0)
+            buf.append(word)
+            i += len(word)
+            upper = word.upper()
+            if len(head) < 4:
+                head.append(upper)
+                routine = _is_routine_head(head)
+            if routine:
+                # A SQL-scripting body (CREATE PROCEDURE … AS BEGIN … END) holds
+                # ';'-terminated statements; they are not boundaries until the
+                # outermost BEGIN closes. CASE is tracked so a CASE … END expression
+                # does not close a BEGIN; END IF / END LOOP / … close neither.
+                if upper in ("BEGIN", "CASE"):
+                    blocks.append(upper)
+                elif upper == "END" and blocks:
+                    nxt = _NEXT_WORD_RE.match(text, i)
+                    closes = nxt.group(1).upper() if nxt else ""
+                    if closes not in _END_NON_BLOCK:
+                        blocks.pop()
+                    if closes in _END_NON_BLOCK or closes == "CASE":
+                        # Consume the closer so `END CASE` does not reopen a CASE.
+                        buf.append(nxt.group(0))
+                        i = nxt.end()
         else:
             buf.append(ch)
             i += 1
