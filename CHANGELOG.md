@@ -21,6 +21,37 @@ Bump rules:
 
 _Nothing yet._
 
+## [1.2.1] - 2026-10-29
+
+Patch release: two import fixes found via a production migration in which a
+failed catalog-level ABAC policy dropped every new table of the run fail-closed.
+Backward compatible — no bundle or state-schema change. Both fixes change what
+02_Export writes, so an affected run must **re-export, then re-import**.
+
+### Fixed
+- **An ABAC policy whose `MATCH COLUMNS` alias contains a non-identifier
+  character failed with `INVALID_IDENTIFIER`, and a catalog- or schema-level
+  policy then dropped every fresh table in its scope fail-closed.**
+  `information_schema.abac_policy_definitions` returns the alias unquoted even
+  when the source policy was created with back-quotes (`… AS
+  mc_sales-fleet-vol-mtd` for a column `sales-fleet-vol-mtd`), and the export
+  replayed it verbatim. `abac_policy_create_statement` now back-quotes the alias
+  after the last top-level `AS` when it is not a plain identifier (an `AS` inside
+  a tag literal is ignored, an already-quoted alias is kept). Row-filter `USING
+  COLUMNS` aliases get the same quoting. The fail-closed drop scope itself is
+  unchanged (by design).
+- **A SQL stored procedure failed with `PARSE_SYNTAX_ERROR … near 'WITH'` /
+  `'DECLARE'`.** Procedures are listed in `information_schema.routines` with
+  `routine_type = 'PROCEDURE'` and `data_type = 'NULL'`, and were rebuilt as
+  `CREATE FUNCTION … RETURNS NULL RETURN BEGIN …`. They are now rebuilt as
+  `CREATE OR REPLACE PROCEDURE … LANGUAGE SQL SQL SECURITY <type> AS BEGIN … END`,
+  keeping every parameter's `IN` / `OUT` / `INOUT` mode and IN-parameter
+  `DEFAULT`s. The import's statement splitter also no longer treats a `;` inside
+  the `BEGIN … END` body of a `CREATE PROCEDURE` / `FUNCTION` as a statement
+  boundary (nested blocks, labels, `END IF` / `END LOOP` / `END CASE` and
+  `CASE … END` expressions handled). Grants and ownership use the `FUNCTION`
+  keyword, which UC accepts for procedures, so they are unchanged.
+
 ## [1.2.0] - 2026-10-16
 
 Minor release: two DDL-replay fixes found via real production migration

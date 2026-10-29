@@ -9,6 +9,7 @@ never remapped, and each ABAC policy keeps its source ``EXCEPT`` list.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Optional
 
 from uc_sync.logging_util import get_log
@@ -292,6 +293,57 @@ def _principal_list(principals: list[str]) -> str:
     return ", ".join(quote_identifier(p) for p in principals if p)
 
 
+_PLAIN_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _policy_alias(alias: str) -> str:
+    """Back-quote a MATCH COLUMNS alias unless it is a plain identifier.
+
+    information_schema returns the alias unquoted, so one derived from a column
+    like ``sales-fleet-vol-mtd`` (``AS mc_sales-fleet-vol-mtd``) fails CREATE POLICY
+    with INVALID_IDENTIFIER. Already back-quoted aliases are kept as is.
+    """
+    alias = alias.strip()
+    if _PLAIN_IDENT.fullmatch(alias) or (
+        len(alias) >= 2 and alias.startswith("`") and alias.endswith("`")
+    ):
+        return alias
+    return quote_identifier(alias)
+
+
+def _quote_match_column_alias(expr: str) -> str:
+    """Quote the alias after the last top-level ``AS`` in a MATCH COLUMNS entry."""
+    depth = 0
+    quote = ""
+    split_at = -1
+    i = 0
+    while i < len(expr):
+        ch = expr[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"`":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif (
+            depth == 0
+            and expr[i:i + 2].upper() == "AS"
+            and i > 0 and expr[i - 1].isspace()
+            and i + 2 < len(expr) and expr[i + 2].isspace()
+        ):
+            split_at = i
+        i += 1
+    if split_at < 0:
+        return expr
+    return f"{expr[:split_at]}AS {_policy_alias(expr[split_at + 2:])}"
+
+
 def abac_policy_create_statement(obj: UCObject) -> Optional[str]:
     """Rebuild ``CREATE POLICY`` verbatim (incl. source EXCEPT) from inventory."""
 
@@ -329,12 +381,18 @@ def abac_policy_create_statement(obj: UCObject) -> Optional[str]:
     if when_condition:
         parts.append(f"WHEN {when_condition}")
     if match_columns:
-        parts.append(f"MATCH COLUMNS {', '.join(match_columns)}")
+        parts.append(
+            "MATCH COLUMNS "
+            + ", ".join(_quote_match_column_alias(m) for m in match_columns)
+        )
     if policy_type == "ROW_FILTER":
         using = str(d.get("using_columns") or "").strip()
         if using:
-            # DESCRIBE renders using-columns as a bare/paren list; normalize.
-            cols = using.strip("()")
+            # DESCRIBE renders using-columns as a bare/paren list; normalize. Each
+            # entry is a MATCH COLUMNS alias, so it needs the same quoting.
+            cols = ", ".join(
+                _policy_alias(c) for c in using.strip("()").split(",") if c.strip()
+            )
             parts.append(f"USING COLUMNS ({cols})")
     else:
         on_column = str(d.get("on_column") or "").strip()

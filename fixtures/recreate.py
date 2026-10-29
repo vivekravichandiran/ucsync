@@ -55,6 +55,7 @@ TC_ORDER = [
     "tc_azure", "tc_storage", "tc_catalog", "tc_target_byo",
     "tc_functions", "tc_core", "tc_governed", "tc_external", "tc_files",
     "tc_metric", "tc_acl", "tc_negative", "tc_reportonly", "tc_parallel",
+    "tc_abac_proc",
 ]
 
 
@@ -211,6 +212,9 @@ def main():
             rc += run_script("63_testcat_files.sh", [], cfg, args.dry_run)
         elif stage == "tc_reportonly":
             rc += run_py_stage("64_testcat_reportonly.py", cfg, args.dry_run)
+        elif stage == "tc_abac_proc":
+            # v1.2.1: catalog ABAC with hyphenated MATCH COLUMNS aliases + SQL procedures
+            rc += run_py_stage("71_testcat_abac_proc.py", cfg, args.dry_run)
         elif stage in SQL_STAGES:
             rc += run_sql_stage(SQL_STAGES[stage], cfg, args.dry_run)
         elif stage in TC_SQL_STAGES:
