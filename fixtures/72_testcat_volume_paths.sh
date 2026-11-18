@@ -17,6 +17,7 @@ ok=0; bad=0
 put () {  # $1 content  $2 dbfs-dest
   local f="$TMP/payload_$RANDOM.txt"
   printf '%s\n' "$1" > "$f"
+  databricks fs mkdir "$(dirname "$2")" -p "$P" >/dev/null 2>&1 || true
   if databricks fs cp "$f" "$2" -p "$P" --overwrite >/dev/null 2>"$TMP/err"; then
     echo "  [ SUCCEEDED] $2"; ok=$((ok+1))
   else

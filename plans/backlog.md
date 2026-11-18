@@ -774,6 +774,38 @@ delta-gate at `:2176` may also not honor a failed policy's status.) A normal inc
 spelling before membership testing (and ensure the failed set + the reconstructed bundle name agree).
 Add a retry-failed-only unit test with a failed ABAC policy in the set. **Status: OPEN.**
 
+#### BUG-QA3: ownership silently NOT migrated when the owner also holds explicit grants (CONFIRMED 2026-11-18, v1.2.2 QA)
+**Code under test:** branch `fix/v1.2.2-dryrun-state-volume-copy` @ `04bb935`. **Run:** job `778661300035503`
+(End-to-end Live, run-as target SPN `e3341381…`), run `233040313561268`, testcat bed → BYO target
+`ai27_ucsync_testcatalog_tgt` (catalog_mapping_json rename).
+**Repro:** source view `core_tables.emp_summary` is OWNED by group `wsmig_acc_group_3`, and the same group
+also holds an explicit `SELECT` on it (fixture `65_testcat_acl.sql`). Run a full import.
+**Result (bug):** on target `emp_summary` is owned by the **run-as SPN** (`e3341381…`), not
+`wsmig_acc_group_3` (target `information_schema.tables.table_owner`). The exported grants file
+`migrated/grants/VIEW_…__emp_summary.sql` contains only `GRANT SELECT … TO wsmig_acc_group_3` — **no
+`ALTER VIEW … OWNER TO`** — while a control view with a plain owner (`emp_dynamic`) does get its
+`OWNER TO`. The report is silent: the Grants sheet has no OWNER row for the object (just the SELECT row,
+`APPLIED`), so nothing reads "NOT APPLIED". All 15 other ownership comparisons matched (176 tables /
+14 schemas / 15 routines / 3 volumes owned as on source).
+**Root cause (confirmed in code):** `inventory.py:628` adds the synthetic `{"privileges": ["OWNER"]}` grant
+entry ONLY `if owner and not any(item["principal"] == owner for item in grants)` — when the owner already
+has an explicit grant row, no OWNER entry is added, so `sql_ddl.grant_statements_for_object` never emits
+`ALTER … OWNER TO`. Ownership is lost for every securable whose owner also holds explicit privileges — a
+common shape (owner groups routinely also hold SELECT/MODIFY grants). Pre-existing (not introduced by
+v1.2.2). **Fix direction:** always emit the owner (append `OWNER` to the owner's existing privilege list,
+or a separate OWNER entry) so the deferred ownership phase transfers it; add a unit test with an owner
+that also holds a grant. **Status: OPEN.**
+
+#### BUG-QA4: Grants sheet OWNER rows blank for inventory-only report-only objects (CONFIRMED 2026-11-18, v1.2.2 QA, LOW)
+**Run:** same as BUG-QA3. **Result:** 3 OWNER rows have an **empty** `import_status`:
+`advanced.st_events` (STREAMING_TABLE), `advanced.employees_drift_metrics` and
+`advanced.employees_profile_metrics` (MONITOR_METRIC_TABLE). The materialized view in the same schema
+(`mv_emp_by_dept`) correctly reads `Skipped (object not migrated)`. **Cause:** these types produce no
+import result (no DDL file — inventory-only), so `_grant_gov_status` finds no index entry and returns
+`""`; the MV has a REPORT_ONLY import result. Same blank existed before v1.2.2. **Fix direction:** when
+there is no import result and the inventory row is report-only (`in_scope_for_migration=false`), render
+`Skipped (object not migrated)`. Report-fidelity only. **Status: OPEN.**
+
 ---
 
 ## Implementation sequencing (proposed 2026-09-24)
