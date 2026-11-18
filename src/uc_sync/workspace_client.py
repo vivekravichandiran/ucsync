@@ -155,7 +155,10 @@ class WorkspaceClient:
         """Yield entries of a UC Volume directory via the Files API. Each entry has
         ``path``, ``is_directory``, ``file_size``, ``last_modified``. Pages via
         ``page_token``. A not-found directory yields nothing."""
-        base = "/api/2.0/fs/directories" + directory_path
+        # Percent-encode the path exactly like download_file/upload_file do: a raw
+        # space / '#' / '%' / '?' / non-ASCII character in a folder name otherwise
+        # yields an invalid URL ("URL can't contain control characters") — v1.2.2.
+        base = "/api/2.0/fs/directories" + urllib.parse.quote(directory_path)
         page_token: Optional[str] = None
         while True:
             try:

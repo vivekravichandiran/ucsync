@@ -105,6 +105,12 @@ def _import_index(
             # A non-destructive skip (column drop / type change) riding alongside an
             # applied change — appended to the "Updated" label so it's never silent.
             "caveat": str(r.get("caveat") or ""),
+            # Grants-sheet fidelity (v1.2.2): the per-facet grant outcome + why it was
+            # skipped, and the deferred ownership-transfer outcome.
+            "grants_status": str(r.get("grants_status") or ""),
+            "grants_note": str(r.get("grants_note") or ""),
+            "owner_status": str(r.get("owner_status") or ""),
+            "owner_note": str(r.get("owner_note") or ""),
         }
         for key in (r.get("target_full_name"), r.get("full_name")):
             key = str(key or "")
@@ -202,6 +208,12 @@ def _render_export_status(entry: Optional[dict[str, str]]) -> str:
     if status == "SUCCESS":
         return "EXPORTED"
     return status or ""
+
+
+def _norm_principal(value: Any) -> str:
+    """Principal compare key: case-insensitive, backticks/whitespace stripped (the
+    same normalisation the engine uses to exclude the run-as SPN as a grantee)."""
+    return str(value or "").strip().strip("`").strip().lower()
 
 
 def _render_import_status(
@@ -482,6 +494,7 @@ def build_report(
     run_id: str = "",
     workspace_url: str = "",
     retry_failed_only: bool = False,
+    run_as_spn: str = "",
 ) -> str:
     """Write the migration workbook to ``out_path`` (.xlsx). Returns the path.
 
@@ -557,6 +570,10 @@ def build_report(
     # Summary. GRANT_ADDED / changed-object rows already read "Updated" per-type.
     source_absent_by_type: dict[str, list[dict[str, Any]]] = {}
     grant_removed_rows: list[dict[str, Any]] = []
+    # object (source full name) -> principals whose grant was NEW / CHANGED this run
+    # (delta GRANT_ADDED). On an incremental re-apply every other grant of the object
+    # was already in place → the Grants sheet reads it as a NO-OP, not APPLIED.
+    grants_added_by_object: dict[str, set[str]] = {}
     unchanged_count: Optional[int] = None
     for r in (delta_rows or []):
         act = str(r.get("action") or "")
@@ -566,6 +583,13 @@ def build_report(
             ).append(r)
         elif act == "GRANT_REMOVED":
             grant_removed_rows.append(r)
+        elif act == "GRANT_ADDED":
+            _principal = str(r.get("principal") or "")
+            if not _principal:  # older delta rows: detail = "<principal>: <privs>"
+                _principal = str(r.get("detail") or "").rsplit(": ", 1)[0]
+            grants_added_by_object.setdefault(
+                str(r.get("object") or ""), set()
+            ).add(_norm_principal(_principal))
         elif act == "UNCHANGED_COUNT":
             try:
                 unchanged_count = int(r.get("detail") or 0)
@@ -914,14 +938,32 @@ def build_report(
             return [f"FAILED{': ' + msg[:200] if msg else ''}"]
         return ["APPLIED"]
 
-    def _grant_gov_status(*names: str) -> list[str]:
-        """Grants sheet status ← APPLIED whenever the securable exists (grants run
-        inline even when its create was skipped/disabled); FAILED only if the
-        securable's own create failed (plan P2-C). Never the create-skip label. In a
-        dry run nothing is applied, so it reads the same DRY RUN message as every
-        other sheet."""
+    _run_as = _norm_principal(run_as_spn)
+    # Delta actions where the object pre-existed and only some facets changed: its
+    # grants were re-issued, but any grant not in this run's GRANT_ADDED set was
+    # already in place (a no-op). CREATED_NEW (new object, full run, or a re-attempt)
+    # applies every grant.
+    _REAPPLY_DELTAS = {
+        "CHANGED", "REPLACED", "GOVERNANCE_UPDATED", "GRANTS_UPDATED", "COLUMN_ADDED",
+    }
+
+    def _grant_gov_status(
+        o: dict[str, Any], grant: dict[str, Any]
+    ) -> list[str]:
+        """Grants sheet status for ONE grant row (v1.2.2 — never a blanket APPLIED).
+
+        APPLIED                    the GRANT / ownership transfer ran this run
+        NO-OP (unchanged …)        incremental re-apply of an already-present grant
+        SKIPPED (unchanged)        the whole object was skipped (zero writes)
+        SKIPPED (<reason>)         apply_grants off / metastore-scoped / run-as
+                                   principal / object not created / not migrated
+        NOT APPLIED (owner kept …) the deferred OWNER TO failed → run principal owns it
+        FAILED …                   the object's create failed, or a GRANT raised
+        DRY RUN / Rolled back      unchanged from before
+        """
         if stage != "IMPORT":
             return []
+        names = (o["full_name"], str(o.get("target_full_name") or ""))
         if _object_rolled_back(*names):
             return [_ROLLED_BACK]
         entry = next((idx.get(n) for n in names if n and idx.get(n)), None)
@@ -932,6 +974,46 @@ def build_report(
             return ["DRY RUN (validated, not applied)"]
         if status == "FAILURE":
             return ["FAILED (object not created)"]
+        if action in ("REPORT_ONLY", "SKIP_REPORT_ONLY"):
+            return [_NOT_MIGRATED]
+        if status == "MANUAL_ACTION_REQUIRED" or action == "MANUAL":
+            return ["SKIPPED (object not created — manual step)"]
+        if action == "SKIP_FILTERED":
+            return ["SKIPPED (not selected)"]
+        if status == "UNCHANGED":
+            return ["SKIPPED (unchanged)"]
+        grants_status = entry.get("grants_status") or ""
+        if grants_status == "skipped":
+            return [f"SKIPPED ({entry.get('grants_note') or 'not replayed'})"]
+        principal = _norm_principal(grant.get("principal"))
+        privileges = [str(p).upper() for p in (grant.get("privileges") or [])]
+        if privileges == ["OWNER"]:
+            owner_status = entry.get("owner_status") or ""
+            if owner_status == "transferred":
+                return ["APPLIED (ownership transferred)"]
+            if owner_status == "kept":
+                note = entry.get("owner_note") or ""
+                return [
+                    "NOT APPLIED (owner kept as run principal"
+                    + (f": {note[:150]}" if note else "") + ")"
+                ]
+            if _run_as and principal == _run_as:
+                return ["NO-OP (run-as principal already owns it)"]
+            return ["— (no ownership transfer this run)"]
+        if _run_as and principal == _run_as:
+            return ["SKIPPED (run-as principal — never re-granted)"]
+        if grants_status == "failed":
+            msg = str(entry.get("message") or "")
+            warn = msg.split("grant warning:", 1)[-1].strip() if "grant warning:" in msg else ""
+            return [
+                "FAILED (a GRANT on this object raised"
+                + (f": {warn[:150]}" if warn else "") + ")"
+            ]
+        if (
+            entry.get("delta_action") in _REAPPLY_DELTAS
+            and principal not in grants_added_by_object.get(o["full_name"], set())
+        ):
+            return ["NO-OP (unchanged since last run)"]
         return ["APPLIED"]
 
     # Tags Applied (object + column grain) — the governed tags this run SET on each
@@ -1062,13 +1144,12 @@ def build_report(
         ["object", "level", "principal", "type", "privileges"] + _gov_status_header(),
     )
     for o in objects:
-        st = _grant_gov_status(o["full_name"], str(o.get("target_full_name") or ""))
         for g in o.get("grants") or []:
             grants.append([
                 o["full_name"], o["object_type"], g.get("principal"),
                 g.get("principal_type"),
                 ", ".join(g.get("privileges") or []),
-            ] + st)
+            ] + _grant_gov_status(o, g))
     # A grant removed on source is reported, NEVER revoked (confirmed decision) — shown
     # here (its former home was the now-removed Delta sheet) so the change stays visible
     # on the object's own governance sheet. Import stage only (incremental delta).
