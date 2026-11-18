@@ -43,6 +43,8 @@ TC_SQL_STAGES = {
     # Parallelism stress bed (backlog item 3): 120 plain tables across 3 schemas,
     # 5-10 rows each — exercises the export SHOW CREATE + import within-level pools.
     "tc_parallel":  ["69_testcat_parallel.sql"],
+    # v1.2.2: volume with URL-hostile folder/file names (files seeded by the .sh half)
+    "tc_volume_paths": ["72_testcat_volume_paths.sql"],
     # NOT in TC_ORDER — apply only AFTER a baseline migration, then re-migrate
     "tc_incremental": ["68_testcat_incremental.sql"],
 }
@@ -55,7 +57,7 @@ TC_ORDER = [
     "tc_azure", "tc_storage", "tc_catalog", "tc_target_byo",
     "tc_functions", "tc_core", "tc_governed", "tc_external", "tc_files",
     "tc_metric", "tc_acl", "tc_negative", "tc_reportonly", "tc_parallel",
-    "tc_abac_proc",
+    "tc_bugfix", "tc_abac_proc", "tc_volume_paths",
 ]
 
 
@@ -212,6 +214,13 @@ def main():
             rc += run_script("63_testcat_files.sh", [], cfg, args.dry_run)
         elif stage == "tc_reportonly":
             rc += run_py_stage("64_testcat_reportonly.py", cfg, args.dry_run)
+        elif stage == "tc_bugfix":
+            # v1.2.0: customer-shaped splitter / view TBLPROPERTIES / '__' name beds
+            # (gold/silver/bronze/stage_ schemas — tc_abac_proc builds on them)
+            rc += run_py_stage("70_testcat_bugfix.py", cfg, args.dry_run)
+        elif stage == "tc_volume_paths":
+            rc += run_sql_stage(TC_SQL_STAGES["tc_volume_paths"], cfg, args.dry_run)
+            rc += run_script("72_testcat_volume_paths.sh", [], cfg, args.dry_run)
         elif stage == "tc_abac_proc":
             # v1.2.1: catalog ABAC with hyphenated MATCH COLUMNS aliases + SQL procedures
             rc += run_py_stage("71_testcat_abac_proc.py", cfg, args.dry_run)
