@@ -40,6 +40,9 @@ and the manual-prerequisites table there.
 
 > ⚠️ **Do the dry run first, always.** Run the End-to-end **Dry Run** job (or `03_Import` with
 > `dry_run=true`) — a full rehearsal that writes nothing — and read the reports before going live.
+> It reads `uc_sync_state` (so it previews the real incremental plan) but never writes it, and never
+> copies volume files. ⚠️ **On ≤ 1.2.1 a dry run *did* write `uc_sync_state`**, so a live run that
+> followed it skipped almost everything as `Skipped (unchanged)`; see the troubleshooting row below.
 
 > 🌐 **Restricted-network workspaces:** run on an all-purpose (classic) USER_ISOLATION cluster in the
 > workspace's own network, and set `http_proxy` / `https_proxy` / `no_proxy` at install so Databricks
@@ -201,7 +204,7 @@ Everything lands in the bundle at `<output_volume_path>/run_<run_id>/`:
 | Status | Meaning |
 |--------|---------|
 | `created` / `updated` / `adopted` | Succeeded (new / changed / matched an existing object) |
-| `skipped` | Unchanged since last run (fingerprint match) — incl. `Skipped (create disabled)` when a `create_*` toggle is off |
+| `skipped` | Unchanged since last run (fingerprint match) — incl. `Skipped (create disabled)` when a `create_*` toggle is off. Turning that toggle **on** later re-attempts the object (created if missing, adopted if present) |
 | `deleted_in_source` | Gone from source — **reported only**, never dropped on target |
 | `manual` | Needs a human step (governed-tag def, non-MI credential secret, connection/share, …) |
 | `created_with_warning` | Created but known-degraded — verify before use |
@@ -230,6 +233,8 @@ cause, then re-run; the re-run is additive and idempotent, so only outstanding u
 
 | Symptom | Fix |
 |---------|-----|
+| **Live run after a dry run (on ≤ 1.2.1) shows almost everything `Skipped (unchanged)`, nothing `Created`** | That dry run seeded `uc_sync_state`. Back up and empty it (`CREATE TABLE <ops>.uc_sync_state_bak AS SELECT * FROM <ops>.uc_sync_state; TRUNCATE TABLE <ops>.uc_sync_state;`), then re-run **End-to-end Live**. That run is a full run: existing objects are adopted, missing ones created. Fixed in 1.2.2. |
+| **`volume_copy: skipped: RuntimeError("URL can't contain control characters …")`** | ≤ 1.2.1 didn't URL-encode a volume folder name containing a space / `#` / `%` / `?` / non-ASCII, and the error stopped the copy for every volume. Upgrade to 1.2.2 and re-run the import with `copy_volume_data=true`; only new or changed files are copied. |
 | **`GOVERNANCE_PREREQ_MISSING`** (tags/ABAC) | A governed-tag **definition** couldn't be recreated (Phase 0 needs `apply_tags=true` + the source definitions captured + the target SP able to `CREATE GOVERNED TAG`) or a referenced mask/filter **function** is missing. Define the tag on the target account (workspace-migration utility); ensure functions imported (`create_functions=true`). |
 | **ABAC / Policy-Matched sheets empty** | Set `source_warehouse_id` (classic Spark can't read `abac_policy_definitions`). |
 | **Tags *and* ABAC empty though a warehouse is set, grants fine** | Source SP is missing **`system`** access — governed tags/ABAC are read from `system.information_schema`. Grant it (see [Permissions › `system` access](PERMISSIONS_GUIDE.md#-system-access--required-to-read-tags--abac)); then re-apply governance only (below). |

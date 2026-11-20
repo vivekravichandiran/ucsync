@@ -35,9 +35,10 @@ from uc_sync.auth import local_workspace_auth, direct_workspace_auth
 from uc_sync.workspace_client import WorkspaceClient
 from uc_sync.volume_copy import (
     VolumeDataCopier, WarehouseVolumeCopyControl, InMemoryVolumeCopyControl, copy_summary,
+    copy_all_volumes,
 )
 from uc_sync.audit import AuditService, stage_audit_row
-from uc_sync.sync_state import SyncStateService, state_row_from_import
+from uc_sync.sync_state import SyncStateService, state_rows_for_import
 from uc_sync.logging_util import (
     configure_logging, get_log, set_context, register_secret,
 )
@@ -261,6 +262,7 @@ log.info("delta: run mode = %s%s", _mode,
 #     last-sync record that a future incremental run would diff against.
 # Best-effort: audit/state logging must never fail the migration itself.
 outstanding_rows = None  # cumulative failures from state (Part E) → report Outstanding sheet
+state_write_status = "not configured"
 try:
     if cfg.audit_table or cfg.state_table:
         result_dicts = [r.to_dict() for r in results]
@@ -275,36 +277,29 @@ try:
             )
             log.info("audit: wrote %d IMPORT rows to %s", len(result_dicts), cfg.audit_table)
         if cfg.state_table:
-            batch_id = str(uuid.uuid4())
-            # uc_sync_state = ONE row per source OBJECT (the incremental baseline).
-            # Governed-tag ALTER ops are attributes of an object already counted (its
-            # table/catalog/schema), not objects — including them would collide on the
-            # per-object MERGE key and clobber the object's fingerprints. ABAC policies
-            # ARE objects (own row). So exclude only the tag-op results (policies_path
-            # set AND object_type != ABAC_POLICY).
-            # COLUMN results (a schema-evolution ADD COLUMN) are attributes of a table
-            # already counted (its own row + ddl_hash), not standalone objects — writing
-            # them would leave orphan rows that read as "deleted in source" on the next
-            # run (columns are never inventoried as objects). Exclude them, same as tag
-            # ops.
-            state_dicts = [
-                rd for rd in result_dicts
-                if rd.get("object_type") != "COLUMN"
-                and not (rd.get("policies_path") and rd.get("object_type") != "ABAC_POLICY")
-            ]
+            # uc_sync_state = ONE row per source OBJECT (the incremental baseline); the
+            # tag-op / COLUMN exclusions live in state_rows_for_import. A DRY RUN never
+            # writes state (v1.2.2): its rows would read as clean + unchanged and make
+            # the next LIVE run skip every object. The dry run still READS the baseline
+            # (above) so its preview reflects the real incremental plan.
             _state_svc = SyncStateService(spark, cfg.state_table)
-            _state_svc.upsert(
-                state_row_from_import(
-                    batch_id=batch_id, run_id=run_id, result=rd,
-                    ran_by=ran_by, utility_version=__version__,
-                    connectivity_mode=cfg.connectivity_mode,
-                )
-                for rd in state_dicts
+            _state_rows = state_rows_for_import(
+                result_dicts, dry_run=cfg.dry_run,
+                batch_id=str(uuid.uuid4()), run_id=run_id, ran_by=ran_by,
+                utility_version=__version__, connectivity_mode=cfg.connectivity_mode,
             )
-            log.info("state: upserted %d object rows into %s", len(state_dicts), cfg.state_table)
+            if cfg.dry_run:
+                state_write_status = "not written (dry run)"
+                log.info("state: dry run — %s left unchanged", cfg.state_table)
+            else:
+                _state_svc.upsert(_state_rows)
+                state_write_status = f"upserted {len(_state_rows)}"
+                log.info("state: upserted %d object rows into %s",
+                         len(_state_rows), cfg.state_table)
             # Outstanding (Part E): cumulative still-broken objects from state across ALL
             # runs, read AFTER this run's upsert so the report's Outstanding sheet is the
-            # authoritative "everything still broken" view. Best-effort.
+            # authoritative "everything still broken" view. Best-effort (read-only, so
+            # a dry run reads it too).
             try:
                 outstanding_rows = _state_svc.outstanding_rows()
                 log.info("state: %d outstanding (cumulative failures)", len(outstanding_rows))
@@ -312,6 +307,8 @@ try:
                 log.warning("outstanding read skipped: %r", _ox)
 except Exception as _exc:  # noqa: BLE001 - ops tables are best-effort
     log.warning("ops audit/state write skipped: %r", _exc, exc_info=True)
+    if not state_write_status.startswith("upserted"):
+        state_write_status = f"skipped: {_exc!r}"[:300]
 
 # Volume data copy (FEAT-4): copy managed + external volume FILES source→target via
 # the Files API — the bundle carries the volume securables, not their bytes. Toggle
@@ -320,7 +317,12 @@ except Exception as _exc:  # noqa: BLE001 - ops tables are best-effort
 # recorded, never fails the governance migration itself.
 vol_copy_status = "disabled"
 volume_copy_report_rows = None  # FEAT-4 copy rows for the report (bug #17); None → sheet omitted
-if cfg.copy_volume_data:
+if cfg.copy_volume_data and cfg.dry_run:
+    # A dry run never moves bytes (v1.2.2): the copy used to run (and upload files)
+    # even with dry_run=true. Say so in the exit payload instead of silently skipping.
+    vol_copy_status = "skipped: dry run (no files copied)"
+    log.info("volume-copy %s", vol_copy_status)
+elif cfg.copy_volume_data:
     vol_copy_status = "started"
     try:
         with open(f"{migrated}/inventory/objects.json") as _fh:
@@ -364,27 +366,23 @@ if cfg.copy_volume_data:
                 log.warning("volume-copy %s", _control_kind)
                 _control = InMemoryVolumeCopyControl()
             _copier = VolumeDataCopier(_src_client, wc, control=_control)
+            # Per-volume + per-directory isolation lives in copy_all_volumes /
+            # copy_volume (v1.2.2), so one bad path is a FAILED row, never an abort.
+            # The control table is flushed in `finally` so files already copied are
+            # recorded even if something unexpected still escapes the loop.
             _all_copy = []
-            for _v in _volumes:
-                _parts = str(_v.get("full_name") or "").split(".")
-                if len(_parts) != 3:
-                    continue
-                _cat, _sch, _name = _parts
-                _tgt_cat = cfg.catalog_mapping.get(_cat, _cat)
-                _all_copy.extend(_copier.copy_volume(
-                    _v["full_name"],
-                    f"/Volumes/{_cat}/{_sch}/{_name}",
-                    f"/Volumes/{_tgt_cat}/{_sch}/{_name}",
-                ))
-            volume_copy_report_rows = [_r.to_dict() for _r in _all_copy]
             _flush_status = "n/a"
-            if isinstance(_control, WarehouseVolumeCopyControl):
-                try:
-                    _control.flush()
-                    _flush_status = "flushed"
-                except Exception as _fx:  # noqa: BLE001
-                    _flush_status = f"flush FAILED: {_fx!r}"
-                    log.error("volume-copy %s", _flush_status)
+            try:
+                _all_copy = copy_all_volumes(_copier, _volumes, cfg.catalog_mapping)
+            finally:
+                volume_copy_report_rows = [_r.to_dict() for _r in _all_copy]
+                if isinstance(_control, WarehouseVolumeCopyControl):
+                    try:
+                        _control.flush()
+                        _flush_status = "flushed"
+                    except Exception as _fx:  # noqa: BLE001
+                        _flush_status = f"flush FAILED: {_fx!r}"
+                        log.error("volume-copy %s", _flush_status)
             vol_copy_status = (
                 f"control={_control_kind}; {copy_summary(_all_copy)}; flush={_flush_status}"
             )
@@ -432,6 +430,7 @@ try:
         outstanding=outstanding_rows,
         workspace_url=getattr(wc.auth, "host", ""),
         retry_failed_only=cfg.retry_failed_only,
+        run_as_spn=_run_as_spn,
     )
     log.info("report: %s", report_path)
 except Exception as _exc:  # noqa: BLE001
@@ -464,7 +463,8 @@ for r in results:
 gov_failed = governance_failures(results)
 exit_payload = {"run_id": run_id, "by_status": summary,
                 "governance_failed": len(gov_failed),
-                "volume_copy": vol_copy_status}
+                "volume_copy": vol_copy_status,
+                "state": state_write_status}
 if gov_failed:
     log.error("%d GOVERNANCE FAILURE(S) — job will exit non-zero:", len(gov_failed))
     for r in gov_failed:

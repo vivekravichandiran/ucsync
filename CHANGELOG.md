@@ -21,6 +21,59 @@ Bump rules:
 
 _Nothing yet._
 
+## [1.2.2] - 2026-11-17
+
+Patch release: four import fixes and a Grants-sheet rework, all found in
+production migrations. Backward compatible: no bundle or state-schema change and
+no re-export needed, but see **Upgrade note** for runs made on ≤ 1.2.1.
+
+### Fixed
+- **A dry run wrote `uc_sync_state`, so the next live run skipped every object as
+  "Skipped (unchanged)".** The import saved the dry run's rows (real source
+  fingerprints, recorded as `created`), so the live run thought everything was
+  already on target and unchanged: no DDL, no governance, no grants. A dry run now
+  leaves `uc_sync_state` untouched. It still *reads* the baseline, so its preview
+  shows the real incremental plan. The exit payload reports
+  `"state": "not written (dry run)"`.
+- **`copy_volume_data=true` copied files during a dry run.** The volume copy now
+  only runs on a live run (`volume_copy: "skipped: dry run (no files copied)"`).
+- **Volume copy stopped with `URL can't contain control characters` on a folder
+  name with a space.** The Files API directory listing didn't URL-encode the path
+  (download and upload did), so a space, `#`, `%`, `?` or non-ASCII character in
+  a folder name broke it, and the error stopped the copy for **every** volume.
+  The path is now encoded. A directory that can't be listed, or a volume that
+  errors, is now one `FAILED` row on the **Volume Data Copy** sheet and the rest
+  keep copying. The `uc_sync_volume_files` control table is always flushed, so
+  files already copied are recorded.
+- **Turning a `create_*` toggle on after a run with it off had no effect.** An
+  object recorded `skipped_create_disabled` counted as cleanly applied, so with
+  an unchanged source it stayed skipped. For example, schemas were never created
+  and every table then failed `SCHEMA_NOT_FOUND`. It is now re-attempted when its
+  create toggle is on for this run: created if missing, adopted if present. The
+  existing-catalog check now runs before the delta plan, so a toggle it forces
+  off (BYO catalog / storage credential / external location) doesn't trigger
+  re-attempts on every run.
+
+### Changed
+- **The Grants sheet reports an outcome per grant instead of always `APPLIED`.**
+  `APPLIED` · `APPLIED (ownership transferred)` · `NO-OP (unchanged since last
+  run)` (an incremental re-apply of a grant already in place) · `SKIPPED
+  (unchanged)` (the whole object was skipped) · `SKIPPED (apply_grants off |
+  metastore-scoped, out of scope | run-as principal — never re-granted | object
+  not created — manual step | not selected)` · `NOT APPLIED (owner kept as run
+  principal: <reason>)` (the deferred `OWNER TO` failed) · `FAILED (a GRANT on
+  this object raised: <reason>)` · `FAILED (object not created)`. Dry-run and
+  rolled-back rows are unchanged. To support this, import results carry
+  `grants_note`, `owner_status` and `owner_note`, and `grants_status` is set
+  on every grants path (including the re-run "already exists" path).
+
+### Upgrade note
+- If an **End-to-end Dry Run on ≤ 1.2.1** ran before a live run, the live run
+  probably skipped most objects. Back up and empty `uc_sync_state`
+  (`CREATE TABLE … AS SELECT` then `TRUNCATE TABLE`), then re-run **End-to-end
+  Live**. That run is a full run: existing objects are adopted, missing ones are
+  created, and grants, tags and policies are applied. Leave `uc_sync_audit` as is.
+
 ## [1.2.1] - 2026-10-29
 
 Patch release: two import fixes found via a production migration in which a

@@ -125,7 +125,7 @@ base-path swap → catalog root / skip.**
 | **`catalog_mapping_json`** | JSON or blank | Land a source catalog under a **different target name**, e.g. `{"src":"tgt"}` (identity `{"x":"x"}` is fine). Rewrites the catalog name in every replayed statement (DDL, grants, tags, ABAC, masks); hyphenated names + prefix look-alikes are safe. Does **not** affect storage paths. **If the mapped target catalog already exists, import auto-switches to existing-catalog mode** (skips SC/EL/catalog creation, replicates schemas + objects). |
 | **`filter_tables`** | csv or blank | Import only a subset of **tables** (`catalog.schema.table` — source **or** target catalog name — or bare table). Blank = all. The catalogs/schemas/functions/volumes a selected table needs still come along. Set the same list at `01_Inventory` (or once in `00_Install_Jobs`, which feeds both) so the rest is never read on the source either. |
 | **`run_as_spn`** | SP appId or blank | Run the import as a target **service principal** so migrated securables are owned by it. Blank = run as the installing user. |
-| **`copy_volume_data`** | bool (default `false`) | Copy volume **file bytes** (not in the bundle) from source to target. Needs the source-connection widgets to read the source. Off = volume *definitions* migrate, contents don't. Recorded in `uc_sync_volume_files`. |
+| **`copy_volume_data`** | bool (default `false`) | Copy volume **file bytes** (not in the bundle) from source to target. Needs the source-connection widgets to read the source. Off = volume *definitions* migrate, contents don't. Recorded in `uc_sync_volume_files`. **Never runs on a dry run.** A folder that can't be listed, or a volume that errors, is one `FAILED` row on the **Volume Data Copy** sheet; the other volumes still copy. Target path = `/Volumes/<catalog_mapping(cat)>/<schema>/<volume>`. |
 | **`migrate_materialized_views`** | bool (default `false`) | Streaming tables & materialized views are DLT/SDP-managed and **report-only** by default. `true` migrates materialized views; streaming tables are always report-only. |
 | **`retry_failed_only`** | bool (default `false`) | Replay **only** the prior run's failed objects (read from `uc_sync_state`'s per-facet status) plus their required parents, skipping everything else regardless of deltas. Same `run_id`/bundle as a normal import — no re-export. Requires a prior run that seeded `uc_sync_state`. Off = normal incremental behavior. |
 
@@ -303,7 +303,7 @@ ops_schema               = <source ops schema>
 connectivity_mode        = airgap
 run_id                   = <source bundle id>            # the run_<id> from the source run
 output_volume_path       = /Volumes/<tgt>/ops/mig/out    # target path holding the moved run_<id>/
-ops_catalog              = <target ops catalog>          # required (dry_run writes state too)
+ops_catalog              = <target ops catalog>          # required (a dry run reads state, never writes it)
 ops_schema               = <target ops schema>
 import_warehouse_id      = <target SQL warehouse>        # REQUIRED for import
 external_locations_path  = /Volumes/<tgt>/ops/mig/external_locations.csv   # 3-col → create SC+EL

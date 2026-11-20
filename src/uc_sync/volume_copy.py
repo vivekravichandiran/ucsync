@@ -268,23 +268,44 @@ class VolumeDataCopier:
     ) -> list[VolumeCopyResult]:
         """Recursively copy every file under ``source_root`` to the same relative
         path under ``target_root``. ``volume`` labels the control-store rows and the
-        report. Directory structure is recreated implicitly by the file paths."""
+        report. Directory structure is recreated implicitly by the file paths.
+
+        A directory that cannot be LISTED (permission, transient error, a name the
+        API rejects) is reported as one FAILED row for that directory and the walk
+        continues with its siblings — one bad folder never aborts the volume (v1.2.2:
+        an unencoded space in a folder name used to abort the whole copy)."""
         source_root = source_root.rstrip("/")
         target_root = target_root.rstrip("/")
         results: list[VolumeCopyResult] = []
-        for entry in self._walk(source_root):
-            rel = entry["path"][len(source_root):].lstrip("/")
+        for entry, list_error in self._walk(source_root):
+            rel = str(entry.get("path") or "")[len(source_root):].lstrip("/")
             target_path = f"{target_root}/{rel}" if rel else target_root
+            if list_error is not None:
+                msg = f"could not list directory: {list_error}"[:300]
+                log.warning("volume-copy %s: %s", entry.get("path"), msg)
+                results.append(VolumeCopyResult(
+                    volume, str(entry.get("path") or ""), target_path, FAILED, 0, msg,
+                ))
+                continue
             results.append(self._copy_one(volume, entry, target_path))
         return results
 
-    def _walk(self, directory: str) -> Iterator[dict[str, Any]]:
-        """Depth-first yield of FILE entries (not directories) under ``directory``."""
-        for item in self.source_client.list_directory(directory):
+    def _walk(
+        self, directory: str
+    ) -> Iterator[tuple[dict[str, Any], Optional[str]]]:
+        """Depth-first yield of ``(file_entry, None)`` for every FILE under
+        ``directory``, or ``({"path": dir}, error)`` for a directory whose listing
+        failed (its subtree is skipped; siblings continue)."""
+        try:
+            items = list(self.source_client.list_directory(directory))
+        except Exception as exc:  # noqa: BLE001 - reported per directory, walk continues
+            yield {"path": directory}, str(exc)
+            return
+        for item in items:
             if item.get("is_directory"):
                 yield from self._walk(str(item.get("path") or "").rstrip("/"))
             else:
-                yield item
+                yield item, None
 
     def _copy_one(
         self, volume: str, entry: dict[str, Any], target_path: str
@@ -327,3 +348,39 @@ def copy_summary(results: list[VolumeCopyResult]) -> dict[str, int]:
     for r in results:
         summary[r.status] = summary.get(r.status, 0) + 1
     return summary
+
+
+def copy_all_volumes(
+    copier: VolumeDataCopier,
+    inventory_rows: list[dict[str, Any]],
+    catalog_mapping: Optional[dict[str, str]] = None,
+) -> list[VolumeCopyResult]:
+    """Copy the files of every VOLUME / EXTERNAL_VOLUME in the bundle inventory.
+
+    Source path = ``/Volumes/<src_cat>/<schema>/<volume>`` (the inventory keeps the
+    SOURCE name); target path = the same with the catalog renamed through
+    ``catalog_mapping`` (schema + volume names are never mapped — they match the
+    object the import created). Each volume is isolated: an unexpected error on one
+    is recorded as a FAILED row for that volume and the rest still copy.
+    """
+    mapping = dict(catalog_mapping or {})
+    results: list[VolumeCopyResult] = []
+    for row in inventory_rows:
+        if str(row.get("object_type")) not in ("VOLUME", "EXTERNAL_VOLUME"):
+            continue
+        full_name = str(row.get("full_name") or "")
+        parts = full_name.split(".")
+        if len(parts) != 3:
+            continue
+        cat, sch, name = parts
+        source_root = f"/Volumes/{cat}/{sch}/{name}"
+        target_root = f"/Volumes/{mapping.get(cat, cat)}/{sch}/{name}"
+        try:
+            results.extend(copier.copy_volume(full_name, source_root, target_root))
+        except Exception as exc:  # noqa: BLE001 - one volume never aborts the others
+            msg = f"volume copy aborted: {exc}"[:300]
+            log.warning("volume-copy %s: %s", full_name, msg)
+            results.append(VolumeCopyResult(
+                full_name, source_root, target_root, FAILED, 0, msg,
+            ))
+    return results

@@ -299,6 +299,8 @@ stored in `uc_sync_state.last_action` and rendered verbatim in the report, so th
 | **Per-object-type sheets** | Catalogs · Schemas · Volumes · Functions · Tables · Views · Storage Credentials · External Locations — action + status + notes per object; `deleted_in_source` objects appear here as a trailing section |
 | **ABAC Policies** / **Column Masks & Row Filters** | Per-policy apply status (applied / failed) |
 | **Governed Tags Applied** | Per-tag apply status (or `— (no tag op this run)`) |
+| **Grants** | Status **per grant**: `APPLIED` · `APPLIED (ownership transferred)` · `NO-OP (unchanged since last run)` · `SKIPPED (unchanged \| apply_grants off \| metastore-scoped, out of scope \| run-as principal — never re-granted \| object not created — manual step \| not selected)` · `NOT APPLIED (owner kept as run principal: …)` · `FAILED (…)`. A grant removed on source reads `Removed in source (not revoked)` |
+| **Volume Data Copy** | Per-file copy outcome (`copy_volume_data=true`, live runs only): copied / skipped-unchanged / skipped-too-large / failed, incl. one `FAILED` row per folder that couldn't be listed |
 | **Outstanding** | **Cumulative** failures from `uc_sync_state` (`last_action = failed`) across all runs — the authoritative "still broken" view |
 
 `last_action` vocabulary: `created` · `updated` · `adopted` · `skipped` (incl.

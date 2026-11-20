@@ -77,6 +77,14 @@ class PackageImportResult:
     # in uc_sync_state and the next run re-applies grants even when ddl/governance are
     # clean+unchanged (the external-object-created-later replay gap).
     grants_status: str = ""
+    # Why grants were not replayed when grants_status == "skipped" (report-only text,
+    # v1.2.2 Grants sheet): e.g. "apply_grants off", "metastore-scoped (out of scope)".
+    grants_note: str = ""
+    # Outcome of the deferred ``ALTER … OWNER TO`` for this object (v1.2.2 Grants
+    # sheet OWNER rows): "transferred" / "kept" (owner kept as the run principal) /
+    # "" (no transfer queued this run). ``owner_note`` carries the short reason.
+    owner_status: str = ""
+    owner_note: str = ""
     delta_action: str = ""
     # A non-destructive change detected but deliberately NOT applied (e.g. a column
     # type change on an existing table) that rides ALONGSIDE an applied change. The
@@ -845,6 +853,9 @@ class PackageImportEngine:
         # building children and applying governance. Each entry is
         # (object_type, target_full_name, statement).
         self._deferred_owner: list[tuple[str, str, str]] = []
+        # (object_type, target_full_name) -> ("transferred" | "kept", reason), stamped
+        # onto each object's result after the ownership phase (v1.2.2 Grants sheet).
+        self._owner_outcome: dict[tuple[str, str], tuple[str, str]] = {}
         self._ownership_transferred = 0
         self._ownership_skipped = 0
         # Explicit per-object target locations (schema MANAGED LOCATION / external
@@ -1101,12 +1112,16 @@ class PackageImportEngine:
         # Build the incremental delta plan from the CURRENT bundle inventory vs. the
         # prior-run baseline. Auto-detected: a baseline present → incremental; else
         # full + seed. Unchanged objects are then skipped entirely.
+        # Existing-catalog auto-detection runs FIRST: it can force create toggles OFF,
+        # and the delta plan needs this run's EFFECTIVE toggles to re-attempt objects
+        # a prior run skipped with create disabled (v1.2.2).
+        self._maybe_enter_existing_catalog_mode()
         self.delta_plan = DeltaPlan(
             self._load_inventory_rows(), self.prior_state,
             migrate_materialized_views=self.migrate_materialized_views,
             in_run_scope=self._in_table_filter,
+            create_enabled=self._create_enabled,
         )
-        self._maybe_enter_existing_catalog_mode()
         by_target = {
             str(row.get("target_full_name") or ""): row
             for row in inventory.values()
@@ -1294,6 +1309,7 @@ class PackageImportEngine:
         # governance is applied, so the run principal never loses privileges it
         # still needs mid-run.
         self._apply_deferred_ownership()
+        self._stamp_owner_outcomes(results)
 
         # Phase 8 — self-heal state for objects a newer tool version now classifies
         # report-only but an OLDER version had migrated (change a). Corrects the stale
@@ -1658,13 +1674,15 @@ class PackageImportEngine:
                         "create disabled for this type; grants + ownership skipped "
                         "(metastore-scoped, out of catalog-scoped scope)"
                     )
+                    if grants_path.exists() and not self.dry_run:
+                        result.grants_status = "skipped"
+                        result.grants_note = "metastore-scoped, out of scope"
                 elif not self.dry_run:
                     grant_warning = self._apply_grants_file(
                         grants_path, object_type, target_full_name,
                         executor=executor,
                     )
-                    if self.apply_grants and grants_path.exists():
-                        result.grants_status = "failed" if grant_warning else "applied"
+                    self._record_grants_outcome(result, grants_path, grant_warning)
                     result.message = (
                         "create disabled by toggle; assumed pre-existing"
                         + (f"; grant warning: {grant_warning}" if grant_warning else "")
@@ -1746,10 +1764,9 @@ class PackageImportEngine:
                     raise RuntimeError(
                         f"object missing after create: {grant_warning}"
                     )
-                if self.apply_grants and grants_path.exists():
-                    # Per-facet grant status (backlog item 8): a raised GRANT → failed, so
-                    # grants replay next run even if the object is otherwise clean.
-                    result.grants_status = "failed" if grant_warning else "applied"
+                # Per-facet grant status (backlog item 8): a raised GRANT → failed, so
+                # grants replay next run even if the object is otherwise clean.
+                self._record_grants_outcome(result, grants_path, grant_warning)
                 if grant_warning:
                     result.message = f"created; grant warning: {grant_warning}"
                 result.status = "SUCCESS"
@@ -1779,6 +1796,7 @@ class PackageImportEngine:
                 grant_warning = self._apply_grants_file(
                     grants_path, object_type, target_full_name, executor=executor
                 )
+                self._record_grants_outcome(result, grants_path, grant_warning)
                 result.status = "SUCCESS"
                 result.action = "SKIP_EXISTING"
                 result.error_code = ""
@@ -2624,6 +2642,22 @@ class PackageImportEngine:
             results.append(result)
         return results
 
+    def _record_grants_outcome(
+        self, result: PackageImportResult, grants_path: Path, grant_warning: str
+    ) -> None:
+        """Stamp the per-facet grants outcome on ``result`` after a grants replay.
+
+        ``applied`` / ``failed`` when the grants file ran; ``skipped`` (+ note) when it
+        exists but ``apply_grants`` is off — so the Grants sheet never reads APPLIED
+        for a grant the run did not issue (v1.2.2). No grants file → left blank."""
+        if not grants_path.exists():
+            return
+        if not self.apply_grants:
+            result.grants_status = "skipped"
+            result.grants_note = "apply_grants off"
+            return
+        result.grants_status = "failed" if grant_warning else "applied"
+
     def _apply_grants_file(
         self,
         grants_path: Path,
@@ -2682,9 +2716,13 @@ class PackageImportEngine:
             try:
                 self.sql.execute(statement)
                 self._ownership_transferred += 1
+                self._owner_outcome[(_object_type, _target)] = ("transferred", "")
                 log.info("    %-14s %s -> owner transferred", _object_type, _target)
             except Exception as exc:  # noqa: BLE001
                 self._ownership_skipped += 1
+                self._owner_outcome[(_object_type, _target)] = (
+                    "kept", _short_reason(str(exc)),
+                )
                 # Object + short reason at WARNING (the full ALTER + full error go to
                 # DEBUG via the SQL logger and the line below) — a missing source owner
                 # is expected in a region move, so keep it terse.
@@ -2696,6 +2734,18 @@ class PackageImportEngine:
             "(owner missing on target or not permitted).",
             self._ownership_transferred, self._ownership_skipped,
         )
+
+    def _stamp_owner_outcomes(self, results: list[PackageImportResult]) -> None:
+        """Copy each object's ownership-transfer outcome onto its own result (not onto
+        governed-tag / ABAC op results that share the target name)."""
+        if not self._owner_outcome:
+            return
+        for r in results:
+            if r.policies_path:
+                continue
+            outcome = self._owner_outcome.get((r.object_type, r.target_full_name))
+            if outcome:
+                r.owner_status, r.owner_note = outcome
 
     def _maybe_enter_existing_catalog_mode(self) -> None:
         """Existing-catalog (Mode B) auto-detection.

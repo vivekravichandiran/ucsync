@@ -578,3 +578,44 @@ def state_row_from_import(
         "last_error_raw": last_error_raw,
         "updated_at": now,
     }
+
+
+def state_rows_for_import(
+    result_dicts: Iterable[Mapping[str, Any]],
+    *,
+    dry_run: bool,
+    batch_id: str,
+    run_id: str,
+    ran_by: str,
+    utility_version: str,
+    connectivity_mode: str = "",
+) -> list[dict[str, Any]]:
+    """The ``uc_sync_state`` rows an import run persists (one per source OBJECT).
+
+    A **dry run writes nothing** (v1.2.2): a dry-run result carries the real source
+    fingerprints but nothing was applied on target, and its status reads as a clean
+    ``created``. Persisting it would make the next LIVE run see every object as
+    already present + unchanged and skip it ("Skipped (unchanged)", zero writes) —
+    the field bug where a dry run before a live run left the target empty.
+
+    Rows excluded on a live run too:
+
+    * governed-tag ALTER ops — attributes of an object already counted (its
+      table/catalog/schema), not objects; they would collide on the per-object MERGE
+      key and clobber its fingerprints. ABAC policies ARE objects (own row), so only
+      tag ops are dropped (``policies_path`` set AND type != ABAC_POLICY);
+    * COLUMN results (a schema-evolution ADD COLUMN) — attributes of a table already
+      counted; persisting them leaves orphan rows that read "deleted in source".
+    """
+    if dry_run:
+        return []
+    return [
+        state_row_from_import(
+            batch_id=batch_id, run_id=run_id, result=rd,
+            ran_by=ran_by, utility_version=utility_version,
+            connectivity_mode=connectivity_mode,
+        )
+        for rd in result_dicts
+        if rd.get("object_type") != "COLUMN"
+        and not (rd.get("policies_path") and rd.get("object_type") != "ABAC_POLICY")
+    ]

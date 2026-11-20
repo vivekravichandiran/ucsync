@@ -114,8 +114,13 @@ class DeltaPlan:
         *,
         migrate_materialized_views: bool = False,
         in_run_scope: Optional[Callable[[str, str], bool]] = None,
+        create_enabled: Optional[Callable[[str], bool]] = None,
     ):
         self.baseline = dict(baseline or {})
+        # This run's EFFECTIVE create_* toggle per object type (after existing-catalog
+        # auto-detection). Used to re-attempt an object a prior run recorded
+        # skipped_create_disabled once its create toggle is now ON (v1.2.2).
+        self._create_enabled = create_enabled
         self.incremental = bool(self.baseline)
         self.migrate_materialized_views = bool(migrate_materialized_views)
         self._by_name: dict[str, ObjectDelta] = {}
@@ -194,6 +199,29 @@ class DeltaPlan:
                 ),
                 grants_added=cur_grants,
                 reason=f"prior run action={prior_action} → re-attempt (not skipped)",
+            )
+        if (
+            prior_action == vocab.SKIPPED_CREATE_DISABLED
+            and self._create_enabled is not None
+            and self._create_enabled(object_type)
+        ):
+            # The prior run did NOT create this object because its create toggle was
+            # OFF; "skipped_create_disabled" is a clean action, so an unchanged source
+            # would otherwise be skipped forever — even after the operator turns the
+            # toggle ON (field bug: schemas never created → every table failed
+            # SCHEMA_NOT_FOUND). Re-attempt it: CREATE … IF NOT EXISTS creates it when
+            # missing and adopts it when present, after which it is recorded
+            # created/adopted and incremental skipping resumes normally.
+            return ObjectDelta(
+                full_name, object_type, CREATED_NEW,
+                governance_changed=bool(
+                    cur_gov and cur_gov != governance_fingerprint({})
+                ),
+                grants_added=cur_grants,
+                reason=(
+                    "prior run skipped it (create disabled); create now enabled → "
+                    "re-attempt"
+                ),
             )
         prior_grants = dict(prior.get("grants") or {})
         grants_added = {
@@ -300,6 +328,7 @@ class DeltaPlan:
                     "action": GRANT_ADDED,
                     "object_type": delta.object_type,
                     "object": delta.full_name,
+                    "principal": principal,
                     "detail": f"{principal}: {', '.join(privs)}",
                 })
             for principal, privs in delta.grants_removed.items():
