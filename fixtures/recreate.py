@@ -47,6 +47,8 @@ TC_SQL_STAGES = {
     "tc_volume_paths": ["72_testcat_volume_paths.sql"],
     # NOT in TC_ORDER — apply only AFTER a baseline migration, then re-migrate
     "tc_incremental": ["68_testcat_incremental.sql"],
+    # NOT in TC_ORDER — v1.2.2 incremental seed (one change of every delta kind; .sh = files)
+    "tc_incremental_v122": ["73_testcat_incremental_v122.sql"],
 }
 # Target-run SQL stages (BYO shell — execute on the TARGET ws/warehouse)
 TC_SQL_STAGES_TGT = {
@@ -221,6 +223,9 @@ def main():
         elif stage == "tc_volume_paths":
             rc += run_sql_stage(TC_SQL_STAGES["tc_volume_paths"], cfg, args.dry_run)
             rc += run_script("72_testcat_volume_paths.sh", [], cfg, args.dry_run)
+        elif stage == "tc_incremental_v122":
+            rc += run_sql_stage(TC_SQL_STAGES["tc_incremental_v122"], cfg, args.dry_run)
+            rc += run_script("73_testcat_incremental_v122.sh", [], cfg, args.dry_run)
         elif stage == "tc_abac_proc":
             # v1.2.1: catalog ABAC with hyphenated MATCH COLUMNS aliases + SQL procedures
             rc += run_py_stage("71_testcat_abac_proc.py", cfg, args.dry_run)

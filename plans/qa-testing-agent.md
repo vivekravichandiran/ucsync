@@ -49,9 +49,9 @@ you may:
   grant each the minimal permissions from `uc-sync-spn-permissions.md` / `docs/PERMISSIONS_GUIDE.md`:
   - **source read SPN:** `USE CATALOG`/`USE SCHEMA`/`SELECT`/`EXECUTE`/`READ VOLUME` + `MANAGE` on the
     source catalog, **`SELECT` on the `system` schema** (required for tag/ABAC `information_schema`
-    reads — Item 5), and `CAN USE` on the source SQL warehouse.
+    reads — see docs/PERMISSIONS_GUIDE.md), and `CAN USE` on the source SQL warehouse.
   - **target run SPN:** `ALL PRIVILEGES` + `MANAGE` + `APPLY TAG` on the target catalog, **`ASSIGN` on
-    the governed tags** (Item 5 — tags created by another principal need this), `CREATE EXTERNAL
+    the governed tags** (tags created by another principal need this — docs/PERMISSIONS_GUIDE.md), `CREATE EXTERNAL
     TABLE`/`CREATE EXTERNAL VOLUME` on the external location, rights on the ops schema, and `CAN USE`
     on the import SQL warehouse.
 - **Create their OAuth/client secrets and store them in a Databricks secret scope**; reference them via
@@ -78,7 +78,7 @@ you may:
 
 ### What to test (scenario coverage)
 Exercise the full DDL × governance matrix and the permissions/capture paths defined in
-`plans/backlog.md` **Item 8** (matrix rows #1–#10) and **Item 5** (SPN `system` access; governed-tag
+`plans/backlog.md` **Testing strategy → Scenario coverage** (DDL × governance rows #1–#10) and the permission paths (SPN `system` access; governed-tag
 `ASSIGN`). Source fixtures must include: fresh + pre-existing + create-disabled objects; governed tags
 + at least one ABAC policy (function referenced by the policy, not per-table masks); an object that
 fails DDL (e.g. external table with no external location, row #9); and the governance-failure cases
